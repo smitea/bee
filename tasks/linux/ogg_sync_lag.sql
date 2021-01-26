@@ -1,1 +1,0 @@
-SELECT *FROM shell("echo 'info all'|$OGG_HOME/ggsci|grep 'EXTRACT\|REPLICAT'", 5)

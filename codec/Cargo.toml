@@ -1,15 +1,9 @@
 [package]
-name = "bee-codec"
+name = "codec"
 version = "0.1.0"
 authors = ["xiao.huang@enmotech.com <xiao.huang@enmotech.com>"]
 edition = "2018"
 
-[dependencies]
-bee-core            = {version = "0.1.0", path = "../corelib"}
-bee-codegen         = {version = "0.1.0", path = "../codegen"}
-bytes               = {version = "*"}
-tokio-util          = {version = "*", features = ["codec"]}
-log                 = {version = "*"}
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
-[dev-dependencies]
-env_logger = "*"
+[dependencies]

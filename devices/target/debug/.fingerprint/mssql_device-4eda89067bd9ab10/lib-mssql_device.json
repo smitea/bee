@@ -1,0 +1,1 @@
+{"rustc":3921743440450493881,"features":"[]","target":15918395332427137197,"profile":18074012566298724745,"path":8017266171298664167,"deps":[],"local":[{"CheckDepInfo":{"dep_info":"debug/.fingerprint/mssql_device-4eda89067bd9ab10/dep-lib-mssql_device"}}],"rustflags":["-C","link-arg=-undefined","-C","link-arg=dynamic_lookup"],"metadata":1314384030390558543,"config":0}

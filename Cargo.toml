@@ -1,14 +1,16 @@
 [workspace]
 members = [
+    "app", 
+    "codec", 
+    "coregen", 
     "corelib",
-    "codegen",
-    "codec",
-
-    "client",
-    "server",
+    
+    "devices/influxdb_device", 
+    "devices/mssql_device", 
+    "devices/mysql_device", 
+    "devices/oracle_device", 
+    "devices/postgresql_device", 
+    "devices/http_device", 
+    "devices/riemann_device",
+    "devices/ssh_device",
 ]
-
-[profile.release]
-opt-level = 'z'
-lto = true
-codegen-units = 1

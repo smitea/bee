@@ -1,41 +1,9 @@
 [package]
-name = "bee-core"
+name = "corelib"
 version = "0.1.0"
 authors = ["xiao.huang@enmotech.com <xiao.huang@enmotech.com>"]
 edition = "2018"
 
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
 [dependencies]
-url                 = {version = "*"}
-percent-encoding    = {version = "*"}
-parking_lot         = {version = "0.11"}
-async-std           = {version = "1.6.3"}
-log                 = {version = "*"}
-state               = {version = "0.4"}
-bincode             = {version = "*"}
-bee-codegen         = {version = "0.1.0", path = "../codegen"}
-
-heim                = {optional = true, git = "https://github.com/sMitea/heim.git", features = ["host","memory","cpu","disk","runtime-async-std"]}
-timeout-readwrite   = {optional = true, git = "https://github.com/jcreekmore/timeout-readwrite-rs.git", branch = "test-windows"}
-humantime           = {optional = true, version = "*"}
-num_cpus            = {optional = true, version = "*"}
-libc                = {optional = true, version = "0.2"}
-
-rlua                = {optional = true, version = "*"}
-rusqlite            = {optional = true, version = "0.24.0", features = ["blob","vtab","functions","column_decltype","bundled"]}
-
-[target.'cfg(unix)'.dependencies]
-ssh                 = {optional = true, git = "https://github.com/sMitea/ssh.git"}
-
-[features]
-default     = [
-    "agent",
-    "sqlite",
-]
-
-remote      =   ["ssh","libc"]
-agent       =   ["heim","humantime","num_cpus","timeout-readwrite"]
-sqlite      =   ["rusqlite"]
-lua         =   ["rlua"]
-
-[dev-dependencies]
-env_logger = "*"

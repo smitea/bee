@@ -1,0 +1,1 @@
+{"rustc":3921743440450493881,"features":"[]","target":10542043723098027570,"profile":18074012566298724745,"path":3937939529778479858,"deps":[],"local":[{"CheckDepInfo":{"dep_info":"debug/.fingerprint/influxdb_device-d94bf58e86ba3833/dep-lib-influxdb_device"}}],"rustflags":["-C","link-arg=-undefined","-C","link-arg=dynamic_lookup"],"metadata":1314384030390558543,"config":0}
