@@ -1,18 +1,18 @@
-use bee_runtime::{AdapterRef, Dag, Handler, PassthroughHandler, Phase, RuntimeError};
+use bee_runtime::{AdapterRef, Dag, DynPhase, Handler, PassthroughHandler, Phase, RuntimeError};
 
 #[tokio::test]
 async fn one_phase_passthrough_returns_input_unchanged() {
     let mut phase = Phase::new(0, "p1", PassthroughHandler);
     let input: Vec<u8> = vec![1, 2, 3, 4, 5];
     let output = phase.run(input.clone()).await.expect("passthrough should succeed");
-    assert_eq!(output, input);
+    assert_eq!(output, Some(input));
 }
 
 #[test]
 fn dag_vertices_returns_added_phases() {
-    let mut dag = Dag::<PassthroughHandler>::new();
-    dag.add_phase(Phase::new(0, "a", PassthroughHandler));
-    dag.add_phase(Phase::new(1, "b", PassthroughHandler));
+    let mut dag = Dag::new();
+    dag.add_phase(DynPhase::new(0, "a", PassthroughHandler));
+    dag.add_phase(DynPhase::new(1, "b", PassthroughHandler));
     assert_eq!(dag.vertices().len(), 2);
     assert_eq!(dag.vertices()[0].id, 0);
     assert_eq!(dag.vertices()[0].name, "a");
@@ -22,9 +22,9 @@ fn dag_vertices_returns_added_phases() {
 
 #[test]
 fn dag_edges_returns_added_edges_in_order() {
-    let mut dag = Dag::<PassthroughHandler>::new();
-    dag.add_phase(Phase::new(0, "a", PassthroughHandler));
-    dag.add_phase(Phase::new(1, "b", PassthroughHandler));
+    let mut dag = Dag::new();
+    dag.add_phase(DynPhase::new(0, "a", PassthroughHandler));
+    dag.add_phase(DynPhase::new(1, "b", PassthroughHandler));
     dag.add_edge(0, 1);
     dag.add_edge(1, 1);
     assert_eq!(dag.edges(), &[(0, 1), (1, 1)]);
@@ -51,14 +51,17 @@ async fn handler_can_return_typed_output_via_associated_types() {
     impl Handler for DoubleHandler {
         type Input = i64;
         type Output = i64;
-        async fn handle(&mut self, input: i64) -> Result<i64, RuntimeError> {
-            Ok(input * 2)
+        fn handle(
+            &mut self,
+            input: i64,
+        ) -> impl std::future::Future<Output = Result<Option<i64>, RuntimeError>> + Send {
+            async move { Ok(Some(input * 2)) }
         }
-        async fn finish(self) -> Result<(), RuntimeError> {
-            Ok(())
+        fn finish(self) -> impl std::future::Future<Output = Result<(), RuntimeError>> + Send {
+            async move { Ok(()) }
         }
     }
     let mut phase = Phase::new(0, "double", DoubleHandler);
     let out = phase.run(21).await.unwrap();
-    assert_eq!(out, 42);
+    assert_eq!(out, Some(42));
 }
