@@ -18,5 +18,11 @@ rust-version = "1.75"
 license = "Apache-2.0"
 publish = false
 
+[workspace.dependencies]
+tokio = { version = "1", default-features = false, features = ["net", "io-util", "macros", "rt-multi-thread", "time"] }
+bytes = "1"
+bee-codec = { path = "crates/bee-codec" }
+bee-transport = { path = "crates/bee-transport" }
+
 [workspace.lints.rust]
 unsafe_code = "forbid"

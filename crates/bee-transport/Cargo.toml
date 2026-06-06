@@ -6,5 +6,10 @@ license.workspace = true
 publish.workspace = true
 description = "Bee BRP 传输层 (Layer 1): TCP framing, connection lifecycle"
 
+[dependencies]
+tokio = { workspace = true }
+bytes = { workspace = true }
+bee-codec = { workspace = true }
+
 [lints]
 workspace = true
