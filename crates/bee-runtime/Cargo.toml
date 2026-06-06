@@ -1,0 +1,10 @@
+[package]
+name = "bee-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Bee 应用层: Pipeline / Phase / Handler / Dag / Compiler (数据面执行单元)"
+
+[lints]
+workspace = true

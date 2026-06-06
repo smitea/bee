@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/bee-transport",
+    "crates/bee-codec",
+    "crates/bee-session",
+    "crates/bee-runtime",
+    "crates/bee-control",
+    "crates/bee-registry",
+    "crates/bee-dsl-sql",
+    "bee",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "Apache-2.0"
+publish = false
+
+[workspace.lints.rust]
+unsafe_code = "forbid"

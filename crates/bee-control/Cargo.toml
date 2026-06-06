@@ -1,0 +1,10 @@
+[package]
+name = "bee-control"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Bee 控制面: Raft 客户端 + 调度器 + Work-Stealing 仲裁 (Raft 集群仲裁的所有权变更)"
+
+[lints]
+workspace = true

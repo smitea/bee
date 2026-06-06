@@ -1,0 +1,10 @@
+[package]
+name = "bee-codec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Bee BRP 编解码层 (Layer 2): 15-byte header + bincode body, Frame / MessageType"
+
+[lints]
+workspace = true

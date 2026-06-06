@@ -1,0 +1,10 @@
+[package]
+name = "bee-registry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Bee 注册中心: Plugin 加载 / 校验 / 网络同步 / 路由表广播"
+
+[lints]
+workspace = true
