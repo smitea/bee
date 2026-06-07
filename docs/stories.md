@@ -1,7 +1,7 @@
 # Bee Implementation Stories
 
 > **Status**: Active implementation backlog
-> **Source**: distilled from [CONTEXT.md](../CONTEXT.md), [docs/architecture.md](./architecture.md), [docs/product-design.md](./product-design.md), and [docs/adr/](./adr/) (9 ADRs).
+> **Source**: distilled from [CONTEXT.md](../CONTEXT.md), [docs/architecture.md](./architecture.md), [docs/internals.md](./internals.md), [docs/product-design.md](./product-design.md), and [docs/adr/](./adr/) (10 ADRs).
 > **Granularity**: 32 vertical slices (tracer bullets), each end-to-end demoable.
 > **Conventions**: all stories are AFK (no human-in-the-loop required); HITL can be added per story by setting `Type: HITL` and noting the review milestone.
 
@@ -62,22 +62,22 @@ Once **S10 (Scheduler bin-packing)** is done, the work forks into 7 paths that c
 | Path | Stories | Theme |
 | --- | --- | --- |
 | **A. Failover** | S11 → S12 | Heartbeat + Work-Stealing + Checkpoint recovery |
-| **B. SQL + 性能** | S13 → S14 → S15 → S26 | DataFusion 集成 + 毫秒级微批 / per-event / Hint |
-| **C. SQL + Datasource + 跨 Pipeline** | S16 → S17, S18 | 限流共享 (Producer Pipeline) + 跨 Pipeline 边 |
-| **D. Plugin 系统** | S19 → S20 → S21 | Rust 插件 + ABI 严格检查 + 多版本 + 版本范围 |
-| **E. 自适应调度** | S22 → S23 → S24 → S25 | MLFQ + 4 个备选调度策略 + 跨 Node 再平衡 |
-| **F. 可观测性** | S27 → S28 | CLI 面板 (jobs / inspect / diagnostics / cluster status) |
-| **G. Datasource 管理 (ADR-0010)** | S29 → S30, S31 | `use` 语法 + Datasource Registry + secret store + 健康/挂起 |
+| **B. SQL + performance** | S13 → S14 → S15 → S26 | DataFusion integration + ms-level micro-batch / per-event / Hint |
+| **C. SQL + Datasource + cross-Pipeline** | S16 → S17, S18 | Rate-limit sharing (Producer Pipeline) + cross-Pipeline edges |
+| **D. Plugin system** | S19 → S20 → S21 | Rust plugins + strict ABI check + multi-version + version ranges |
+| **E. Adaptive scheduling** | S22 → S23 → S24 → S25 | MLFQ + 4 alternative policies + cross-Node rebalancing |
+| **F. Observability** | S27 → S28 | CLI panel (jobs / inspect / diagnostics / cluster status) |
+| **G. Datasource management (ADR-0010)** | S29 → S30, S31 | `use` syntax + Datasource Registry + secret store + health / pause |
 
 ## Key milestones
 
-- **S07**: 3 节点 Raft 集群能拉起，控制面 SM 写入可见
-- **S10**: 第一个**端到端 demoable**——3 节点 Bee 跑一个硬编码多 Phase Pipeline
-- **S12**: **Failover 完整闭环**——杀节点、Task Orphaned、自动 Work-Stealing 恢复
-- **S17**: **量化场景 A 完整跑通**——用 `mock_input` 测试 fixture + 多 Pipeline 共享 1 个 Producer（验证机制；真实业务 Datasource 如 binance 是第三方插件，不在 Bee 核心）
-- **S25**: **0.7 路线图核心**——运行时自适应调度
-- **S28**: **0.x → 1.0 生产化就绪**（CLI 可观测 + 调度 + 故障可诊断）
-- **S29–S31**: **Datasource 管理**——`use` 语法 + secret store + 挂起/恢复 (admin 可视化管理)
+- **S07**: 3-node Raft cluster; control plane SM visible
+- **S10**: first **end-to-end demoable** — 3-node Bee running a hardcoded multi-Phase Pipeline
+- **S12**: **Failover complete loop** — kill a Node, see Task go Orphaned, auto-Work-Stealing recovers
+- **S17**: **Quant scenario A complete** — binance mock + multiple Pipelines sharing 1 Producer
+- **S25**: **0.7 roadmap core** — runtime adaptive scheduling
+- **S28**: **0.x → 1.0 production-ready** (CLI observability + scheduling + diagnostic)
+- **S29–S31**: **Datasource management** — `use` syntax + secret store + pause/resume (admin governance)
 
 ---
 
@@ -94,11 +94,11 @@ Once **S10 (Scheduler bin-packing)** is done, the work forks into 7 paths that c
 - **ADRs**: none (foundation)
 
 **What to build**
-Initialize a Rust workspace at the repo root with the 8 crates defined in [docs/architecture.md 附录](./architecture.md#附录crate-边界草案):
+Initialize a Rust workspace at the repo root with the 8 crates defined in [docs/architecture.md §2 Crate structure](./internals.md#2-crate-structure):
 
 ```
-bee-transport   bee-codec      bee-session   bee-runtime
-bee-control     bee-registry   bee-dsl-sql   (binary: bee)
+crates/bee-transport   crates/bee-codec      crates/bee-session   crates/bee-runtime
+crates/bee-control     crates/bee-registry   crates/bee-dsl-sql   (binary: bin/bee)
 ```
 
 Each crate has a minimal `lib.rs` (or `main.rs` for `bee`) with a placeholder type, plus `Cargo.toml` declaring its dependencies. The `bee` binary prints `bee <version>` and exits.
@@ -106,7 +106,7 @@ Each crate has a minimal `lib.rs` (or `main.rs` for `bee`) with a placeholder ty
 **Acceptance criteria**
 - [ ] `cargo build --workspace` succeeds
 - [ ] `cargo run -p bee -- --version` prints `bee 0.1.0` (or similar)
-- [ ] `cargo test --workspace` runs (no tests, but the harness works)
+- [ ] `cargo test --workspace` runs (no tests yet, but the harness works)
 - [ ] `git init` + first commit captured
 - [ ] `.gitignore` excludes `target/`, `Cargo.lock` for binaries (include for libraries)
 
@@ -144,7 +144,7 @@ In `bee-transport`:
 - `Listener::bind(addr) -> Result<Listener>` using `tokio::net::TcpListener`
 - `Listener::accept() -> Stream<Connection>` (one per incoming TCP connection)
 - `Connection::send_frame(&Frame) -> Result<()>` and `Connection::recv_frame() -> Result<Frame>` using `tokio::io::AsyncReadExt` / `AsyncWriteExt` with `BytesMut` for buffering
-- A `Framed` wrapper that handles partial reads / writes (TCP 粘包/半包)
+- A `Framed` wrapper that handles partial reads / writes (TCP framing)
 
 In `bee` binary:
 - `bee echo <addr>` subcommand: connects to `<addr>`, sends a Heartbeat Frame, reads back the echoed Frame, prints "ok" or the echoed body, exits
@@ -277,10 +277,10 @@ Choose a Raft library (recommendation: `openraft` 0.x or `raft-rs`). In a new `b
 **What to build**
 In `bee-control`, add a second logical state machine on the same Raft group:
 - `ControlPlaneStateMachine` with commands:
-  - `RegisterJob { job_id, dag_hash, owner_node }`
+  - `RegisterJob { job_id, dag_hash, owner_node, tenant }`
   - `RegisterTask { task_id, job_id, phase_id, owner_node, status }`
   - `UpdateTaskStatus { task_id, new_status: TaskStatus }`
-- `TaskStatus` enum: `Pending | Scheduled | Running | Orphaned | Migrating | Revoked | Completed | Failed` (per [architecture.md §4.2](./architecture.md#42-phase-assignmenttask))
+- `TaskStatus` enum: `Pending | Scheduled | Running | Orphaned | Migrating | Revoked | Completed | Failed` (per [architecture.md §5.3](./architecture.md#53-lifecycle-states))
 - `bee jobs list` CLI subcommand: reads from any Raft node, returns all `RegisterJob` entries
 
 **Acceptance criteria**
@@ -471,25 +471,23 @@ In `bee-dsl-sql`:
 
 - **Type**: AFK
 - **Blocked by**: S16
-- **ADRs**: [0003](./adr/0003-producer-pipeline-pattern.md), [0004](./adr/0004-bee-kv-cluster.md)
+- **ADRs**: [0003](./adr/0003-producer-pipeline-pattern.md), [0004](./adr/0004-bee-kv-cluster.md), [0010](./adr/0010-datasource-managed-entity.md)
 
 **What to build**
-- `DatasourceSignature = sha256(adapter_id || config_payload)` — computed at compile time
-- During deploy, control plane checks the KV: is there a Job with this signature?
-  - **No**: this Job's Datasource Phase is marked as a "Producer" (becomes a single-Phase Pipeline Job that runs the Adapter)
-  - **Yes**: this Job's Datasource Phase is "degraded" into a subscriber edge pointing to the existing Producer
+- `DatasourceSignature` (Provider-level): `sha256(adapter_id + config_payload)` (per ADR-0003) — used to identify if a Provider already exists
+- `StreamSignature` (Stream-level): `sha256(datasource_name || adapter_method || canonicalized_call_args)` (per ADR-0010 refinement) — used to identify if a Stream already exists
+- During deploy, control plane checks the KV: is there a Job with this StreamSignature?
+  - **No**: this Job's "Stream-producing Phase" is marked as a "Producer" (becomes a single-Phase Pipeline Job that runs the Adapter)
+  - **Yes**: this Job's "Stream-consuming Phases" are "degraded" into subscriber edges pointing to the existing Producer
 - Subscribers consume the Producer's stream over BRP (S09 cross-Node machinery, or in-process if same Node)
-- KV state key: `state/producer/{signature} -> JobId`
+- KV state key: `state/producer/{stream_signature} -> JobId`
 
 **Acceptance criteria**
 - [ ] Integration test: deploy Job A with `binance.subscribe('BTC/USDT', '5min')` — creates Producer
-- [ ] Integration test: deploy Job B with same Datasource — does NOT create a second Adapter instance; instead subscribes to Job A's Producer
+- [ ] Integration test: deploy Job B with same StreamSignature — does NOT create a second Adapter instance; instead subscribes to Job A's Producer
 - [ ] `bee jobs list` shows Job A as a Producer (one Phase, the Datasource), Job B as a Subscriber (no Datasource Phase, just a subscription edge)
 - [ ] Kill Job A's Node: subscribers enter `Waiting for Upstream`; on Producer re-deploy, they reconnect
-
----
-
-## Phase 0.8 — Cross-Pipeline edges
+- [ ] Different args create different Producers: `binance.subscribe('ETH/USDT', '5min')` gets its own Producer (different StreamSignature), even though the Provider config is the same
 
 ---
 
@@ -560,7 +558,7 @@ In `bee-dsl-sql`:
 
 - **Type**: AFK
 - **Blocked by**: S20
-- **ADRs**: [0009](./adr/0009-plugin-multiversion-hash-abi.md)
+- **ADRs**: [0009](./adr/0009-plugin-multiversion-hash-abi.md), [0010](./adr/0010-datasource-managed-entity.md)
 
 **What to build**
 - Multiple `.so` files for the same logical Plugin (same `name` in Manifest, different `version`, different `sha256`) load simultaneously
@@ -568,6 +566,7 @@ In `bee-dsl-sql`:
 - Pipeline references Plugin with SemVer range syntax: `binance:1.0` (exact) / `binance:^1.0` (1.x compatible) / `binance:latest`
 - At Pipeline submit time, the compiler resolves the range to a specific `PluginId`; the resolution result is part of the Job's spec
 - If no matching plugin is available, Pipeline submit fails with a clear error
+- For Datasource-managed Plugin references: `use binance;` defaults to the Datasource's configured `version_spec`; `use binance@1.4.2;` overrides
 
 **Acceptance criteria**
 - [ ] Integration test: 2 versions of `binance` (1.4.2 and 2.0.0) both loaded; 2 Pipelines each referencing one version; both run independently
@@ -738,35 +737,6 @@ In `bee-dsl-sql`:
 
 ---
 
-# Conventions
-
-## Story format
-
-- **Type**: `AFK` (can be implemented and merged without human interaction) or `HITL` (requires human design review)
-- **Blocked by**: explicit list of story numbers; "None" if no blockers
-- **ADRs**: relevant ADRs to read before implementing (e.g., for wire format, lifecycle semantics)
-- **Acceptance criteria**: verifiable checklist items; the story is "done" when all are checked
-
-## Lifecycle
-
-- `pending` → `in_progress` → `done` (or `blocked` / `cancelled`)
-- A story is `done` only when all acceptance criteria are checked AND any defined tests pass
-- After `done`, the next downstream stories are unblocked
-
-## Parallelism
-
-- Stories on the same level (no shared dependency) can be done in parallel by different agents
-- For 6-way parallelism, dispatch agents on the 6 paths after S10
-- Each agent should commit to its own worktree (per `using-git-worktrees` skill) to avoid conflicts
-
-## ADR conventions
-
-- Numbered sequentially (`0001`, `0002`, ...); next available is `0011`
-- When a decision is reversed, write a new ADR that supersedes; do not modify accepted ADRs
-- Update `docs/adr/README.md` index when adding a new ADR
-
----
-
 ## Phase 0.5 / 0.6 — Datasource management (ADR-0010)
 
 ---
@@ -872,3 +842,32 @@ Datasource-level observability and lifecycle:
 - [ ] `bee datasource pause binance` and `bee datasource resume binance` work end-to-end
 - [ ] Subscribers cleanly `Draining` during pause; cleanly reconnect on resume
 - [ ] Pause/resume does not lose events (either buffered or backpressured)
+
+---
+
+# Conventions
+
+## Story format
+
+- **Type**: `AFK` (can be implemented and merged without human interaction) or `HITL` (requires human design review)
+- **Blocked by**: explicit list of story numbers; "None" if no blockers
+- **ADRs**: relevant ADRs to read before implementing (e.g., for wire format, lifecycle semantics)
+- **Acceptance criteria**: verifiable checklist items; the story is "done" when all are checked
+
+## Lifecycle
+
+- `pending` → `in_progress` → `done` (or `blocked` / `cancelled`)
+- A story is `done` only when all acceptance criteria are checked AND any defined tests pass
+- After `done`, the next downstream stories are unblocked
+
+## Parallelism
+
+- Stories on the same level (no shared dependency) can be done in parallel by different agents
+- For 7-way parallelism, dispatch agents on the 7 paths after S10
+- Each agent should commit to its own worktree (per `using-git-worktrees` skill) to avoid conflicts
+
+## ADR conventions
+
+- Numbered sequentially (`0001`, `0002`, ...); next available is `0011`
+- When a decision is reversed, write a new ADR that supersedes; do not modify accepted ADRs
+- Update `docs/adr/README.md` index when adding a new ADR

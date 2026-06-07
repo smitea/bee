@@ -185,7 +185,15 @@ async fn run_pipeline_cli(
     // surfaces a clear error if a `<adapter>.method(...)` call
     // isn't preceded by a matching `use <adapter>;` directive.
     if strict {
-        let (_directives, stripped) = bee_dsl_sql::preprocess(&sql)
+        let (directives, stripped) = bee_dsl_sql::preprocess(&sql)
+            .map_err(|e| format!("strict-mode: {e}"))?;
+        // S29 redo: also reject inline credentials in call args
+        // and validate EMIT INTO targets. These run on the full
+        // SQL (including the use directives) — the preprocessor
+        // strips use lines internally.
+        bee_dsl_sql::preprocess::check_inline_credentials(&sql)
+            .map_err(|e| format!("strict-mode: {e}"))?;
+        bee_dsl_sql::preprocess::check_emit_into(&sql, &directives)
             .map_err(|e| format!("strict-mode: {e}"))?;
         sql = stripped;
     }
@@ -518,6 +526,12 @@ async fn run_datasource_cli(args: &[String]) -> Result<(), String> {
             let version_str = version
                 .ok_or_else(|| "datasource create requires --plugin-version".to_string())?;
             let config = config.unwrap_or_else(|| "{}".to_string());
+            // S29 redo: validate the config against per-call-arg
+            // rules before creating the Datasource.
+            let cfg_json: serde_json::Value = serde_json::from_str(&config)
+                .map_err(|e| format!("--config is not valid JSON: {e}"))?;
+            bee_dsl_sql::preprocess::validate_datasource_config(&cfg_json)
+                .map_err(|e| format!("datasource create: {e}"))?;
             let version_spec = bee_plugin_sdk::VersionSpec::parse(&version_str)
                 .map_err(|e| format!("invalid plugin-version: {e}"))?;
             let plugin_id = compute_plugin_id(format!("{adapter}@{version_str}").as_bytes());
@@ -532,10 +546,56 @@ async fn run_datasource_cli(args: &[String]) -> Result<(), String> {
             let name = args
                 .get(1)
                 .ok_or_else(|| "datasource pause requires <name>".to_string())?;
-            registry
+            // S29 redo: pause also triggers Draining on referencing
+            // Jobs. Print the Draining event so the operator can see
+            // which Jobs will be migrated.
+            let ev = registry
                 .pause(0, name)
                 .map_err(|e| format!("datasource pause: {e}"))?;
             println!("datasource {name} paused");
+            if let Some(ev) = ev {
+                println!(
+                    "  Draining triggered: {} referencing job(s) [{}]",
+                    ev.referencing_jobs.len(),
+                    ev.referencing_jobs
+                        .iter()
+                        .map(|j| j.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            } else {
+                println!("  (no referencing jobs — no Draining needed)");
+            }
+            Ok(())
+        }
+        Some("test") => {
+            // S29 redo: `bee datasource test <name>`. MVP: run a
+            // stub probe that validates the Datasource exists, the
+            // config is valid JSON, and (if a Plugin manifest is
+            // present) the Plugin's `test_connection` returns Ok.
+            // Production wires this through libloading.
+            let name = args
+                .get(1)
+                .ok_or_else(|| "datasource test requires <name>".to_string())?;
+            let ds = registry
+                .get(0, name)
+                .ok_or_else(|| format!("datasource `{name}` not found in tenant 0"))?;
+            println!("probing datasource `{name}`...");
+            println!("  adapter:    {}", ds.adapter);
+            println!("  plugin_id:  {}", ds.plugin_id);
+            println!("  version:    {}", ds.version_spec);
+            // Validate the stored config is still valid JSON + no
+            // per-call args. This catches drift after edits.
+            let cfg: serde_json::Value = serde_json::from_str(&ds.config)
+                .map_err(|e| format!("stored config is invalid JSON: {e}"))?;
+            bee_dsl_sql::preprocess::validate_datasource_config(&cfg)
+                .map_err(|e| format!("stored config rejected: {e}"))?;
+            // Record a successful probe (in production this is the
+            // result of the Plugin's test_connection call).
+            registry
+                .record_probe_success(0, name)
+                .map_err(|e| format!("probe: {e}"))?;
+            println!("  result:     ok (stub probe — production wires Plugin::test_connection)");
             Ok(())
         }
         Some("resume") => {
@@ -560,7 +620,7 @@ async fn run_datasource_cli(args: &[String]) -> Result<(), String> {
         }
         Some(other) => Err(format!("unknown datasource subcommand `{other}`")),
         None => Err(
-            "datasource requires a subcommand: list|inspect|create|pause|resume|delete"
+            "datasource requires a subcommand: list|inspect|create|pause|resume|delete|test"
                 .to_string(),
         ),
     }

@@ -74,7 +74,11 @@ pub struct Datasource {
     /// selects the Plugin. When the Pipeline uses
     /// `use <name>@<spec>;`, the pipeline's spec wins.
     pub version_spec: VersionSpec,
-    /// Adapter configuration (opaque JSON for MVP).
+    /// Adapter configuration (opaque JSON for MVP). Validated by
+    /// [`bee_dsl_sql::preprocess::validate_datasource_config`] on
+    /// create: keys like `symbol`, `interval`, `query` are
+    /// per-call args and belong at the call site, not in the
+    /// Datasource config.
     pub config: String,
     pub status: DatasourceStatus,
     /// Wall-clock millis. MVP uses SystemTime; production stamps
@@ -153,6 +157,23 @@ pub struct DatasourceRegistry {
     /// itself). Used by `inspect` and by the auto-pause Draining
     /// path to enumerate referencing Jobs.
     referencing_jobs: HashMap<(u16, String), HashSet<u32>>,
+    /// S29 redo: append-only log of Draining events triggered by
+    /// `pause`. The control plane consumes this to migrate
+    /// referencing Tasks. In production the events are Raft-
+    /// applied; in MVP they're in-memory. Each entry records the
+    /// Datasource, the list of referencing Jobs to drain, and the
+    /// timestamp.
+    draining_log: Vec<DrainingEvent>,
+}
+
+/// S29 redo: one Draining event. Triggered when a Datasource is
+/// paused; lists the Jobs whose Tasks must migrate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DrainingEvent {
+    pub tenant: u16,
+    pub datasource: String,
+    pub referencing_jobs: Vec<u32>,
+    pub triggered_at_ms: u64,
 }
 
 impl Default for DatasourceRegistry {
@@ -167,6 +188,7 @@ impl DatasourceRegistry {
             by_key: HashMap::new(),
             health: HashMap::new(),
             referencing_jobs: HashMap::new(),
+            draining_log: Vec::new(),
         }
     }
 
@@ -207,9 +229,70 @@ impl DatasourceRegistry {
     }
 
     /// Pause an Active Datasource. Errors if not found or not
-    /// Active.
-    pub fn pause(&mut self, tenant: u16, name: &str) -> DatasourceResult<()> {
-        self.set_status(tenant, name, DatasourceStatus::Paused, "active")
+    /// Active. S29 redo: also records a Draining event listing
+    /// all referencing Jobs, so the control plane can migrate
+    /// those Tasks. The event is appended to `draining_log` and
+    /// also returned via [`Self::take_draining_events`] for the
+    /// caller to dispatch.
+    pub fn pause(
+        &mut self,
+        tenant: u16,
+        name: &str,
+    ) -> DatasourceResult<Option<DrainingEvent>> {
+        let event = self.collect_draining_event(tenant, name)?;
+        self.set_status(tenant, name, DatasourceStatus::Paused, "active")?;
+        if let Some(ev) = event.clone() {
+            self.draining_log.push(ev.clone());
+            Ok(Some(ev))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// S29 redo: build a Draining event WITHOUT mutating status.
+    /// Returns `Some` if the Datasource has referencing Jobs, `None`
+    /// if it has none. Used internally by `pause`; also exposed for
+    /// the auto-pause path (`should_auto_pause` -> `pause`).
+    fn collect_draining_event(
+        &self,
+        tenant: u16,
+        name: &str,
+    ) -> DatasourceResult<Option<DrainingEvent>> {
+        let key = (tenant, name.to_string());
+        if !self.by_key.contains_key(&key) {
+            return Err(DatasourceError::NotFound {
+                tenant,
+                name: name.to_string(),
+            });
+        }
+        let jobs: Vec<u32> = self
+            .referencing_jobs
+            .get(&key)
+            .map(|s| s.iter().copied().collect())
+            .unwrap_or_default();
+        if jobs.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(DrainingEvent {
+            tenant,
+            datasource: name.to_string(),
+            referencing_jobs: jobs,
+            triggered_at_ms: now_ms(),
+        }))
+    }
+
+    /// S29 redo: drain the accumulated Draining events. The caller
+    /// (control plane dispatcher) consumes these and triggers
+    /// `Op::StealTask` for each `(JobId, TaskId)` to migrate them.
+    /// Returns the events in append order.
+    pub fn take_draining_events(&mut self) -> Vec<DrainingEvent> {
+        std::mem::take(&mut self.draining_log)
+    }
+
+    /// S29 redo: peek at the accumulated Draining events without
+    /// removing them. Useful for `inspect`.
+    pub fn draining_events(&self) -> &[DrainingEvent] {
+        &self.draining_log
     }
 
     /// Resume a Paused Datasource. Errors if not found or not
@@ -504,6 +587,51 @@ impl DatasourceRegistry {
             health,
         })
     }
+
+    /// S29 redo: lookup a Datasource and produce the
+    /// `DatasourceInfo` shape the SQL preprocessor needs (no
+    /// `PluginId`, no `config`, no timestamps). Returns `None` if
+    /// the Datasource doesn't exist.
+    pub fn lookup_for_preprocess(
+        &self,
+        tenant: u16,
+        name: &str,
+    ) -> Option<bee_dsl_sql::preprocess::DatasourceInfo> {
+        self.get(tenant, name).map(|ds| {
+            bee_dsl_sql::preprocess::DatasourceInfo {
+                name: ds.name.clone(),
+                tenant: ds.tenant,
+                adapter: ds.adapter.clone(),
+                version_spec: ds.version_spec.clone(),
+            }
+        })
+    }
+
+    /// S29 redo: list Datasources that reference a given Plugin by
+    /// its `PluginId`. Used by the pause cascade to find all
+    /// Datasources backed by the same Plugin.
+    pub fn datasources_for_plugin(
+        &self,
+        plugin_id: &bee_plugin_sdk::PluginId,
+    ) -> Vec<(u16, String)> {
+        self.by_key
+            .iter()
+            .filter(|(_, ds)| &ds.plugin_id == plugin_id)
+            .map(|((t, n), _)| (*t, n.clone()))
+            .collect()
+    }
+}
+
+/// S29 redo: implement the preprocessor's `DatasourceLookup` trait
+/// for `DatasourceRegistry`.
+impl bee_dsl_sql::preprocess::DatasourceLookup for DatasourceRegistry {
+    fn lookup(
+        &self,
+        tenant: u16,
+        name: &str,
+    ) -> Option<bee_dsl_sql::preprocess::DatasourceInfo> {
+        self.lookup_for_preprocess(tenant, name)
+    }
 }
 
 #[cfg(test)]
@@ -763,5 +891,70 @@ mod tests {
         let i = r.inspect(0, "binance").unwrap();
         assert_eq!(i.health.connection_success_total, 0);
         assert_eq!(i.health.consecutive_failures, 0);
+    }
+
+    // ---- S29 redo: Draining on pause ----
+
+    #[test]
+    fn pause_records_draining_event_with_referencing_jobs() {
+        let mut r = DatasourceRegistry::new();
+        r.create(test_ds("binance", 0)).unwrap();
+        r.add_referencing_job(0, "binance", 100).unwrap();
+        r.add_referencing_job(0, "binance", 101).unwrap();
+        r.add_referencing_job(0, "binance", 102).unwrap();
+        let ev = r.pause(0, "binance").unwrap().expect("event");
+        assert_eq!(ev.tenant, 0);
+        assert_eq!(ev.datasource, "binance");
+        assert_eq!(ev.referencing_jobs.len(), 3);
+        assert!(ev.triggered_at_ms > 0);
+        // Event is also in the log.
+        assert_eq!(r.draining_events().len(), 1);
+        assert_eq!(r.draining_events()[0], ev);
+    }
+
+    #[test]
+    fn pause_with_no_referencing_jobs_emits_no_event() {
+        let mut r = DatasourceRegistry::new();
+        r.create(test_ds("binance", 0)).unwrap();
+        let ev = r.pause(0, "binance").unwrap();
+        assert!(ev.is_none(), "no Jobs = no event");
+        assert!(r.draining_events().is_empty());
+    }
+
+    #[test]
+    fn take_draining_events_clears_the_log() {
+        let mut r = DatasourceRegistry::new();
+        r.create(test_ds("a", 0)).unwrap();
+        r.create(test_ds("b", 0)).unwrap();
+        r.add_referencing_job(0, "a", 1).unwrap();
+        r.add_referencing_job(0, "b", 2).unwrap();
+        r.pause(0, "a").unwrap();
+        r.pause(0, "b").unwrap();
+        assert_eq!(r.draining_events().len(), 2);
+        let drained = r.take_draining_events();
+        assert_eq!(drained.len(), 2);
+        assert!(r.draining_events().is_empty());
+    }
+
+    // ---- S29 redo: preprocessor trait impl ----
+
+    #[test]
+    fn registry_implements_datasource_lookup() {
+        let r = DatasourceRegistry::new();
+        let mut r = r;
+        r.create(test_ds("binance", 0)).unwrap();
+        let info = r
+            .lookup_for_preprocess(0, "binance")
+            .expect("found");
+        assert_eq!(info.name, "binance");
+        assert_eq!(info.tenant, 0);
+        assert_eq!(info.adapter, "binance");
+        // PluginManager integration test in the runtime.
+    }
+
+    #[test]
+    fn registry_lookup_for_preprocess_returns_none_for_missing() {
+        let r = DatasourceRegistry::new();
+        assert!(r.lookup_for_preprocess(0, "absent").is_none());
     }
 }

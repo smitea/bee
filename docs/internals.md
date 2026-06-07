@@ -37,7 +37,7 @@ graph TD
 
 - **Application** — Runtime shapes Phase-to-Phase typed streams into BRP messages (`StreamData` / `StreamAck` / `StealTask` / `StealResponse` / `Heartbeat`).
 - **Session** — multiplexes RPCs on a single TCP connection via RequestID; per-peer routing table; heartbeat.
-- **Codec** — solves TCP 粘包/半包 with a fixed 15-byte header.
+- **Codec** — solves TCP framing with a fixed 15-byte header.
 - **Transport** — raw `tokio::net::TcpStream`.
 
 ### 1.2 Wire format
@@ -61,7 +61,7 @@ A BRP message is a **fixed 15-byte Header** plus a **variable Body**:
 | `Magic` | 2 B | Fixed `0x42 0x45` (ASCII `'B'`, `'E'`). Filters obvious garbage. |
 | `MessageType` | 1 B | One of the registered types (see below). |
 | `RequestID` | 8 B | `u64` monotonic per Node. Used to correlate Request ↔ Response. |
-| `BodyLength` | 4 B | Little-endian `u32`. Bytes in the Body. Solves 粘包/半包. |
+| `BodyLength` | 4 B | Little-endian `u32`. Bytes in the Body. Solves TCP framing. |
 | `Body` | variable | `bincode`-serialized payload. |
 
 #### Message types (registered)

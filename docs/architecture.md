@@ -214,7 +214,7 @@ graph TD
     App --> Session --> Codec --> Transport
 ```
 
-The wire format is **fixed 15-byte Header + variable Body** — magic bytes `0x42 0x45` ("BE"), 1-byte Message Type, 8-byte Request ID, 4-byte Body Length. Body is `bincode`-serialized. Magic bytes filter obvious garbage; Header length solves TCP 粘包/半包; bincode keeps payloads tight.
+The wire format is **fixed 15-byte Header + variable Body** — magic bytes `0x42 0x45` ("BE"), 1-byte Message Type, 8-byte Request ID, 4-byte Body Length. Body is `bincode`-serialized. Magic bytes filter obvious garbage; Header length solves TCP framing; bincode keeps payloads tight.
 
 **Why not HTTP/2 or gRPC?** We considered both. BRP wins on:
 - Per-message overhead (~15B vs HTTP/2's ~9B header + framing overhead)
