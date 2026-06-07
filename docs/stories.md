@@ -51,6 +51,16 @@ graph LR
     S29 --> S31
     S17 --> S31
 
+    S33 -.depends on.-> S00
+    S33 -.depends on.-> S15
+    S33 -.depends on.-> S16
+    S33 -.depends on.-> S17
+    S33 -.depends on.-> S19
+    S33 -.depends on.-> S20
+    S33 -.depends on.-> S21
+    S33 -.depends on.-> S29
+    S33 -.depends on.-> S30
+
     S12 -.-> S28
     S24 -.-> S28
 ```
@@ -68,6 +78,7 @@ Once **S10 (Scheduler bin-packing)** is done, the work forks into 7 paths that c
 | **E. Adaptive scheduling** | S22 → S23 → S24 → S25 | MLFQ + 4 alternative policies + cross-Node rebalancing |
 | **F. Observability** | S27 → S28 | CLI panel (jobs / inspect / diagnostics / cluster status) |
 | **G. Datasource management (ADR-0010)** | S29 → S30, S31 | `use` syntax + Datasource Registry + secret store + health / pause |
+| **H. Quant trading spike** | S33 | End-to-end demo with separate mock plugin crates (HITL: seed-user demo) |
 
 ## Key milestones
 
@@ -78,6 +89,7 @@ Once **S10 (Scheduler bin-packing)** is done, the work forks into 7 paths that c
 - **S25**: **0.7 roadmap core** — runtime adaptive scheduling
 - **S28**: **0.x → 1.0 production-ready** (CLI observability + scheduling + diagnostic)
 - **S29–S31**: **Datasource management** — `use` syntax + secret store + pause/resume (admin governance)
+- **S33**: **Quant trading spike complete** — end-to-end demo with separate mock plugins, validated against seed user (HITL)
 
 ---
 
@@ -842,6 +854,176 @@ Datasource-level observability and lifecycle:
 - [ ] `bee datasource pause binance` and `bee datasource resume binance` work end-to-end
 - [ ] Subscribers cleanly `Draining` during pause; cleanly reconnect on resume
 - [ ] Pause/resume does not lose events (either buffered or backpressured)
+
+---
+
+## Phase 0.5 / 0.6 — Quant trading spike (HITL)
+
+---
+
+### S33 · Quant trading spike: end-to-end BTC 5min decision pipeline with **separate** mock plugin crates
+
+- **Type**: **HITL** (first end-to-end demo to seed user is a design-review milestone)
+- **Blocked by**: S00, S15, S16, S17, S19, S20, S21, S29, S30
+- **ADRs**: all 10 (this story is the end-to-end validator for the whole architecture)
+- **HITL review milestone**: when the demo script runs cleanly, schedule a 30-minute walkthrough with the first seed user. They sign off (or note gaps) before S33 is marked done.
+
+> **Why this story exists**: All previous stories are layered — each proves one mechanism in isolation. S33 is the **spike** that proves the mechanisms compose. It validates that the architecture doc's mermaid diagrams aren't fiction. It produces the canonical "5-minute demo" that a seed user can run.
+>
+> **Why separate plugin crates**: Each plugin (binance / google_news / influxdb / mongodb / UDFs) ships in its **own `cdylib` crate**, not bundled together. This is the core principle of Bee (ADR-0005: no business code in core) AND the user's explicit requirement to maximize reusability.
+
+**Deliverables**
+
+#### 1. Four (or more) independent mock plugin crates
+
+Each lives under `plugins/` as its own workspace member; each is a `cdylib`; each depends only on `bee-plugin-sdk` + `bincode` (no HTTP / WS / DB clients — all mock locally).
+
+| Crate | Role | Behavior |
+| --- | --- | --- |
+| `bee-plugin-binance-mock` | Input Adapter (`binance_subscribe`) | Generates synthetic K-line events on a configurable schedule (default 1 Hz); price follows a sine wave so `MACD` / `EMA` are observable; `config` accepts `{"symbol", "interval"}` |
+| `bee-plugin-google-news-mock` | Input Adapter (`google_news_search`) | Generates synthetic news article events with timestamps; query string from `config`; emits 1 event per minute by default |
+| `bee-plugin-influxdb-mock` | Output Adapter (`influxdb_emit`) | Writes to a local append-only log file (`/tmp/bee_demo_influxdb.log`) in line-protocol-ish text; `config` accepts `{"database", "measurement"}` |
+| `bee-plugin-mongodb-mock` | Output Adapter (`mongodb_emit`) | Writes to a local JSON-lines file (`/tmp/bee_demo_mongodb.jsonl`); `config` accepts `{"database", "collection"}` |
+| `bee-plugin-ta-lib-mock` (optional) | Handler UDFs (`MACD`, `EMA`, `KRONOS`, `decision_tree`, `sentiment_analyzer`) | Pure-compute UDFs over a tiny in-crate time-series state; deterministic outputs |
+
+Each plugin's `Cargo.toml` declares its own deps; no cross-plugin imports. Each has its own `Plugin Manifest` (with independent `name` / `version` / `abi_version`).
+
+#### 2. The canonical SQL Pipeline: `examples/quant_btc_strategy.sql`
+
+```sql
+use binance;
+use google_news;
+use influxdb;
+use mongodb;
+
+CREATE VIEW v_btc_metrics AS
+SELECT
+    *,
+    MACD(price, 26, 12, 9, timestamp)  AS macd,
+    EMA(price, 26, timestamp)          AS ema26
+FROM binance.subscribe('BTC/USDT', '5min');
+
+CREATE VIEW v_btc_sentiment AS
+SELECT
+    *,
+    sentiment_analyzer(article) AS sentiment_score
+FROM google_news.search('Bitcoin');
+
+CREATE VIEW v_decision_input AS
+SELECT p.*, s.sentiment_score
+FROM v_btc_metrics      p
+ASOF JOIN v_btc_sentiment s
+  ON p.timestamp >= s.timestamp;
+
+CREATE VIEW v_final_decision AS
+SELECT
+    decision_tree(di.*) AS order_decision,
+    di.*
+FROM v_decision_input di;
+
+EMIT INTO influxdb.emit('bitcoin.trade')
+SELECT
+    MAP_CONSTRUCT('symbol', symbol, 'is_bullish', macd.is_bullish) AS tags,
+    MAP_CONSTRUCT('price', price)                                AS fields
+FROM v_final_decision;
+
+EMIT INTO mongodb.emit('order_decision')
+SELECT order_decision.*, price, timestamp
+FROM v_final_decision
+WHERE order_decision IS NOT NULL;
+```
+
+#### 3. The second strategy, `examples/quant_btc_strategy_v2.sql`
+
+Same `use` declarations (proving Provider / Stream separation per ADR-0010); different filter + decision logic; should **share the Producer** with strategy 1.
+
+#### 4. One-click demo script: `scripts/demo-quant.sh`
+
+Idempotent end-to-end runner:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# 1. Build all mock plugins
+for plugin in plugins/bee-plugin-{binance,google-news,influxdb,mongodb,ta-lib}-mock; do
+  (cd "$plugin" && cargo build --release)
+done
+
+# 2. Drop all plugins into the plugin dir
+mkdir -p /tmp/bee_demo_plugins
+cp plugins/bee-plugin-*/target/release/libbee_plugin_*.so /tmp/bee_demo_plugins/
+
+# 3. Start 3-node cluster (or use existing)
+# (delegated to scripts/start-cluster.sh or similar)
+
+# 4. Register the 4 Datasources (Providers)
+bee datasource create binance \
+  --adapter binance_subscribe \
+  --plugin-version ^1.0 \
+  --config '{"symbol":"BTC/USDT","interval":"5min"}'
+
+bee datasource create google_news \
+  --adapter google_news_search \
+  --plugin-version ^1.0 \
+  --config '{"query":"Bitcoin"}'
+
+bee datasource create influxdb \
+  --adapter influxdb_emit \
+  --plugin-version ^1.0 \
+  --config '{"database":"bitcoin","measurement":"trade"}'
+
+bee datasource create mongodb \
+  --adapter mongodb_emit \
+  --plugin-version ^1.0 \
+  --config '{"database":"trading","collection":"order_decision"}'
+
+# 5. Deploy both strategies
+bee deploy examples/quant_btc_strategy.sql
+bee deploy examples/quant_btc_strategy_v2.sql
+
+# 6. Verify outputs in mock sinks
+sleep 30  # let some events accumulate
+echo "==== influxdb sink ===="
+cat /tmp/bee_demo_influxdb.log
+echo "==== mongodb sink ===="
+cat /tmp/bee_demo_mongodb.jsonl
+
+# 7. Verify Producer sharing
+ASSERT_MSG="Expected: only 1 active binance_subscribe Producer across 2 Jobs"
+N_PRODUCERS=$(bee jobs list --filter 'producer' | wc -l)
+test "$N_PRODUCERS" -eq 1 && echo "✓ Producer sharing OK" || (echo "✗ $ASSERT_MSG"; exit 1)
+```
+
+#### 5. README.md and product-design.md updates
+
+- README.md "Quickstart" section now reads: "See [`scripts/demo-quant.sh`](scripts/demo-quant.sh) for a 5-minute end-to-end walkthrough."
+- product-design.md §4.1 "Scenario A" now references `examples/quant_btc_strategy.sql` as the canonical canonical example.
+
+**Acceptance criteria**
+
+- [ ] All 4 (+ 1 optional) mock plugin crates build independently via `cargo build --release`
+- [ ] Each plugin's `.so` is a separate file; one plugin's failure does not block the others
+- [ ] `bee plugin list` shows all 5 plugins with distinct `PluginId` (sha256 hashes) and their declared `abi_version`
+- [ ] All 4 Datasource registrations via `bee datasource create` succeed with the right `--adapter` names
+- [ ] `bee compile examples/quant_btc_strategy.sql` passes (0 errors, 0 warnings) — strict-mode `use` enforcement validated
+- [ ] `bee deploy examples/quant_btc_strategy.sql` deploys a Job that produces events to both mock sinks
+- [ ] `bee deploy examples/quant_btc_strategy_v2.sql` deploys a second Job; `bee jobs list` shows **both Jobs reference the same `binance` Datasource but have separate Streams**; the `binance_subscribe` Producer count is exactly 1 (StreamSignature sharing)
+- [ ] Killing the Node that hosts the `binance` Producer triggers Work-Stealing; both strategies continue
+- [ ] After all 10 ADRs' "Consequences" sections, run the demo and **explicitly check** each one:
+  - [ ] ADR-0001: data still flows P2P; control still goes through Raft
+  - [ ] ADR-0002: Datasource Phase appears in DAG with `adapter` field
+  - [ ] ADR-0003: shared Stream serves both strategies
+  - [ ] ADR-0004: Task state / checkpoints visible in KV (`bee kv get state/...`)
+  - [ ] ADR-0005: plugins are `cdylib`; ABI check passes
+  - [ ] ADR-0006: SQL extensions (`ASOF JOIN`, `EMIT INTO`, UDFs) work
+  - [ ] ADR-0007: cluster runs in simplified all-in-one topology
+  - [ ] ADR-0008: scheduler policy observable (`bee cluster status`)
+  - [ ] ADR-0009: dropping a new version of a plugin (e.g., `binance v2`) loads alongside v1; `bee plugin list` shows both
+  - [ ] ADR-0010: `use` syntax enforced; per-call args go in SQL; Provider / Stream separation works
+- [ ] README.md Quickstart links to `scripts/demo-quant.sh`
+- [ ] product-design.md §4.1 references `examples/quant_btc_strategy.sql`
+- [ ] **HITL review done**: first seed user walkthrough; feedback captured; gaps recorded as new stories or ADR amendments
 
 ---
 

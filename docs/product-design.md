@@ -114,6 +114,8 @@ Pipeline Author ──writes SQL/Lua──▶ Bee Cluster
 
 > **Important**: `binance` / `google_news` / `influxdb` / `mongodb` / `decision_tree` / `ASOF JOIN` are all **third-party plugins or SQL extensions**, **not in Bee core**. Bee core provides: DSL framework, `use` compiler, Adapter / Handler trait, Registry, Stream sharing, cross-Pipeline edges, Failover. The concrete ticker/news/UDF implementations are provided by the community or user teams in independent Plugin crates, compiled as `cdylib` and loaded by Bee.
 
+> **Canonical example**: see [`examples/quant_btc_strategy.sql`](../../examples/quant_btc_strategy.sql) for the full SQL, and [`scripts/demo-quant.sh`](../../scripts/demo-quant.sh) for a one-click end-to-end run. The four `binance` / `google_news` / `influxdb` / `mongodb` Datasources each come from an **independent mock Plugin crate** under `plugins/` — no business code in Bee core, maximum reusability.
+
 **User's workload**: write a SQL snippet; Bee handles the rest automatically (including: Datasource registration, Stream sharing, Binance credential management, rate-limit avoidance).
 
 > **On Datasource config granularity**: **connection-level config** (API key, base URL, rate limits) is written by the admin at Datasource registration time; **per-call config** (symbol, interval, query string) is written by the Pipeline Author in SQL. These two layers are **strictly separated** — the same Datasource `binance` can be called by any number of Pipelines with different per-call args.

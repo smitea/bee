@@ -24,8 +24,16 @@
 | [docs/product-design.md](docs/product-design.md) | Product vision / users / scenarios / business model | Product / early users / partners |
 | [**docs/architecture.md**](docs/architecture.md) | **System architecture (OSS format)**: Why / Goals / Principles / Subsystems / Operations / Security / Performance | Evaluators / operators / contributors |
 | [**docs/internals.md**](docs/internals.md) | **Implementation details**: BRP wire format / 8-crate boundary / Plugin SDK contract / KV internal layout | Implementers / advanced contributors |
-| [docs/stories.md](docs/stories.md) | **32 implementation stories (vertical slice breakdown)** | Implementers |
+| [docs/stories.md](docs/stories.md) | **32 implementation stories + S33 quant spike** (vertical slice breakdown) | Implementers |
 | [docs/adr/](docs/adr/) | Irreversible architecture decision records (ADR) | Implementers |
+
+## Quickstart (after implementation)
+
+> Once the first AFK stories land, the canonical "5-minute end-to-end demo" lives at:
+>
+> - `scripts/demo-quant.sh` — starts a 3-node cluster, loads 4+ mock plugins, registers Datasources, deploys two quant strategies, verifies Producer sharing, asserts all 10 ADRs' Consequences
+> - `examples/quant_btc_strategy.sql` — the canonical quant pipeline (BTC K-line + news sentiment + decision tree + InfluxDB/MongoDB sinks)
+> - `plugins/bee-plugin-{binance,google-news,influxdb,mongodb,ta-lib}-mock/` — four independent `cdylib` mock plugins (one per Datasource; no business code in Bee core)
 
 ## Design Goals
 
