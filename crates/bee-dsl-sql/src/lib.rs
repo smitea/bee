@@ -9,12 +9,18 @@
 
 mod compile;
 mod handlers;
+mod physical;
 
 use datafusion::error::Result as DfResult;
+use datafusion::prelude::SessionContext;
 
 pub use compile::{compile_to_dag, CompileError};
 pub use handlers::{
     AggregateHandler, DatasourceHandler, FilterHandler, ProjectionHandler,
+};
+pub use physical::{
+    compile_to_physical_plan, execute_plan, format_batches, run_pipeline, DataFusionPhase,
+    RunConfig,
 };
 
 /// 解析一条 SQL 语句,返回 DataFusion 的 Statement AST 列表。
@@ -44,7 +50,7 @@ pub async fn analyze(source: &str) -> DfResult<datafusion::logical_expr::Logical
     use datafusion::datasource::memory::MemTable;
     use std::sync::Arc;
 
-    let ctx = datafusion::prelude::SessionContext::new();
+    let ctx = SessionContext::new();
     let schema = Arc::new(Schema::new(vec![Field::new("a", DataType::Int64, false)]));
     let provider = MemTable::try_new(
         schema.clone(),
@@ -52,6 +58,16 @@ pub async fn analyze(source: &str) -> DfResult<datafusion::logical_expr::Logical
     )?;
     ctx.register_table("stream", Arc::new(provider))?;
 
+    analyze_with_ctx(&ctx, source).await
+}
+
+/// 与 [`analyze`] 等价,但接受调用方预填充的 `SessionContext`。
+/// S15 起的 `run_pipeline` 用它:先 `register_csv("stream", ...)`,
+/// 再 `analyze_with_ctx` 让 analyzer 看到的 schema 与执行端一致。
+pub async fn analyze_with_ctx(
+    ctx: &SessionContext,
+    source: &str,
+) -> DfResult<datafusion::logical_expr::LogicalPlan> {
     let mut stmts = parse_sql(source)?;
     if stmts.is_empty() {
         return Err(datafusion::error::DataFusionError::Plan(
@@ -174,6 +190,81 @@ mod tests {
         assert_eq!(prj.fields().len(), 1);
         assert_eq!(prj.field(0).name(), "b");
         assert_eq!(prj.field(0).data_type(), &datafusion::arrow::datatypes::DataType::Int64);
+    }
+
+    #[tokio::test]
+    async fn run_simple_select_prints_projection_output() {
+        use std::fs;
+
+        let dir = tempfile::tempdir().unwrap();
+        let csv_path = dir.path().join("stream.csv");
+        fs::write(&csv_path, "a\n1\n2\n3\n4\n5\n").unwrap();
+
+        let sql = "SELECT a + 1 AS b FROM stream WHERE a > 0";
+        let output = run_pipeline(sql, &csv_path).await.unwrap();
+
+        // b = 2..6 (a=1..5, with WHERE a > 0 keeping all, then +1)
+        for v in &["2", "3", "4", "5", "6"] {
+            assert!(
+                output.contains(v),
+                "expected `{v}` in output:\n{output}"
+            );
+        }
+        // Output schema should have exactly one column named "b"
+        assert!(output.contains("b"), "expected column `b` in output:\n{output}");
+        assert!(
+            !output.contains(" | a "),
+            "did not expect source column `a` to leak:\n{output}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_simple_select_with_where_filters_rows() {
+        use std::fs;
+
+        let dir = tempfile::tempdir().unwrap();
+        let csv_path = dir.path().join("stream.csv");
+        fs::write(&csv_path, "a\n-2\n-1\n0\n1\n2\n3\n").unwrap();
+
+        // WHERE a > 0 keeps 1, 2, 3 -> b = 2, 3, 4
+        let sql = "SELECT a + 1 AS b FROM stream WHERE a > 0";
+        let output = run_pipeline(sql, &csv_path).await.unwrap();
+        assert!(output.contains("2"));
+        assert!(output.contains("3"));
+        assert!(output.contains("4"));
+        // The negative and zero inputs (a=-2,-1,0) become b=-1,0,1
+        // and are filtered out by WHERE a > 0 (run on b would still
+        // keep b=1 — but the WHERE applies before the projection in
+        // DataFusion's planning, so b=1 should also be absent).
+        // Verify a=-1 (b=0) is NOT in the output:
+        // output has "0" anywhere? the header has no "0", and rows
+        // are "2", "3", "4", so a bare line "0" should be absent.
+        for line in output.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("2")
+                || trimmed.starts_with("3")
+                || trimmed.starts_with("4")
+            {
+                continue;
+            }
+            // header / separator lines are fine; only complain about
+            // any data row that is not one of the expected values.
+            if trimmed.contains(" | ") {
+                // data row — make sure first cell is one of expected
+                let first = trimmed.split(" | ").next().unwrap_or("");
+                assert!(
+                    ["2", "3", "4"].contains(&first),
+                    "unexpected data row: {trimmed:?}\nfull output:\n{output}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn run_config_default_has_one_second_window() {
+        let cfg = RunConfig::default();
+        assert_eq!(cfg.micro_batch_window_ms, 1000);
+        assert_eq!(cfg.replay_count, 1);
     }
 
     #[tokio::test]

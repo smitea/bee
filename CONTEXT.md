@@ -34,12 +34,12 @@ _Avoid_: using "Phase" for a scheduled instance — that is a Phase Assignment.
 **Handler**:
 A pure compute function invoked by a Phase. The runtime treats Handlers as stateless; any persistent per-Job state lives at the Job or Phase-Assignment level.
 
-**Datasource**:
-A Phase that wraps an external-system connection. The "Datasource" label is a role, not a type — at runtime a Datasource Phase is an ordinary Phase whose Adapter is an Input or Output plugin. Same lifecycle, same Work-Stealing, same Raft registration.
-_Avoid_: treating Datasource as a first-class object with its own ID and lifecycle (use Adapter for version/config; the Phase carries the runtime identity).
+**Datasource (管理态 / Management View)**:
+A named, registered entity in Bee that bundles a connection to an external system — its name, the Adapter it uses, its configuration (including secrets), its lifecycle status, and the tenant it belongs to. Pipelines reference Datasources via the `use <name>` SQL directive. The runtime representation of a Datasource is still a Phase with an Adapter (ADR-0002); the managed entity is the **view** that makes that Phase discoverable, governable, and reusable.
+_Avoid_: thinking of "Datasource" as just a runtime Phase role — it is also a **management object** with its own ID, lifecycle, and ACL.
 
 **Adapter**:
-The plugin contract for talking to an external system. Implemented as a dynamically loaded library; provides Input (subscribe/pull) and Output (emit/push) kinds. A Datasource Phase references exactly one Adapter plus a config payload.
+The plugin contract for talking to an external system. Implemented as a dynamically loaded library (per ADR-0005); provides Input (subscribe/pull) and Output (emit/push) kinds. A Datasource managed entity references exactly one Adapter plus a config payload. The Adapter supplies the method names (e.g., `subscribe`, `emit`) that Pipelines call after `use`-ing the Datasource.
 
 **Cross-Pipeline Edge (跨 Pipeline 边)**:
 An edge in the DAG whose source Phase and target Phase belong to different Pipelines. The runtime resolves the edge at deploy time: if both Phases are in the same Job, the edge is in-process; if they are in different Jobs, the edge is a BRP data-channel subscription.
