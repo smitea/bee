@@ -36,6 +36,7 @@ use bee_control::cluster_status;
 use bee_control::diagnostics_view;
 use bee_control::jobs_view;
 use bee_control::raft::cluster::{Cluster, ClusterConfig};
+use bee_control::secret_store::{InMemorySecretStore, SecretStore};
 use bee_dsl_sql::{run_pipeline_with_config, RunConfig};
 use bee_transport::Connection;
 
@@ -119,6 +120,13 @@ async fn main() -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("{}: diagnostics failed: {}", PKG_NAME, e);
+                ExitCode::from(1)
+            }
+        },
+        Some("secret") => match run_secret_cli(&args[1..]).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("{}: secret failed: {}", PKG_NAME, e);
                 ExitCode::from(1)
             }
         },
@@ -311,6 +319,86 @@ async fn run_diagnostics(task_id: Option<&str>) -> Result<(), String> {
     Err(format!("task {id} not found"))
 }
 
+/// S30 `bee secret put|get|list|delete` — MVP: an in-process
+/// `InMemorySecretStore` is the backing store. Production wires
+/// a Raft-replicated KV at `secret/{tenant}/{secret_id}`. The CLI
+/// surface is the S30 acceptance: put stores bytes, get returns
+/// them, list shows IDs only, delete removes the entry.
+async fn run_secret_cli(args: &[String]) -> Result<(), String> {
+    let store: Box<dyn SecretStore> = Box::new(InMemorySecretStore::new());
+    // MVP: all secrets go to tenant 0 (global). The Raft KV
+    // backend will add a --tenant <n> flag.
+    let tenant: u16 = 0;
+
+    let sub = args.first().map(String::as_str);
+    match sub {
+        Some("put") => {
+            let id = args
+                .get(1)
+                .ok_or_else(|| "secret put requires <id>".to_string())?;
+            // Find --value <raw> in the remaining args.
+            let mut value: Option<Vec<u8>> = None;
+            let mut iter = args[2..].iter().map(String::as_str);
+            while let Some(a) = iter.next() {
+                if a == "--value" {
+                    value = Some(
+                        iter.next()
+                            .ok_or_else(|| "--value requires an argument".to_string())?
+                            .as_bytes()
+                            .to_vec(),
+                    );
+                }
+            }
+            let value = value.ok_or_else(|| "secret put requires --value <raw>".to_string())?;
+            store
+                .put(tenant, id, value)
+                .map_err(|e| e.to_string())?;
+            println!("secret {id} stored (tenant {tenant})");
+            Ok(())
+        }
+        Some("get") => {
+            let id = args
+                .get(1)
+                .ok_or_else(|| "secret get requires <id>".to_string())?;
+            match store.get(tenant, id).map_err(|e| e.to_string())? {
+                Some(v) => {
+                    // MVP: print the raw bytes as a UTF-8 lossy
+                    // string. Production masks non-printable bytes
+                    // and requires an admin re-auth step.
+                    let s = String::from_utf8_lossy(&v);
+                    println!("{s}");
+                }
+                None => println!("(not found)"),
+            }
+            Ok(())
+        }
+        Some("list") => {
+            let ids = store.list(tenant);
+            if ids.is_empty() {
+                println!("(no secrets)");
+            } else {
+                println!("secrets (tenant {tenant}):");
+                for id in ids {
+                    println!("  {id}");
+                }
+            }
+            Ok(())
+        }
+        Some("delete") => {
+            let id = args
+                .get(1)
+                .ok_or_else(|| "secret delete requires <id>".to_string())?;
+            store
+                .delete(tenant, id)
+                .map_err(|e| e.to_string())?;
+            println!("secret {id} deleted");
+            Ok(())
+        }
+        Some(other) => Err(format!("unknown secret subcommand `{other}`")),
+        None => Err("secret requires a subcommand: put|get|list|delete".to_string()),
+    }
+}
+
 fn print_help() {
     println!("{} {} — {}", PKG_NAME, PKG_VERSION, PKG_DESCRIPTION);
     println!();
@@ -344,4 +432,11 @@ fn print_help() {
     println!("                               (role, term, log_lag), aggregate jobs/tasks counts,");
     println!("                               tasks_by_status breakdown. Production wires the");
     println!("                               Node admin RPC; MVP spins up an in-process demo.");
+    println!("    secret put <id> --value <raw>  Store a secret (S30). MVP: in-memory store;");
+    println!("                                  production: Raft-replicated KV at");
+    println!("                                  'secret/<tenant>/<id>' (S30+).");
+    println!("    secret get <id>           Print the secret's raw bytes (admin only).");
+    println!("    secret list               List secret IDs in tenant 0 (S30 acceptance: IDs only,");
+    println!("                              not values).");
+    println!("    secret delete <id>        Remove a secret.");
 }

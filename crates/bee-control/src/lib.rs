@@ -19,6 +19,7 @@ pub mod kv;
 pub mod raft;
 pub mod rebalancer;
 pub mod scheduler;
+pub mod secret_store;
 pub mod worker;
 
 pub use builtin_handlers::{LogSink, StartedHandler, TerminalHandler};
