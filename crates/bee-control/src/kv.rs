@@ -108,6 +108,24 @@ impl KVStateMachine {
         self.cas_checked(key, expected, new).is_ok()
     }
 
+    /// Apply a single op. Convenience for the Raft apply loop.
+    pub fn apply_op(&mut self, op: &Op) -> Result<(), TxnError> {
+        match op {
+            Op::Put { key, value } => {
+                self.put(key.clone(), value.clone());
+                Ok(())
+            }
+            Op::Del { key } => {
+                self.del(key);
+                Ok(())
+            }
+            Op::Cas { key, expected, new } => {
+                self.cas_checked(key, expected.as_deref(), new.clone())
+            }
+            Op::Txn { ops } => self.txn(ops.clone()),
+        }
+    }
+
     /// Apply a list of ops atomically. Either all ops are applied, or the
     /// state is unchanged. Nested transactions return NestedTxn.
     pub fn txn(&mut self, ops: Vec<Op>) -> Result<(), TxnError> {
