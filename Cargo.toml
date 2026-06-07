@@ -8,6 +8,7 @@ members = [
     "crates/bee-control",
     "crates/bee-registry",
     "crates/bee-dsl-sql",
+    "crates/bee-kv-test",
     "bee",
 ]
 
@@ -23,6 +24,7 @@ tokio = { version = "1", default-features = false, features = ["net", "io-util",
 bytes = "1"
 bee-codec = { path = "crates/bee-codec" }
 bee-transport = { path = "crates/bee-transport" }
+bee-control = { path = "crates/bee-control" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

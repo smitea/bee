@@ -1,0 +1,18 @@
+[package]
+name = "bee-kv-test"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Smoke test binary for the single-node Bee KV state machine (S06)"
+
+[[bin]]
+name = "bee-kv-test"
+path = "src/main.rs"
+
+[dependencies]
+bee-control = { workspace = true }
+tokio = { workspace = true }
+
+[lints]
+workspace = true
