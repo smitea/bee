@@ -66,21 +66,18 @@ async fn main() -> ExitCode {
             }
         },
         Some("run") => {
-            // S26: --measure + --replay flags. Manual parse — no
-            // external CLI parser.
+            // S26: --measure + --replay. S29 wrap-up: --strict
+            // (enables the use-directive preprocessor + strict
+            // mode check).
             let mut positional: Vec<&str> = Vec::new();
             let mut measure = false;
             let mut replay: u32 = 1;
+            let mut strict = false;
             for a in args.iter().skip(1).map(String::as_str) {
                 match a {
                     "--measure" => measure = true,
-                    "--replay" => {
-                        // The next arg is the value.
-                        // For MVP we just set replay=2; the test
-                        // doesn't actually need a configurable
-                        // value (it's the S15 fixture).
-                        replay = 2;
-                    }
+                    "--replay" => replay = 2,
+                    "--strict" => strict = true,
                     _ => positional.push(a),
                 }
             }
@@ -89,6 +86,7 @@ async fn main() -> ExitCode {
                 positional.get(1).copied(),
                 measure,
                 replay,
+                strict,
             )
             .await
             {
@@ -176,11 +174,21 @@ async fn run_pipeline_cli(
     csv_path: Option<&str>,
     measure: bool,
     replay: u32,
+    strict: bool,
 ) -> Result<(), String> {
     let sql_path = sql_path
         .ok_or_else(|| "run requires <sql_file>".to_string())?;
-    let sql = std::fs::read_to_string(sql_path)
+    let mut sql = std::fs::read_to_string(sql_path)
         .map_err(|e| format!("read {sql_path}: {e}"))?;
+    // S29 wrap-up: when --strict is set, run the use-directive
+    // preprocessor + strict-mode check. The preprocess library
+    // surfaces a clear error if a `<adapter>.method(...)` call
+    // isn't preceded by a matching `use <adapter>;` directive.
+    if strict {
+        let (_directives, stripped) = bee_dsl_sql::preprocess(&sql)
+            .map_err(|e| format!("strict-mode: {e}"))?;
+        sql = stripped;
+    }
     let csv = match csv_path {
         Some(p) => PathBuf::from(p),
         None => derive_csv_path(Path::new(sql_path))
@@ -328,26 +336,35 @@ async fn run_diagnostics(task_id: Option<&str>) -> Result<(), String> {
     Err(format!("task {id} not found"))
 }
 
-/// S30 `bee secret put|get|list|delete` — MVP: an in-process
-/// `InMemorySecretStore` is the backing store. Production wires
-/// a Raft-replicated KV at `secret/{tenant}/{secret_id}`. The CLI
-/// surface is the S30 acceptance: put stores bytes, get returns
-/// them, list shows IDs only, delete removes the entry.
+/// S30 + S30 wrap-up: `bee secret put|get|list|delete
+/// [--tenant <n>]`. MVP: in-process `InMemorySecretStore`.
+/// `--tenant <n>` overrides the default tenant 0.
 async fn run_secret_cli(args: &[String]) -> Result<(), String> {
     let store: Box<dyn SecretStore> = Box::new(InMemorySecretStore::new());
-    // MVP: all secrets go to tenant 0 (global). The Raft KV
-    // backend will add a --tenant <n> flag.
-    let tenant: u16 = 0;
+    let mut tenant: u16 = 0;
+    // --tenant can appear anywhere; consume all occurrences.
+    let mut filtered: Vec<String> = Vec::with_capacity(args.len());
+    let mut iter = args.iter();
+    while let Some(a) = iter.next() {
+        if a == "--tenant" {
+            tenant = iter
+                .next()
+                .ok_or_else(|| "--tenant requires an argument".to_string())?
+                .parse()
+                .map_err(|e: std::num::ParseIntError| format!("invalid tenant: {e}"))?;
+        } else {
+            filtered.push(a.clone());
+        }
+    }
+    let sub = filtered.first().map(String::as_str);
 
-    let sub = args.first().map(String::as_str);
     match sub {
         Some("put") => {
-            let id = args
+            let id = filtered
                 .get(1)
                 .ok_or_else(|| "secret put requires <id>".to_string())?;
-            // Find --value <raw> in the remaining args.
             let mut value: Option<Vec<u8>> = None;
-            let mut iter = args[2..].iter().map(String::as_str);
+            let mut iter = filtered[2..].iter().map(String::as_str);
             while let Some(a) = iter.next() {
                 if a == "--value" {
                     value = Some(
@@ -366,14 +383,11 @@ async fn run_secret_cli(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         Some("get") => {
-            let id = args
+            let id = filtered
                 .get(1)
                 .ok_or_else(|| "secret get requires <id>".to_string())?;
             match store.get(tenant, id).map_err(|e| e.to_string())? {
                 Some(v) => {
-                    // MVP: print the raw bytes as a UTF-8 lossy
-                    // string. Production masks non-printable bytes
-                    // and requires an admin re-auth step.
                     let s = String::from_utf8_lossy(&v);
                     println!("{s}");
                 }
@@ -394,7 +408,7 @@ async fn run_secret_cli(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         Some("delete") => {
-            let id = args
+            let id = filtered
                 .get(1)
                 .ok_or_else(|| "secret delete requires <id>".to_string())?;
             store
@@ -408,11 +422,8 @@ async fn run_secret_cli(args: &[String]) -> Result<(), String> {
     }
 }
 
-/// S31 `bee datasource list` / `bee datasource inspect <name>` — MVP:
-/// an in-process DatasourceRegistry is the backing store. The
-/// factory seeds a `binance` Datasource + a few referencing Jobs
-/// for the demo (similar to the S24/S27/S28 demo pattern).
-/// Production wires a Node admin RPC.
+/// S31 + S29 wrap-up: `bee datasource list/inspect/create/
+/// pause/resume/delete`. MVP: in-process DatasourceRegistry.
 async fn run_datasource_cli(args: &[String]) -> Result<(), String> {
     let sub = args.first().map(String::as_str);
     let mut registry = DatasourceRegistry::new();
@@ -420,7 +431,6 @@ async fn run_datasource_cli(args: &[String]) -> Result<(), String> {
 
     match sub {
         Some("list") => {
-            // Optional --tenant <n> filter
             let mut tenant: Option<u16> = None;
             let mut iter = args[1..].iter().map(String::as_str);
             while let Some(a) = iter.next() {
@@ -442,11 +452,8 @@ async fn run_datasource_cli(args: &[String]) -> Result<(), String> {
                 for ds in ds_list {
                     println!(
                         "{:<12} | {:6} | {:<7} | {:<9} | {}",
-                        ds.name,
-                        ds.tenant,
-                        ds.adapter,
-                        format!("{}", ds.status),
-                        ds.version_spec,
+                        ds.name, ds.tenant, ds.adapter,
+                        format!("{}", ds.status), ds.version_spec,
                     );
                 }
             }
@@ -459,8 +466,103 @@ async fn run_datasource_cli(args: &[String]) -> Result<(), String> {
             print_datasource_inspect(&registry, name);
             Ok(())
         }
+        Some("create") => {
+            // S29 CLI follow-up: `bee datasource create <name>
+            // --adapter <a> --plugin-version <v> --config <json>`.
+            // MVP: plugin_id is derived from the adapter+version
+            // string (deterministic hash for demo); production
+            // resolves via PluginManager.
+            let name = args
+                .get(1)
+                .ok_or_else(|| "datasource create requires <name>".to_string())?
+                .to_string();
+            let mut adapter: Option<String> = None;
+            let mut version: Option<String> = None;
+            let mut config: Option<String> = None;
+            let mut tenant: u16 = 0;
+            let mut iter = args[2..].iter().map(String::as_str);
+            while let Some(a) = iter.next() {
+                match a {
+                    "--adapter" => {
+                        adapter = Some(
+                            iter.next()
+                                .ok_or_else(|| "--adapter requires an argument".to_string())?
+                                .to_string(),
+                        );
+                    }
+                    "--plugin-version" => {
+                        version = Some(
+                            iter.next()
+                                .ok_or_else(|| "--plugin-version requires an argument".to_string())?
+                                .to_string(),
+                        );
+                    }
+                    "--config" => {
+                        config = Some(
+                            iter.next()
+                                .ok_or_else(|| "--config requires an argument".to_string())?
+                                .to_string(),
+                        );
+                    }
+                    "--tenant" => {
+                        tenant = iter
+                            .next()
+                            .ok_or_else(|| "--tenant requires an argument".to_string())?
+                            .parse()
+                            .map_err(|e: std::num::ParseIntError| format!("invalid tenant: {e}"))?;
+                    }
+                    _ => return Err(format!("unknown flag `{a}`")),
+                }
+            }
+            let adapter = adapter.ok_or_else(|| "datasource create requires --adapter".to_string())?;
+            let version_str = version
+                .ok_or_else(|| "datasource create requires --plugin-version".to_string())?;
+            let config = config.unwrap_or_else(|| "{}".to_string());
+            let version_spec = bee_plugin_sdk::VersionSpec::parse(&version_str)
+                .map_err(|e| format!("invalid plugin-version: {e}"))?;
+            let plugin_id = compute_plugin_id(format!("{adapter}@{version_str}").as_bytes());
+            let ds = Datasource::new(name.clone(), tenant, adapter, plugin_id, version_spec, config);
+            registry
+                .create(ds)
+                .map_err(|e| format!("datasource create: {e}"))?;
+            println!("datasource {name} created");
+            Ok(())
+        }
+        Some("pause") => {
+            let name = args
+                .get(1)
+                .ok_or_else(|| "datasource pause requires <name>".to_string())?;
+            registry
+                .pause(0, name)
+                .map_err(|e| format!("datasource pause: {e}"))?;
+            println!("datasource {name} paused");
+            Ok(())
+        }
+        Some("resume") => {
+            let name = args
+                .get(1)
+                .ok_or_else(|| "datasource resume requires <name>".to_string())?;
+            registry
+                .resume(0, name)
+                .map_err(|e| format!("datasource resume: {e}"))?;
+            println!("datasource {name} resumed");
+            Ok(())
+        }
+        Some("delete") => {
+            let name = args
+                .get(1)
+                .ok_or_else(|| "datasource delete requires <name>".to_string())?;
+            registry
+                .delete(0, name)
+                .map_err(|e| format!("datasource delete: {e}"))?;
+            println!("datasource {name} deleted");
+            Ok(())
+        }
         Some(other) => Err(format!("unknown datasource subcommand `{other}`")),
-        None => Err("datasource requires a subcommand: list|inspect".to_string()),
+        None => Err(
+            "datasource requires a subcommand: list|inspect|create|pause|resume|delete"
+                .to_string(),
+        ),
     }
 }
 
@@ -537,10 +639,14 @@ fn print_help() {
     println!("                               and read the echo back (S02)");
     println!("    run <sql_file> [csv_file]   Run a SQL pipeline: read the SQL, register the CSV");
     println!("      [--measure] [--replay N]  as the `stream` source, parse → analyze → execute,");
-    println!("                               and print the result table. csv_file defaults to");
+    println!("      [--strict]                and print the result table. csv_file defaults to");
     println!("                               <sql_file_basename>.csv. --measure prints");
     println!("                               per-iteration latency (S26); --replay N runs the");
     println!("                               plan N times to simulate a micro-batch loop.");
+    println!("                               --strict enables the use-directive preprocessor");
+    println!("                               + strict-mode check (S29); e.g. `use binance;`");
+    println!("                               must precede `binance.subscribe(...)` or the");
+    println!("                               pipeline fails to compile.");
     println!("    jobs                       List all Jobs in the ControlPlane (S27). MVP: spins");
     println!("                               up an in-process demo cluster; production uses the");
     println!("                               Node admin RPC (S28).");
@@ -565,7 +671,16 @@ fn print_help() {
     println!("    datasource list [--tenant <n>]  List Datasources (S29). MVP: in-process demo");
     println!("                                  registry; production: Node admin RPC + Raft KV");
     println!("                                  (S30+).");
+    println!("    datasource create <name>   Register a Datasource (S29 acceptance). Required:");
+    println!("        --adapter <a>         adapter name (e.g., 'binance').");
+    println!("        --plugin-version <v>  SemVer range ('1.4.2', '^1.0', '~1.2', 'latest').");
+    println!("        [--config <json>]      Adapter-specific config (default: empty JSON).");
+    println!("        [--tenant <n>]         Tenant (default 0 = global).");
     println!("    datasource inspect <name> Show Datasource header + per-Datasource health");
     println!("                                  (S31 acceptance: Producer Node, plugin_id, version,");
     println!("                                  health metrics, referencing Job count).");
+    println!("    datasource pause <name>   Pause the Datasource (S31: triggers Draining on");
+    println!("                                  referencing Jobs in production; MVP: status flag).");
+    println!("    datasource resume <name>  Resume a paused Datasource.");
+    println!("    datasource delete <name>  Remove the Datasource entry.");
 }
