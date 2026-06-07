@@ -6,8 +6,8 @@ license.workspace = true
 publish.workspace = true
 description = "Bee Plugin SDK: Plugin trait + BeeHostV1 C ABI + PluginManifest (S19, ADR-0005/0009)"
 
-[lints]
-workspace = true
+[lints.rust]
+unsafe_code = "allow"
 
 [dependencies]
 thiserror = "2"

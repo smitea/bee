@@ -34,4 +34,4 @@ bee-adapter = { path = "crates/bee-adapter" }
 bee-plugin-sdk = { path = "crates/bee-plugin-sdk" }
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "warn"

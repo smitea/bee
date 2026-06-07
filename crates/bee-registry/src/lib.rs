@@ -4,6 +4,9 @@
 //! Registry 是 trait,具体实现可插拔 (本地、etcd 风格、内存测试桩)。
 //!
 //! S19 起实现 [`PluginManager`] 与 [`NetworkSync`]。
+//! S33 起实现 [`loader::load_library`] (libloading 真实加载 `cdylib`)。
+
+pub mod loader;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -151,6 +154,28 @@ impl PluginManager {
         self.plugins.entry(id.clone()).or_insert(RegisteredPlugin {
             manifest,
             handle: Arc::new(handle),
+            refcount: 0,
+        });
+        Ok(id)
+    }
+
+    /// S33: load a plugin from a `cdylib` on disk via
+    /// [`loader::load_library`] and register it. The PluginId is
+    /// computed from the binary content; the S20 ABI check runs
+    /// against the plugin's declared `abi_version` before adding
+    /// to the manager. Idempotent (re-registering the same binary
+    /// is a no-op).
+    pub fn register_library<P: AsRef<std::path::Path>>(
+        &mut self,
+        path: P,
+    ) -> bee_plugin_sdk::PluginResult<PluginId> {
+        let loaded = crate::loader::load_library(path)?;
+        let id = loaded.id.clone();
+        self.check_abi(&id, &loaded.handle.manifest)?;
+        let manifest = loaded.handle.manifest.clone();
+        self.plugins.entry(id.clone()).or_insert(RegisteredPlugin {
+            manifest,
+            handle: loaded.handle,
             refcount: 0,
         });
         Ok(id)

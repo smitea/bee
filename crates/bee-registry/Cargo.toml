@@ -6,8 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "Bee 注册中心: Plugin 加载 / 校验 / 网络同步 / 路由表广播"
 
-[lints]
-workspace = true
+[lints.rust]
+unsafe_code = "allow"
 
 [dependencies]
 bee-plugin-sdk = { workspace = true }
+libloading = "0.8"

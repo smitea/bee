@@ -27,6 +27,9 @@ use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
+pub mod macros;
+pub use macros::Factory;
+
 /// Content-hash of the loaded plugin binary. Two builds of the same
 /// logical plugin (even with the same version string) have distinct
 /// `PluginId`s (ADR-0009). KV state keys include the hash so old
