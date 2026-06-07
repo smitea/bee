@@ -9,6 +9,10 @@ description = "Bee 应用层: Pipeline / Phase / Handler / Dag / Compiler (数�
 [dependencies]
 tokio = { workspace = true }
 arrow-schema = "55"
+bee-adapter = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
 
 [lints]
 workspace = true

@@ -1,29 +1,58 @@
-//! `bee-adapter` — Bee Adapter contract (S16, ADR-0002).
+//! `bee-adapter` — Bee Adapter contract (S16, ADR-0002 / ADR-0003 / ADR-0010).
 //!
 //! An Adapter is the plugin contract for talking to an external system.
-//! Adapters are loaded into Bee (built-in for MVP, dynamically loaded
-//! `cdylib` plugins later per ADR-0005). Two kinds exist:
+//! Adapters are loaded into Bee via the Plugin SDK (cdylib + libloading,
+//! ADR-0005/0009). Two kinds exist:
 //!
 //! - [`InputAdapter`]: pulls events from an external source (subscribe).
 //!   `next()` returns `Some(event)` while the stream is live and
-//!   `None` to signal end-of-stream (per the S16 acceptance criterion).
+//!   `None` to signal end-of-stream.
 //! - [`OutputAdapter`]: pushes events to an external sink (emit).
 //!
-//! For S16, the only built-in is [`FakeBinanceAdapter`]: a mock that
-//! generates a configurable number of synthetic price events at 1Hz
-//! (with the actual sleep optional to keep tests fast). The Datasource
-//! / Adapter split (per ADR-0010) is layered on top in S17+.
+//! ## Bee core is business-agnostic
+//!
+//! This crate defines the **mechanism** (the trait + `Event` envelope)
+//! only. It contains **no** domain-specific implementations —
+//! Binance / CoinGecko / InfluxDB etc. ship as **external plugins** in
+//! their own crates, NOT compiled into the Bee binary. The test
+//! fixture that exercises the trait is the generic
+//! `MockInputAdapter` in `bee_runtime::test_utils` (per S16 spec).
+//!
+//! ## Event envelope
+//!
+//! The wire format is intentionally generic: a timestamp, a monotonic
+//! sequence number (per-Adapter), and an opaque `payload: Vec<u8>`.
+//! Domain semantics (price, symbol, sentiment score, etc.) live in
+//! the payload encoding chosen by each plugin author.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// A single event pulled from an Input Adapter or pushed to an Output
-/// Adapter. Kept as a small struct so the bee-dsl-sql path can convert
-/// to Arrow `RecordBatch` (S16: a one-row, two-column batch).
-#[derive(Debug, Clone, PartialEq)]
+/// Adapter. The `payload` is opaque bytes — the Adapter author picks
+/// the encoding (JSON, protobuf, Arrow, raw struct bytes, etc.).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Event {
-    pub symbol: String,
-    pub price: f64,
-    pub ts_ms: i64,
+    /// Wall-clock timestamp in milliseconds since the unix epoch.
+    /// Producers should set this to the time the event was observed
+    /// in the upstream system (not the time it was pulled into Bee).
+    pub timestamp: u64,
+    /// Monotonic sequence number, scoped to a single Adapter
+    /// instance. Useful for ordering, deduplication, and
+    /// checkpoint offsets. Starts at 0.
+    pub sequence: u64,
+    /// Opaque payload bytes. Domain semantics are defined by the
+    /// Adapter author.
+    pub payload: Vec<u8>,
+}
+
+impl Event {
+    /// Convenience: current system time as `timestamp` (ms since epoch).
+    pub fn now_timestamp() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -38,7 +67,7 @@ pub enum AdapterError {
     Close(String),
 }
 
-pub type Result<T> = std::result::Result<T, AdapterError>;
+pub type AdapterResult<T> = std::result::Result<T, AdapterError>;
 
 /// Input (subscribe) adapter: pulls events from an external source.
 ///
@@ -48,248 +77,51 @@ pub type Result<T> = std::result::Result<T, AdapterError>;
 pub trait InputAdapter: Send + 'static {
     type Config: Send + Sync;
 
-    fn open(config: Self::Config) -> impl std::future::Future<Output = Result<Self>> + Send
+    fn open(config: Self::Config) -> impl std::future::Future<Output = AdapterResult<Self>> + Send
     where
         Self: Sized;
 
-    fn next(&mut self) -> impl std::future::Future<Output = Result<Option<Event>>> + Send;
+    fn next(&mut self) -> impl std::future::Future<Output = AdapterResult<Option<Event>>> + Send;
 
-    fn close(self) -> impl std::future::Future<Output = Result<()>> + Send;
+    fn close(self) -> impl std::future::Future<Output = AdapterResult<()>> + Send;
 }
 
 /// Output (emit) adapter: pushes events to an external sink.
 pub trait OutputAdapter: Send + 'static {
     type Config: Send + Sync;
 
-    fn open(config: Self::Config) -> impl std::future::Future<Output = Result<Self>> + Send
+    fn open(config: Self::Config) -> impl std::future::Future<Output = AdapterResult<Self>> + Send
     where
         Self: Sized;
 
-    fn emit(&mut self, event: Event) -> impl std::future::Future<Output = Result<()>> + Send;
+    fn emit(&mut self, event: Event) -> impl std::future::Future<Output = AdapterResult<()>> + Send;
 
-    fn close(self) -> impl std::future::Future<Output = Result<()>> + Send;
-}
-
-/// Configuration for [`FakeBinanceAdapter`].
-#[derive(Debug, Clone)]
-pub struct FakeBinanceConfig {
-    pub symbol: String,
-    pub max_events: u32,
-    /// Optional per-event delay in milliseconds. `Some(0)` = no sleep
-    /// (used by tests to keep them fast). Defaults to `Some(1000)`
-    /// (1Hz) for production-like usage.
-    pub delay_ms: Option<u64>,
-    /// Optional deterministic seed (used by tests to assert specific
-    /// values). `None` = use system time.
-    pub base_ts_ms: Option<i64>,
-}
-
-impl Default for FakeBinanceConfig {
-    fn default() -> Self {
-        Self {
-            symbol: "BTC/USDT".to_string(),
-            max_events: 10,
-            delay_ms: Some(1000),
-            base_ts_ms: None,
-        }
-    }
-}
-
-/// Mock Input Adapter that emits `max_events` synthetic price events.
-/// Each event's `price` increments by 1.0 starting at 100.0, so the
-/// first event is `price=101.0` and the last is `price=100.0+N`.
-///
-/// `ts_ms` is `base_ts_ms` plus `count * 1000` if `base_ts_ms` is
-/// given, else the system time when the event is generated. The base
-/// ts makes tests deterministic.
-pub struct FakeBinanceAdapter {
-    symbol: String,
-    max_events: u32,
-    delay_ms: Option<u64>,
-    base_ts_ms: Option<i64>,
-    count: u32,
-}
-
-impl InputAdapter for FakeBinanceAdapter {
-    type Config = FakeBinanceConfig;
-
-    async fn open(config: Self::Config) -> Result<Self> {
-        Ok(Self {
-            symbol: config.symbol,
-            max_events: config.max_events,
-            delay_ms: config.delay_ms,
-            base_ts_ms: config.base_ts_ms,
-            count: 0,
-        })
-    }
-
-    async fn next(&mut self) -> Result<Option<Event>> {
-        if self.count >= self.max_events {
-            return Ok(None);
-        }
-        if let Some(d) = self.delay_ms {
-            if d > 0 {
-                tokio::time::sleep(std::time::Duration::from_millis(d)).await;
-            }
-        }
-        self.count += 1;
-        let price = 100.0 + self.count as f64;
-        let ts_ms = match self.base_ts_ms {
-            Some(base) => base + (self.count as i64 - 1) * 1000,
-            None => SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_millis() as i64)
-                .unwrap_or(0),
-        };
-        Ok(Some(Event {
-            symbol: self.symbol.clone(),
-            price,
-            ts_ms,
-        }))
-    }
-
-    async fn close(self) -> Result<()> {
-        Ok(())
-    }
-}
-
-/// Helper: run a [`FakeBinanceAdapter`] to completion and collect all
-/// events. Equivalent to `open → loop(next) → close`, but inlined for
-/// callers that don't need lifecycle hooks.
-pub async fn collect_binance(
-    config: FakeBinanceConfig,
-) -> Result<Vec<Event>> {
-    let mut adapter = FakeBinanceAdapter::open(config).await?;
-    let mut events = Vec::with_capacity(adapter.max_events as usize);
-    while let Some(ev) = adapter.next().await? {
-        events.push(ev);
-    }
-    adapter.close().await?;
-    Ok(events)
-}
-
-// ---- DatasourceSignature (S17) ----
-//
-// Per ADR-0003: the signature is the identity of a Datasource in the
-// data plane. Two `binance.subscribe('BTC/USDT', '5m')` calls produce
-// the same signature; one with `'1m'` or a different adapter produces
-// a different signature. The KV key is `state/producer/{sig} -> JobId`.
-
-/// Identity of a Datasource in the data plane: a sha256 hex string of
-/// `sha256(adapter_id || "|" || canonical_config)`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct DatasourceSignature(pub String);
-
-impl std::fmt::Display for DatasourceSignature {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-/// Compute a [`DatasourceSignature`] from an `adapter_id` and a
-/// canonicalized config string. The caller is responsible for producing
-/// a canonical config — for the binance built-in that's
-/// `canonical_binance_subscribe_args`; for user-defined Adapters it's
-/// whatever JSON (or other) serialization the Adapter author picks.
-pub fn compute_datasource_signature(
-    adapter_id: &str,
-    canonical_config: &str,
-) -> DatasourceSignature {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(adapter_id.as_bytes());
-    hasher.update(b"|");
-    hasher.update(canonical_config.as_bytes());
-    let digest = hasher.finalize();
-    DatasourceSignature(hex::encode(digest))
-}
-
-/// Extract the canonical args portion of a `binance.subscribe(...)`
-/// SQL call (e.g. `'BTC/USDT','5m'`). Returns `None` if the SQL does
-/// not match the binance call form. The output is the *raw* substring
-/// between `(` and `)` (with surrounding whitespace trimmed); S17
-/// does not require a stricter canonicalization — the same SQL
-/// produces the same signature.
-pub fn canonical_binance_subscribe_args(sql: &str) -> Option<String> {
-    let needle = "binance.subscribe(";
-    let start = sql.find(needle)? + needle.len();
-    let rest = sql.get(start..)?;
-    let end = rest.find(')')?;
-    Some(rest[..end].trim().to_string())
-}
-
-/// Convenience: compute the signature for a `binance.subscribe(...)`
-/// SQL string in one call.
-pub fn compute_binance_signature(sql: &str) -> Option<DatasourceSignature> {
-    let args = canonical_binance_subscribe_args(sql)?;
-    Some(compute_datasource_signature("binance", &args))
+    fn close(self) -> impl std::future::Future<Output = AdapterResult<()>> + Send;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn fake_binance_adapter_emits_max_events_then_ends() {
-        let cfg = FakeBinanceConfig {
-            symbol: "BTC/USDT".to_string(),
-            max_events: 10,
-            delay_ms: Some(0),
-            base_ts_ms: Some(1_000_000),
-        };
-        let events = collect_binance(cfg).await.unwrap();
-        assert_eq!(events.len(), 10);
-        for (i, e) in events.iter().enumerate() {
-            assert_eq!(e.symbol, "BTC/USDT");
-            assert_eq!(e.price, 101.0 + i as f64);
-            assert_eq!(e.ts_ms, 1_000_000 + i as i64 * 1000);
-        }
-    }
-
-    #[tokio::test]
-    async fn fake_binance_adapter_with_zero_events_is_immediately_done() {
-        let cfg = FakeBinanceConfig {
-            symbol: "ETH/USDT".to_string(),
-            max_events: 0,
-            delay_ms: Some(0),
-            base_ts_ms: Some(0),
-        };
-        let events = collect_binance(cfg).await.unwrap();
-        assert!(events.is_empty());
-    }
-
-    #[tokio::test]
-    async fn fake_binance_adapter_close_is_noop() {
-        let cfg = FakeBinanceConfig {
-            max_events: 0,
-            ..Default::default()
-        };
-        let adapter = FakeBinanceAdapter::open(cfg).await.unwrap();
-        adapter.close().await.unwrap();
-    }
-
-    // ---- DatasourceSignature (S17) ----
-
     #[test]
-    fn datasource_signature_is_deterministic() {
-        let a = compute_datasource_signature("binance", "'BTC/USDT','5m'");
-        let b = compute_datasource_signature("binance", "'BTC/USDT','5m'");
+    fn event_constructs_and_compares() {
+        let a = Event {
+            timestamp: 1_000_000,
+            sequence: 7,
+            payload: b"hi".to_vec(),
+        };
+        let b = a.clone();
         assert_eq!(a, b);
-        assert_eq!(a.0.len(), 64); // sha256 hex
+        assert_eq!(a.timestamp, 1_000_000);
+        assert_eq!(a.sequence, 7);
+        assert_eq!(a.payload, b"hi");
     }
 
     #[test]
-    fn datasource_signature_differs_per_input() {
-        let a = compute_datasource_signature("binance", "'BTC/USDT','5m'");
-        let b = compute_datasource_signature("binance", "'BTC/USDT','1m'");
-        let c = compute_datasource_signature("coingecko", "'BTC/USDT','5m'");
-        assert_ne!(a, b, "config change should change the signature");
-        assert_ne!(a, c, "adapter change should change the signature");
-    }
-
-    #[test]
-    fn canonical_binance_args_extracted_from_sql() {
-        let s = canonical_binance_subscribe_args("SELECT * FROM binance.subscribe('BTC/USDT','5m')");
-        assert_eq!(s, Some("'BTC/USDT','5m'".to_string()));
+    fn event_now_timestamp_is_recent() {
+        let t = Event::now_timestamp();
+        // Any plausible 2024+ timestamp in ms; we don't assert a
+        // tight window to avoid CI flake.
+        assert!(t > 1_700_000_000_000, "now_timestamp returned {t}");
     }
 }

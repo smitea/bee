@@ -149,74 +149,17 @@ fn arrow_array_value_to_string(
 /// This is the function the `bee run` CLI calls. It uses
 /// `RunConfig::default()` (1s micro-batch window, 1 replay).
 ///
-/// Recognizes a small set of S16 SQL extensions (e.g.,
-/// `SELECT * FROM binance.subscribe('BTC/USDT')`) and routes them to
-/// the matching built-in Adapter. Falls through to DataFusion for
-/// everything else.
+/// S16 redo: Bee core is business-agnostic. The MVP CLI is a thin
+/// DataFusion wrapper; concrete Datasource Adapters (Binance,
+/// CoinGecko, InfluxDB, etc.) ship as **external plugins** in
+/// their own crates and are not part of the `bee run` path.
 pub async fn run_pipeline(sql: &str, csv_path: &Path) -> Result<String, String> {
-    if let Some(symbol) = parse_binance_subscribe(sql) {
-        return run_binance_pipeline(&symbol).await;
-    }
     let _ = RunConfig::default();
     let plan = compile_to_physical_plan(sql, csv_path)
         .await
         .map_err(|e| format!("compile: {e}"))?;
     let batches = execute_plan(&plan).await.map_err(|e| format!("execute: {e}"))?;
     Ok(format_batches(&batches))
-}
-
-/// Run the [`FakeBinanceAdapter`](bee_adapter::FakeBinanceAdapter) for
-/// `symbol` with a small event count, returning a Markdown-style table
-/// of `symbol | price | ts_ms`. Used by the `binance.subscribe(...)`
-/// SQL extension recognized in [`run_pipeline`].
-pub async fn run_binance_pipeline(symbol: &str) -> Result<String, String> {
-    use arrow_array::{Float64Array, Int64Array, RecordBatch, StringArray};
-    use bee_adapter::{collect_binance, FakeBinanceConfig};
-
-    let cfg = FakeBinanceConfig {
-        symbol: symbol.to_string(),
-        max_events: 10,
-        delay_ms: Some(0), // MVP: instant for CLI speed
-        base_ts_ms: Some(1_700_000_000_000),
-    };
-    let events = collect_binance(cfg).await.map_err(|e| format!("binance: {e}"))?;
-
-    let symbols: Vec<&str> = events.iter().map(|e| e.symbol.as_str()).collect();
-    let prices: Vec<f64> = events.iter().map(|e| e.price).collect();
-    let ts_ms: Vec<i64> = events.iter().map(|e| e.ts_ms).collect();
-    let batch = RecordBatch::try_new(
-        arrow_schema::SchemaRef::new(arrow_schema::Schema::new(vec![
-            arrow_schema::Field::new("symbol", arrow_schema::DataType::Utf8, false),
-            arrow_schema::Field::new("price", arrow_schema::DataType::Float64, false),
-            arrow_schema::Field::new("ts_ms", arrow_schema::DataType::Int64, false),
-        ])),
-        vec![
-            Arc::new(StringArray::from(symbols)) as arrow_array::ArrayRef,
-            Arc::new(Float64Array::from(prices)),
-            Arc::new(Int64Array::from(ts_ms)),
-        ],
-    )
-    .map_err(|e| format!("binance record batch: {e}"))?;
-
-    Ok(format_batches(&[batch]))
-}
-
-/// Recognize `binance.subscribe('SYMBOL')` (with single OR double
-/// quotes) inside an otherwise arbitrary SQL string. Returns the
-/// symbol if found. Conservative: only the call form, no other
-/// SQL syntax required.
-pub fn parse_binance_subscribe(sql: &str) -> Option<String> {
-    let needle = "binance.subscribe(";
-    let start = sql.find(needle)? + needle.len();
-    let rest = sql.get(start..)?;
-    let end = rest.find(')')?;
-    let arg = rest[..end].trim();
-    let arg = arg
-        .strip_prefix('\'')
-        .and_then(|s| s.strip_suffix('\''))
-        .or_else(|| arg.strip_prefix('"').and_then(|s| s.strip_suffix('"')))
-        .unwrap_or(arg);
-    Some(arg.to_string())
 }
 
 /// `Bee` Handler that wraps a DataFusion `ExecutionPlan`.
