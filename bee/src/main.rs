@@ -14,6 +14,10 @@
 //!   `<sql_file_basename>.csv` 约定查找 (S15)。S26: `--measure`
 //!   报 per-iteration avg/p50/p99 latency; `--replay N` 跑 N 次
 //!   模拟 micro-batch 循环。
+//! - `jobs` — 列出 ControlPlane 中所有 Job (S27)。MVP 起一个
+//!   in-process 3-Node 集群当 demo;生产路径走 Node admin RPC (S28)。
+//! - `jobs inspect <job_id>` — 显示 Job 详情:header + per-Task 状态 +
+//!   ASCII DAG。色码输出:green=running,yellow=migrating,red=failed。
 //! - `diagnostics <task_id>` — 打印指定 Task 的 4 项 per-Phase 指标
 //!   (S24)。MVP 占位:bee 独立二进制未持 worker,直接回退到说明信息。
 //!   真实场景下 worker 在 Node 进程内,`diagnostics` 通过 admin RPC
@@ -25,8 +29,11 @@
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Duration;
 
 use bee_codec::{Frame, MessageType};
+use bee_control::jobs_view;
+use bee_control::raft::cluster::{Cluster, ClusterConfig};
 use bee_dsl_sql::{run_pipeline_with_config, RunConfig};
 use bee_transport::Connection;
 
@@ -87,6 +94,18 @@ async fn main() -> ExitCode {
                 }
             }
         }
+        Some("jobs") => match run_jobs_cli(
+            args.get(1).map(String::as_str),
+            args.get(2).map(String::as_str),
+        )
+        .await
+        {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("{}: jobs failed: {}", PKG_NAME, e);
+                ExitCode::from(1)
+            }
+        },
         Some("diagnostics") => match run_diagnostics(args.get(1).map(String::as_str)) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
@@ -162,6 +181,63 @@ fn derive_csv_path(sql_path: &Path) -> Option<PathBuf> {
     Some(parent.join(format!("{stem}.csv")))
 }
 
+/// S27 `bee jobs` and `bee jobs inspect <job_id>` — MVP: spin up
+/// an in-process 3-Node Cluster as a demo, then read the
+/// ControlPlane from any alive node. Production replaces this with
+/// a Node admin RPC (S28).
+async fn run_jobs_cli(
+    subcommand: Option<&str>,
+    job_id_arg: Option<&str>,
+) -> Result<(), String> {
+    let cluster = Cluster::new(ClusterConfig::default()).await;
+    cluster
+        .wait_for_leader(Duration::from_secs(3))
+        .await
+        .ok_or_else(|| "leader not elected".to_string())?;
+
+    // Read from any alive node's ControlPlane. The actual list /
+    // inspect happens in the subcommand branches below (we can't
+    // hold the lock across formatting because the `format_*`
+    // functions only borrow the CP).
+    let _ = job_id_arg;
+
+    match subcommand {
+        None => {
+            // List
+            for (id, handle) in cluster.nodes() {
+                if cluster.is_alive(id) {
+                    let cp = handle.cp.lock().await;
+                    print!("{}", jobs_view::format_jobs(&cp));
+                    return Ok(());
+                }
+            }
+            Err("no alive node".to_string())
+        }
+        Some("inspect") => {
+            let id: u32 = job_id_arg
+                .ok_or_else(|| "jobs inspect requires <job_id>".to_string())?
+                .parse()
+                .map_err(|e| format!("invalid job_id: {e}"))?;
+            for (id_node, handle) in cluster.nodes() {
+                if cluster.is_alive(id_node) {
+                    let cp = handle.cp.lock().await;
+                    match jobs_view::format_job_inspect(&cp, id) {
+                        Some(s) => {
+                            print!("{s}");
+                            return Ok(());
+                        }
+                        None => {
+                            return Err(format!("job {id} not found"));
+                        }
+                    }
+                }
+            }
+            Err("no alive node".to_string())
+        }
+        Some(other) => Err(format!("unknown jobs subcommand `{other}`")),
+    }
+}
+
 /// S24 `bee diagnostics <task_id>` — MVP placeholder.
 ///
 /// The `bee` binary doesn't run a worker itself; the worker lives
@@ -220,6 +296,12 @@ fn print_help() {
     println!("                               <sql_file_basename>.csv. --measure prints");
     println!("                               per-iteration latency (S26); --replay N runs the");
     println!("                               plan N times to simulate a micro-batch loop.");
+    println!("    jobs                       List all Jobs in the ControlPlane (S27). MVP: spins");
+    println!("                               up an in-process demo cluster; production uses the");
+    println!("                               Node admin RPC (S28).");
+    println!("    jobs inspect <job_id>      Show Job header, per-Task status, and ASCII DAG");
+    println!("                               (S27). Color-coded: green=running, yellow=migrating,");
+    println!("                               red=failed.");
     println!("    diagnostics <task_id>      Print the four per-Phase metrics for a Task (S24).");
     println!("                               MVP placeholder — the bee CLI does not host a");
     println!("                               worker; in production the Node admin RPC exposes");

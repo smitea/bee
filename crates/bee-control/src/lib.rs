@@ -11,6 +11,7 @@ pub mod builtin_handlers;
 pub mod control_plane;
 pub mod deployer;
 pub mod heartbeat;
+pub mod jobs_view;
 pub mod kv;
 pub mod raft;
 pub mod rebalancer;

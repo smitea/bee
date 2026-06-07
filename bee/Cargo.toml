@@ -17,6 +17,7 @@ bee-codec = { workspace = true }
 bee-transport = { workspace = true }
 bee-dsl-sql = { workspace = true }
 bee-runtime = { workspace = true }
+bee-control = { workspace = true }
 
 [lints]
 workspace = true
