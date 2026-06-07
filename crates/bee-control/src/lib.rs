@@ -8,8 +8,10 @@
 //! S10 起实现 Scheduler;S11 起实现 StealArbiter。
 
 pub mod builtin_handlers;
+pub mod cluster_status;
 pub mod control_plane;
 pub mod deployer;
+pub mod diagnostics_view;
 pub mod heartbeat;
 pub mod jobs_view;
 pub mod kv;

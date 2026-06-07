@@ -325,6 +325,7 @@ mod tests {
             owner_node: 1,
             status: TaskStatus::Running,
             started_at_ms: 0,
+            migrating_from_node: None,
         };
         let task2 = TaskRecord {
             task_id: 2,
@@ -333,6 +334,7 @@ mod tests {
             owner_node: 1,
             status: TaskStatus::Running,
             started_at_ms: 0,
+            migrating_from_node: None,
         };
         let s = format_dag(&[&task1, &task2]);
         assert!(s.contains("Task 1"));

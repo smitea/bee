@@ -53,6 +53,12 @@ pub struct TaskRecord {
     /// current owner. The Rebalancer uses this to gate
     /// rebalance on the `min_task_age_secs` threshold.
     pub started_at_ms: u64,
+    /// S28: when the Task is in `Migrating` status, this is the
+    /// `owner_node` it had BEFORE the S12 StealTask transition
+    /// (i.e., the source of the migration). The `bee diagnostics`
+    /// CLI uses this to show the "source → target" view required
+    /// by S28 acceptance. `None` for non-Migrating Tasks.
+    pub migrating_from_node: Option<u32>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -115,6 +121,7 @@ impl ControlPlaneStateMachine {
                         owner_node: *owner_node,
                         status: *status,
                         started_at_ms: *started_at_ms,
+                        migrating_from_node: None,
                     },
                 );
                 Ok(())
@@ -161,6 +168,10 @@ impl ControlPlaneStateMachine {
                         actual: Some(format!("{:?}", task.status).into_bytes()),
                     });
                 }
+                // S28: capture the source node BEFORE overwriting
+                // owner_node, so `bee diagnostics` can show the
+                // "source → target" view.
+                task.migrating_from_node = Some(task.owner_node);
                 task.status = TaskStatus::Migrating;
                 task.owner_node = *thief_node;
                 Ok(())

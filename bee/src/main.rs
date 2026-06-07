@@ -32,6 +32,8 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use bee_codec::{Frame, MessageType};
+use bee_control::cluster_status;
+use bee_control::diagnostics_view;
 use bee_control::jobs_view;
 use bee_control::raft::cluster::{Cluster, ClusterConfig};
 use bee_dsl_sql::{run_pipeline_with_config, RunConfig};
@@ -106,7 +108,14 @@ async fn main() -> ExitCode {
                 ExitCode::from(1)
             }
         },
-        Some("diagnostics") => match run_diagnostics(args.get(1).map(String::as_str)) {
+        Some("cluster") => match run_cluster_status_cli(args.get(1).map(String::as_str)).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("{}: cluster failed: {}", PKG_NAME, e);
+                ExitCode::from(1)
+            }
+        },
+        Some("diagnostics") => match run_diagnostics(args.get(1).map(String::as_str)).await {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("{}: diagnostics failed: {}", PKG_NAME, e);
@@ -181,6 +190,26 @@ fn derive_csv_path(sql_path: &Path) -> Option<PathBuf> {
     Some(parent.join(format!("{stem}.csv")))
 }
 
+/// S28 `bee cluster status` — MVP: spin up an in-process 3-Node
+/// Cluster as a demo and render the per-Node + cluster-wide view
+/// via `cluster_status::format_cluster_status`. Production
+/// replaces this with a Node admin RPC.
+async fn run_cluster_status_cli(subcommand: Option<&str>) -> Result<(), String> {
+    // `bee cluster` and `bee cluster status` both show the status.
+    match subcommand {
+        None | Some("status") => {}
+        Some(other) => return Err(format!("unknown cluster subcommand `{other}`")),
+    }
+    let cluster = Cluster::new(ClusterConfig::default()).await;
+    cluster
+        .wait_for_leader(Duration::from_secs(3))
+        .await
+        .ok_or_else(|| "leader not elected".to_string())?;
+    let s = cluster_status::format_cluster_status(&cluster).await;
+    print!("{s}");
+    Ok(())
+}
+
 /// S27 `bee jobs` and `bee jobs inspect <job_id>` — MVP: spin up
 /// an in-process 3-Node Cluster as a demo, then read the
 /// ControlPlane from any alive node. Production replaces this with
@@ -247,34 +276,39 @@ async fn run_jobs_cli(
 /// data channel). For the MVP, the CLI prints a clear message and
 /// the `MetricsSnapshot` Display format the user can plug into a
 /// future Node-bound binary.
-fn run_diagnostics(task_id: Option<&str>) -> Result<(), String> {
+/// S24/S28 `bee diagnostics <task_id>` — MVP: spin up an
+/// in-process 3-Node Cluster as a demo, read the ControlPlane
+/// from any alive node, format the per-Task view. Production
+/// replaces this with a Node admin RPC (S28 follow-up).
+async fn run_diagnostics(task_id: Option<&str>) -> Result<(), String> {
     let id: u32 = task_id
         .ok_or_else(|| "diagnostics requires <task_id>".to_string())?
         .parse()
         .map_err(|e| format!("invalid task_id: {e}"))?;
-    println!("task {id}:");
-    println!("(diagnostics is available from the Node admin RPC; the");
-    println!(" `bee` CLI does not host a worker. The library API at");
-    println!(" bee_runtime::metrics::PhaseMetrics::snapshot prints the");
-    println!(" four required fields:");
-    println!(" - events_processed_total");
-    println!(" - processing_latency_p50/p99 (histogram with");
-    println!("   buckets 1ms / 10ms / 100ms / 1s / 10s)");
-    println!(" - cpu_seconds_total");
-    println!(" - backpressure_wait_seconds_total");
-    println!();
-    println!("Example Display output:");
-    let example = bee_runtime::metrics::MetricsSnapshot {
-        events_processed_total: 0,
-        latency_count: 0,
-        latency_avg: None,
-        latency_p50: None,
-        latency_p99: None,
-        cpu_seconds_total: std::time::Duration::ZERO,
-        backpressure_wait_seconds_total: std::time::Duration::ZERO,
-    };
-    print!("{example}");
-    Ok(())
+
+    let cluster = Cluster::new(ClusterConfig::default()).await;
+    cluster
+        .wait_for_leader(Duration::from_secs(3))
+        .await
+        .ok_or_else(|| "leader not elected".to_string())?;
+
+    for (node_id, handle) in cluster.nodes() {
+        if !cluster.is_alive(node_id) {
+            continue;
+        }
+        let cp = handle.cp.lock().await;
+        match diagnostics_view::format_task_diagnostics(&cp, id).await {
+            Some(s) => {
+                print!("{s}");
+                return Ok(());
+            }
+            None => {
+                // Task not on this node; try the next alive one.
+                continue;
+            }
+        }
+    }
+    Err(format!("task {id} not found"))
 }
 
 fn print_help() {
@@ -302,8 +336,12 @@ fn print_help() {
     println!("    jobs inspect <job_id>      Show Job header, per-Task status, and ASCII DAG");
     println!("                               (S27). Color-coded: green=running, yellow=migrating,");
     println!("                               red=failed.");
-    println!("    diagnostics <task_id>      Print the four per-Phase metrics for a Task (S24).");
-    println!("                               MVP placeholder — the bee CLI does not host a");
-    println!("                               worker; in production the Node admin RPC exposes");
-    println!("                               this view (S28 wiring).");
+    println!("    diagnostics <task_id>      Print the per-Task view: status, owner, started_at,");
+    println!("                               Migrating source/target (S28), and placeholders for");
+    println!("                               S24 metrics + log lines. Production wires the");
+    println!("                               Node admin RPC; MVP spins up an in-process demo.");
+    println!("    cluster status            Print the cluster-wide view: per-Node Raft health");
+    println!("                               (role, term, log_lag), aggregate jobs/tasks counts,");
+    println!("                               tasks_by_status breakdown. Production wires the");
+    println!("                               Node admin RPC; MVP spins up an in-process demo.");
 }
