@@ -72,6 +72,7 @@ impl TaskWorker {
             id: 0,
             name: "task".to_string(),
             adapter: None,
+            output_schema: None,
             handler,
         });
         let (input_tx, input_rx) = mpsc::channel::<Msg>(16);

@@ -127,7 +127,7 @@ pub trait DynHandler: Send + 'static {
 impl<H> DynHandler for H
 where
     H: Handler,
-    H::Input: Copy + 'static,
+    H::Input: Clone + 'static,
 {
     fn handle_boxed<'a>(
         &'a mut self,
@@ -137,9 +137,10 @@ where
     > {
         Box::pin(async move {
             let arc: Arc<Box<dyn Any + Send + Sync>> = input.0;
-            let typed: H::Input = *(**arc)
+            let typed: H::Input = (**arc)
                 .downcast_ref::<H::Input>()
-                .ok_or(RuntimeError::TypeMismatch { phase: 0 })?;
+                .ok_or(RuntimeError::TypeMismatch { phase: 0 })?
+                .clone();
             let output_opt = Handler::handle(self, typed).await?;
             Ok(output_opt.map(|o| Msg::new(o)))
         })
@@ -156,6 +157,7 @@ pub struct DynPhase {
     pub id: PhaseId,
     pub name: String,
     pub adapter: Option<AdapterRef>,
+    pub output_schema: Option<Arc<arrow_schema::Schema>>,
     pub handler: Box<dyn DynHandler>,
 }
 
@@ -163,12 +165,13 @@ impl DynPhase {
     pub fn new<H: Handler>(id: PhaseId, name: impl Into<String>, handler: H) -> Self
     where
         H: 'static,
-        H::Input: Copy + 'static,
+        H::Input: Clone + 'static,
     {
         Self {
             id,
             name: name.into(),
             adapter: None,
+            output_schema: None,
             handler: Box::new(handler),
         }
     }
@@ -176,6 +179,15 @@ impl DynPhase {
     pub fn with_adapter(mut self, adapter: AdapterRef) -> Self {
         self.adapter = Some(adapter);
         self
+    }
+
+    pub fn with_output_schema(mut self, schema: Arc<arrow_schema::Schema>) -> Self {
+        self.output_schema = Some(schema);
+        self
+    }
+
+    pub fn output_schema(&self) -> Option<&Arc<arrow_schema::Schema>> {
+        self.output_schema.as_ref()
     }
 }
 

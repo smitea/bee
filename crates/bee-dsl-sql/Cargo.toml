@@ -11,6 +11,10 @@ workspace = true
 
 [dependencies]
 datafusion = { workspace = true }
+arrow-array = "55"
+arrow-schema = "55"
+bee-runtime = { workspace = true }
+thiserror = "2"
 
 [dev-dependencies]
 tokio = { workspace = true }

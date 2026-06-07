@@ -3,10 +3,19 @@
 //! 基于 Apache DataFusion 的 SQL parser / planner,扩展 `EMIT INTO` 与
 //! `ASOF JOIN` 等流式语义,编译为 Bee `Dag`。
 //!
-//! S13 引入 DataFusion:S13 仅做 `parse_sql` + `analyze` 烟测,
-//! S14 起实现 `LogicalPlan → Bee Dag` 编译,S15 起实现端到端 executor + CLI。
+//! - S13: `parse_sql` + `analyze` 烟测
+//! - S14: `LogicalPlan → Bee Dag` 编译 (Projection / Filter / Aggregate / Datasource)
+//! - S15: 端到端 executor + CLI
+
+mod compile;
+mod handlers;
 
 use datafusion::error::Result as DfResult;
+
+pub use compile::{compile_to_dag, CompileError};
+pub use handlers::{
+    AggregateHandler, DatasourceHandler, FilterHandler, ProjectionHandler,
+};
 
 /// 解析一条 SQL 语句,返回 DataFusion 的 Statement AST 列表。
 ///
@@ -14,7 +23,9 @@ use datafusion::error::Result as DfResult;
 /// 扩展 ASOF JOIN 与 EMIT INTO 的自定义 Statement 形态。
 pub fn parse_sql(source: &str) -> DfResult<Vec<datafusion::sql::parser::Statement>> {
     let stmts: std::collections::VecDeque<_> =
-        datafusion::sql::parser::DFParserBuilder::new(source).build()?.parse_statements()?;
+        datafusion::sql::parser::DFParserBuilder::new(source)
+            .build()?
+            .parse_statements()?;
     Ok(stmts.into())
 }
 
@@ -60,6 +71,7 @@ pub async fn analyze(source: &str) -> DfResult<datafusion::logical_expr::Logical
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bee_runtime::DynPhase;
 
     #[test]
     fn parse_sql_returns_single_statement_for_simple_select() {
@@ -72,10 +84,6 @@ mod tests {
         let plan = analyze("SELECT a + 1 AS b FROM stream WHERE a > 0")
             .await
             .unwrap();
-        // LogicalPlan 的 Display 实现按 tree 形打印,应包含三类节点:
-        //   Projection (a + 1 AS b)
-        //   Filter     (a > 0)
-        //   TableScan  (stream)
         let display = format!("{plan}");
         assert!(
             display.contains("Projection") || display.contains("projection"),
@@ -93,11 +101,96 @@ mod tests {
 
     #[tokio::test]
     async fn analyze_rejects_unknown_table() {
-        // analyze 默认只注册 'stream' 表,引用 'no_such' 应该失败。
         let res = analyze("SELECT x FROM no_such").await;
         assert!(
             res.is_err(),
             "expected error for unknown table, got: {res:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn compile_simple_select_produces_datasource_filter_projection_dag() {
+        let plan = analyze("SELECT a + 1 AS b FROM stream WHERE a > 0")
+            .await
+            .unwrap();
+        let dag = compile_to_dag(&plan).unwrap();
+
+        let v: &[DynPhase] = dag.vertices();
+        assert_eq!(v.len(), 3, "expected 3 phases, got {}", v.len());
+
+        // Phase 0: Datasource for `stream`, with an AdapterRef (per ADR-0002)
+        assert_eq!(v[0].id, 0);
+        assert!(v[0].name.contains("stream"), "phase 0 name = {}", v[0].name);
+        assert!(
+            v[0].adapter.is_some(),
+            "datasource phase must have an adapter (ADR-0002)"
+        );
+
+        // Phase 1: Filter (a > 0)
+        assert_eq!(v[1].id, 1);
+        assert!(v[1].name.contains("filter"), "phase 1 name = {}", v[1].name);
+
+        // Phase 2: Projection (a + 1 AS b)
+        assert_eq!(v[2].id, 2);
+        assert!(
+            v[2].name.contains("projection"),
+            "phase 2 name = {}",
+            v[2].name
+        );
+
+        // Edges in execution order: Datasource -> Filter -> Projection
+        let edges = dag.edges();
+        assert!(
+            edges.contains(&(0, 1)),
+            "expected edge (0,1), got {edges:?}"
+        );
+        assert!(
+            edges.contains(&(1, 2)),
+            "expected edge (1,2), got {edges:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn schema_is_preserved_across_phase_boundaries() {
+        let plan = analyze("SELECT a + 1 AS b FROM stream WHERE a > 0")
+            .await
+            .unwrap();
+        let dag = compile_to_dag(&plan).unwrap();
+        let v = dag.vertices();
+
+        // Source: one column "a" of Int64
+        let src = v[0].output_schema().expect("datasource must have schema");
+        assert_eq!(src.fields().len(), 1);
+        assert_eq!(src.field(0).name(), "a");
+        assert_eq!(src.field(0).data_type(), &datafusion::arrow::datatypes::DataType::Int64);
+
+        // Filter: same shape as input
+        let flt = v[1].output_schema().expect("filter must have schema");
+        assert_eq!(flt.fields().len(), 1);
+        assert_eq!(flt.field(0).name(), "a");
+
+        // Projection: one column "b" of Int64 (the result of a + 1)
+        let prj = v[2].output_schema().expect("projection must have schema");
+        assert_eq!(prj.fields().len(), 1);
+        assert_eq!(prj.field(0).name(), "b");
+        assert_eq!(prj.field(0).data_type(), &datafusion::arrow::datatypes::DataType::Int64);
+    }
+
+    #[tokio::test]
+    async fn compile_aggregate_produces_datasource_aggregate_projection_dag() {
+        // DataFusion wraps `SELECT a, SUM(a) AS s FROM stream GROUP BY a`
+        // in: Aggregate -> Projection (for the alias) -> TableScan.
+        // The S14 compiler should faithfully walk that tree.
+        let plan = analyze("SELECT a, SUM(a) AS s FROM stream GROUP BY a")
+            .await
+            .unwrap();
+        let dag = compile_to_dag(&plan).unwrap();
+        let v = dag.vertices();
+        assert_eq!(v.len(), 3, "expected 3 phases, got {}", v.len());
+        assert!(v[0].name.contains("stream"));
+        assert!(v[1].name.contains("aggregate"));
+        assert!(v[2].name.contains("projection"));
+        assert!(dag.edges().contains(&(0, 1)));
+        assert!(dag.edges().contains(&(1, 2)));
     }
 }
