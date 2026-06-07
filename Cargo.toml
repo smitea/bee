@@ -9,6 +9,7 @@ members = [
     "crates/bee-registry",
     "crates/bee-dsl-sql",
     "crates/bee-adapter",
+    "crates/bee-plugin-sdk",
     "crates/bee-kv-test",
     "bee",
 ]
@@ -30,6 +31,7 @@ bee-runtime = { path = "crates/bee-runtime" }
 bee-control = { path = "crates/bee-control" }
 bee-dsl-sql = { path = "crates/bee-dsl-sql" }
 bee-adapter = { path = "crates/bee-adapter" }
+bee-plugin-sdk = { path = "crates/bee-plugin-sdk" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

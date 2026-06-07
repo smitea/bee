@@ -8,3 +8,6 @@ description = "Bee 注册中心: Plugin 加载 / 校验 / 网络同步 / 路由�
 
 [lints]
 workspace = true
+
+[dependencies]
+bee-plugin-sdk = { workspace = true }
