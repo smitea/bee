@@ -9,8 +9,8 @@ The progression to **B (dedicated control plane) in 1.x** is triggered by any of
 ## Consequences
 
 - Single-binary deployment simplifies MVP, demo, and small-team production. Operational story: `init` + `add-node` + `deploy` and you're done.
-- Worker load contention with Raft consensus is mitigated but not eliminated. High-throughput worker tasks can still cause tail-latency spikes in consensus; the priority mechanism caps the damage but does not remove it. This is acceptable for MVP; the trigger conditions in §1.0 are designed to catch it before production pain.
+- Worker load contention with Raft consensus is mitigated but not eliminated. High-throughput worker tasks can still cause tail-latency spikes in consensus; the priority mechanism caps the damage but does not remove it. This is acceptable for MVP; the trigger conditions are designed to catch it before production pain.
 - Raft cluster size is effectively the data-plane size. Adding 100 worker Nodes means 100 Raft participants, which has known scalability limits (~7 Nodes for healthy consensus, ~15 with careful tuning). The trigger conditions are designed to catch this before it bites.
-- `bee-control` and `bee-runtime` are already separate crates (architecture.md appendix) so the 1.x split to a dedicated control plane is mostly a deployment change, not a code change.
+- `bee-control` and `bee-runtime` are already separate crates so the 1.x split to a dedicated control plane is mostly a deployment change, not a code change.
 - KV cluster inherits the same Node membership. 1.x may also split KV into its own Raft groups (TiKV-style) if KV write throughput outgrows the shared Raft group — independently of the A→B progression.
 - Migration to B is a 1.x decision: code paths already exist in separate crates; only the deployment topology and the routing of RPCs change.

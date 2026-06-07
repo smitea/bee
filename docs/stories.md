@@ -778,9 +778,25 @@ In `bee-dsl-sql`:
 - **ADRs**: [0010](./adr/0010-datasource-managed-entity.md), [0002](./adr/0002-datasource-is-a-phase.md), [0003](./adr/0003-producer-pipeline-pattern.md)
 
 **What to build**
-Promote Datasource from runtime concept to **first-class managed entity**:
+Promote Datasource from runtime concept to **first-class managed Provider entity**:
 
-- **Data model**: `Datasource { name: String, tenant: u16, adapter: String, plugin_id: String, version_spec: String, config: serde_json::Value, status: DatasourceStatus, created_at, updated_at, owner_node: Option<NodeId> }`. Stored in KV at `ds/{tenant}/{name}`.
+- **Data model** (the Provider):
+  ```yaml
+  Datasource:
+    name: "binance"                  # Provider handle
+    tenant: 0
+    adapter: "binance_subscribe"     # which Adapter the Provider wraps
+    plugin_id: "a3f5..."             # sha256 (ADR-0009)
+    version_spec: "^1.0"
+    config:                          # ⭐ connection-level only: credentials, base_url, rate limits
+      api_key_secret_id: "secret-001"
+      base_url: "wss://api.binance.com"
+      rate_limit_per_sec: 10
+    status: Active | Paused | Disabled
+    created_at, updated_at, owner_node
+  ```
+  Stored in KV at `ds/{tenant}/{name}`. **No per-call args** (symbol, interval, query) in the Datasource — those go in the SQL call site.
+
 - **CLI**:
   - `bee datasource list [--tenant <n>]`
   - `bee datasource create <name> --adapter <a> --plugin-version <v> --config <json>`
@@ -788,20 +804,24 @@ Promote Datasource from runtime concept to **first-class managed entity**:
   - `bee datasource test <name>` (probes via Plugin's `test_connection` method)
   - `bee datasource pause <name>` / `resume <name>` / `delete <name>`
 - **SQL preprocessor**: scan for `use <name>[@<version_spec>];` statements at the top of the SQL file. Resolve each to a registered Datasource; bind to a specific `PluginId` (using the Datasource's `version_spec` if no explicit pin, or matching SemVer range if pinned).
-- **Strict mode enforcement**: any reference to an adapter function (e.g., `binance.subscribe(...)`) without a prior `use binance;` is a **compile error**. No inline Datasource references.
+- **Call site**: `binance.subscribe('BTC/USDT', '5min')` — `binance` is the Datasource name; `subscribe` is a method on the Adapter; `('BTC/USDT', '5min')` are per-call args selecting the stream. **Not** in the Datasource config.
+- **Strict mode enforcement**: any reference to an adapter function (e.g., `binance.subscribe(...)`) without a prior `use binance;` is a **compile error**. Inline `api_key=...` in call args is also a compile error (credentials live in the Datasource config / secret store, never in SQL).
 - **Tenant field**: `tenant: u16` exists on both Datasource and Job structs. MVP enforcement: `ds.tenant == job.tenant || ds.tenant == 0` (struct field only, no ACL enforcement in MVP; 1.x turns it on).
-- **Output Datasources**: same `use` syntax works for sinks — `use influxdb; EMIT INTO influxdb('bitcoin.trade') SELECT ...`.
+- **Output Datasources**: same `use` syntax works for sinks — `use influxdb; EMIT INTO influxdb.emit('bitcoin.trade', ...) SELECT ...`.
 
 **Acceptance criteria**
-- [ ] `bee datasource create binance --adapter binance --plugin-version ^1.0 --config '{}'` succeeds and the Datasource appears in `bee datasource list`
-- [ ] SQL: `use binance; SELECT * FROM binance.subscribe('BTC/USDT', '1m');` compiles and deploys
-- [ ] SQL: `SELECT * FROM binance.subscribe('BTC/USDT', '1m');` (no `use`) is a compile error with a clear message
+- [ ] `bee datasource create binance --adapter binance_subscribe --plugin-version ^1.0 --config '{"base_url":"wss://api.binance.com","rate_limit_per_sec":10}'` succeeds and the Datasource appears in `bee datasource list`
+- [ ] Datasource config schema rejects per-call args (e.g., `--config '{"symbol":"BTC/USDT"}'` produces a clear error: "symbol belongs at the call site, not in Datasource config")
+- [ ] SQL: `use binance; SELECT * FROM binance.subscribe('BTC/USDT', '5min');` compiles and deploys
+- [ ] SQL: `SELECT * FROM binance.subscribe('BTC/USDT', '5min');` (no `use`) is a compile error with a clear message
 - [ ] SQL: `use binance; SELECT * FROM coingecko.subscribe(...);` is a compile error (coingecko is not used)
+- [ ] SQL: `binance.subscribe('BTC/USDT', '5min', api_key='...')` (inline credential) is a compile error
 - [ ] `use binance@^1.0;` resolves to the highest 1.x Plugin version loaded
 - [ ] `use binance@1.4.2;` resolves to exactly that version
 - [ ] `use binance;` with no version spec resolves to the Datasource's configured `version_spec`
 - [ ] `bee datasource pause binance` triggers Draining on all referencing Jobs
 - [ ] Job's `tenant` field defaults to 0; struct field exists but no ACL check in MVP
+- [ ] **StreamSignature test**: two Pipelines calling `binance.subscribe('BTC/USDT', '5min')` share 1 Producer; calling `binance.subscribe('ETH/USDT', '5min')` (different args) creates a separate Producer; calling `binance.ticker('BTC/USDT')` (different method) also creates a separate Producer
 
 ---
 

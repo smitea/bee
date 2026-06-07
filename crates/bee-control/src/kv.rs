@@ -54,7 +54,14 @@ pub enum Op {
     Del { key: String },
     Cas { key: String, expected: Option<Vec<u8>>, new: Vec<u8> },
     Txn { ops: Vec<Op> },
-    RegisterJob { job_id: u32, dag_hash: String, owner_node: u32 },
+    RegisterJob {
+        job_id: u32,
+        dag_hash: String,
+        owner_node: u32,
+        /// S29: tenant namespace (`u16`; 0 = global per ADR-0010).
+        /// MVP: struct field only; ACL check is 1.x.
+        tenant: u16,
+    },
     RegisterTask {
         task_id: u32,
         job_id: u32,

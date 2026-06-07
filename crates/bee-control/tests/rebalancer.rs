@@ -39,6 +39,7 @@ async fn register_old_task(
                 job_id: task_id,
                 dag_hash: "h".into(),
                 owner_node,
+                tenant: 0,
             },
         )
         .await

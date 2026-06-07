@@ -28,14 +28,28 @@ pub struct JobRecord {
     /// upstream is `Running`. The list is order-insensitive (the
     /// deployer's orchestrator can satisfy deps in any order).
     pub dependencies: Vec<DependencyRecord>,
+    /// S18: wall-clock millis when the Job was assigned to its
+    /// current owner. The Rebalancer uses this to gate
+    /// rebalance on the `min_task_age_secs` threshold.
+    pub started_at_ms: u64,
+    /// S28: when the Task is in `Migrating` status, this is the
+    /// `owner_node` it had BEFORE the S12 StealTask transition
+    /// (i.e., the source of the migration). The `bee diagnostics`
+    /// CLI uses this to show the "source → target" view required
+    /// by S28 acceptance. `None` for non-Migrating Tasks.
+    pub migrating_from_node: Option<u32>,
+    /// S29: tenant namespace (`u16`; 0 = global per ADR-0010).
+    /// MVP: struct field only; ACL check
+    /// (`ds.tenant == job.tenant || ds.tenant == 0`) is 1.x.
+    pub tenant: u16,
 }
 
 /// S18: one upstream dependency declared by a downstream Job — for
-/// example, \"Job B reads from Job A's `output` stream\". Resolved
-/// at deploy time: same Node → in-process edge; different Node → BRP
-/// data channel subscription. S18 stops at the metadata layer; the
-/// actual data-channel resolution is the S25 cross-Node rebalance
-/// machinery.
+/// example, "Job B reads from Job A's `output` stream". Resolved
+/// at deploy time: same Node → in-process edge; different Node →
+/// BRP data channel subscription. S18 stops at the metadata
+/// layer; the actual data-channel resolution is the S25
+/// cross-Node rebalance machinery.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DependencyRecord {
     pub upstream_job: u32,
@@ -82,24 +96,27 @@ impl ControlPlaneStateMachine {
 
     pub fn apply_op(&mut self, op: &Op) -> Result<(), TxnError> {
         match op {
-            Op::RegisterJob { job_id, dag_hash, owner_node } => {
-                // Preserve existing lifecycle + dependencies on a
-                // re-Register of the same job_id (the Deployer may
-                // re-register after a dep change).
-                let existing = self.jobs.get(job_id).cloned();
+            Op::RegisterJob { job_id, dag_hash, owner_node, tenant } => {
+                // Preserve existing lifecycle + dependencies +
+                // started_at + migrating_from on a re-Register of the
+                // same job_id (the Deployer may re-register after a
+                // dep change).
+                let (lifecycle, dependencies, started_at_ms, migrating_from_node) = self
+                    .jobs
+                    .get(job_id)
+                    .map(|j| (j.lifecycle, j.dependencies.clone(), j.started_at_ms, j.migrating_from_node))
+                    .unwrap_or((JobLifecycleState::Pending, Vec::new(), 0, None));
                 self.jobs.insert(
                     *job_id,
                     JobRecord {
                         job_id: *job_id,
                         dag_hash: dag_hash.clone(),
                         owner_node: *owner_node,
-                        lifecycle: existing
-                            .as_ref()
-                            .map(|j| j.lifecycle)
-                            .unwrap_or_default(),
-                        dependencies: existing
-                            .map(|j| j.dependencies)
-                            .unwrap_or_default(),
+                        lifecycle,
+                        dependencies,
+                        started_at_ms,
+                        migrating_from_node,
+                        tenant: *tenant,
                     },
                 );
                 Ok(())

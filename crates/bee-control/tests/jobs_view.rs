@@ -40,8 +40,7 @@ async fn bee_jobs_after_deploy_shows_the_job() {
             Op::RegisterJob {
                 job_id: 1,
                 dag_hash: "linear-3".into(),
-                owner_node: leader,
-            },
+                owner_node: leader, tenant: 0, },
         )
         .await
         .unwrap();
@@ -107,8 +106,7 @@ async fn bee_jobs_inspect_shows_dag_and_per_task_status() {
             Op::RegisterJob {
                 job_id: 1,
                 dag_hash: "my-pipeline".into(),
-                owner_node: leader,
-            },
+                owner_node: leader, tenant: 0, },
         )
         .await
         .unwrap();
@@ -186,6 +184,7 @@ async fn bee_jobs_inspect_unknown_job_returns_none_at_library_level() {
                     job_id: id,
                     dag_hash: format!("job-{id}"),
                     owner_node: leader,
+                    tenant: 0,
                 },
             )
             .await

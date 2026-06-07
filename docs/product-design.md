@@ -1,395 +1,403 @@
-# 🐝 Bee 产品设计文档
+# 🐝 Bee Product Design Document
 
 > **Status**: draft v0.1
-> **配套文档**：[CONTEXT.md](../CONTEXT.md)（领域术语）· [docs/architecture.md](./architecture.md)（技术架构）
-> **读者**：创始团队、早期用户、潜在合作方
+> **Companion documents**: [CONTEXT.md](../CONTEXT.md) · [docs/architecture.md](./architecture.md) · [docs/internals.md](./internals.md)
+> **Audience**: founding team, early users, potential partners
 >
-> 本文档讲**是什么 / 给谁用 / 解决什么**。技术实现细节请看 architecture.md。
+> This document covers **what** the product is, **for whom**, and **why**. For technical implementation details, see architecture.md.
 
-## 目录
+## Table of contents
 
-1. [产品愿景](#1-产品愿景)
-2. [目标用户](#2-目标用户)
-3. [痛点与机会](#3-痛点与机会)
-4. [核心场景](#4-核心场景)
-5. [产品能力](#5-产品能力)
-6. [用户工作流](#6-用户工作流)
-7. [用户界面与工具](#7-用户界面与工具)
-8. [差异化定位](#8-差异化定位)
-9. [产品架构概览](#9-产品架构概览)
-10. [商业模式](#10-商业模式)
-11. [产品路线图](#11-产品路线图)
-12. [成功指标](#12-成功指标)
-13. [风险与开放问题](#13-风险与开放问题)
-
----
-
-## 1. 产品愿景
-
-**Bee 是一个面向实时多源数据流的分布式管道计算服务。**
-
-用户用 SQL / Lua 写一段"数据流从哪来 → 怎么变 → 写到哪去"的程序，编译成一个 DAG，部署到 Bee 集群后由运行时自动调度、容错、跨节点协调。**核心承诺是：让"用多少个数据源、跑多复杂的计算"从工程问题变成配置问题。**
-
-### 为什么是现在
-
-- 实时数据源爆炸（交易所行情、IoT 传感器、用户行为日志、LLM 流）但每个都有连接 / 配额 / Schema 异构问题。
-- 传统流处理框架（Flink / Spark）重、运维成本高、对插件和限流不友好。
-- 量化 / LLM / IoT 等场景越来越需要"把多源异构流快速组装成决策"，但每次都要从零搭一套分布式系统。
-- Rust 生态成熟到可以单二进制交付一个完整的控制面 + 数据面，不再需要 JVM / Zookeeper / 外部 KV。
-
-### 三年后想成为什么
-
-- 实时数据流领域的 **"SQLite 时刻"**：单二进制、自托管、零运维门槛，工程师一台笔记本就能拉起一个 Bee 集群。
-- 拥有自己的 **插件市场**（Adapter / Handler），让"接入一个新数据源"从 2 周工程量变成 2 小时复制粘贴。
+1. [Product vision](#1-product-vision)
+2. [Target users](#2-target-users)
+3. [Pain points and opportunities](#3-pain-points-and-opportunities)
+4. [Core scenarios](#4-core-scenarios)
+5. [Product capabilities](#5-product-capabilities)
+6. [User workflows](#6-user-workflows)
+7. [User interface and tools](#7-user-interface-and-tools)
+8. [Differentiation](#8-differentiation)
+9. [Product architecture overview](#9-product-architecture-overview)
+10. [Business model](#10-business-model)
+11. [Product roadmap](#11-product-roadmap)
+12. [Success metrics](#12-success-metrics)
+13. [Risks and open questions](#13-risks-and-open-questions)
 
 ---
 
-## 2. 目标用户
+## 1. Product vision
 
-### 2.1 三类核心用户
+**Bee is a distributed compute service for real-time multi-source data streams.** Users write pipelines in SQL or Rust plugins that say "where does the data come from, how to transform it, where does it go", and Bee compiles this into a DAG, schedules it across a cluster, and keeps it running through node failures. Adapters to external systems (exchanges, news feeds, databases) are loaded as plugins, with credentials, rate limits, and lifecycle managed centrally.
 
-| 用户群 | 占比预期 | 画像 | 核心痛点 |
+### Why now
+
+- Real-time data sources are exploding (exchange ticks, IoT sensors, user behavior logs, LLM streams), but each has heterogeneous connection / quota / schema problems.
+- Traditional stream processing frameworks (Flink / Spark) are heavy, operationally expensive, and unfriendly to plugins and rate limits.
+- Quant / LLM / IoT scenarios increasingly need to "compose multi-source heterogeneous streams into a decision", but each time requires building a distributed system from scratch.
+- The Rust ecosystem is mature enough to deliver a complete Control Plane + Data Plane in a single binary — no more JVM / Zookeeper / external KV dependencies.
+
+### Where we want to be in three years
+
+- The "SQLite moment" for real-time data streams: a single binary, self-hosted, zero operational threshold; an engineer can spin up a Bee cluster on a laptop in one command.
+- A plugin marketplace of our own (Adapters / Handlers), so "adding a new data source" goes from a 2-week engineering project to a 2-hour copy-paste.
+
+---
+
+## 2. Target users
+
+### 2.1 Four core user groups
+
+| Group | Expected share | Persona | Core pain |
 | --- | --- | --- | --- |
-| **数据流作者**（Pipeline Author） | ~50% | 量化研究员、实时数据工程师、ML 特征工程师 | 写好流处理逻辑后，**部署、容错、扩缩容**全是拦路虎 |
-| **插件开发者**（Plugin Developer） | ~20% | 需要接入新数据源 / 自定义算子的工程师 | 现有框架扩展机制要么是 JVM 黑魔法（Flink），要么干脆不支持 |
-| **集群运维**（Operator） | ~15% | 平台 / SRE | 自建流处理集群要管一堆组件，故障定位痛苦 |
-| **业务方**（Consumer） | ~15% | 量化策略消费者、可视化 / 告警 / 报表 | 想"订阅某个流"时不知道该找谁、怎么接 |
+| **Pipeline Author** | ~50% | Quant researcher, real-time data engineer, ML feature engineer | After writing the stream logic, **deployment, fault tolerance, scaling** are all roadblocks |
+| **Plugin Developer** | ~20% | Engineer who needs to integrate a new data source or custom operator | Existing frameworks' extension mechanisms are either JVM black magic (Flink) or unsupported |
+| **Cluster Operator** | ~15% | Platform / SRE | Self-built stream clusters need many components; failure diagnosis is painful |
+| **Business Consumer** | ~15% | Quant strategy consumer, visualization / alerting / reporting | When they want to "subscribe to a stream" they don't know who to ask or how to connect |
 
-### 2.2 角色协作图
+### 2.2 Role collaboration diagram
 
 ```
-数据流作者 ──写 SQL/Lua──▶ Bee 集群
-                              │
-                              ├─▶ 限流外部数据源 (Adapter)
-                              │
-                              └─▶ 订阅者 (业务方)
+Pipeline Author ──writes SQL/Lua──▶ Bee Cluster
+                                    │
+                                    ├─▶ Rate-limited external Datasource (Adapter)
+                                    │
+                                    └─▶ Subscribers (Business Side)
 ```
 
 ---
 
-## 3. 痛点与机会
+## 3. Pain points and opportunities
 
-### 3.1 现状痛点
+### 3.1 Current pain points
 
-1. **多源融合难**：把交易所行情、新闻、订单簿拼成一个决策流，传统方案要写 5 个 consumer、3 个 join、2 个状态机，跨进程 / 跨语言。
-2. **限流即成本**：5 个策略都要 BTC 行情就开 5 个 WS 连接，撞 Binance rate limit。
-3. **状态难管**：EMA / MACD / ASOF JOIN 都隐含状态；现在要么放 Redis（多一跳网络 + 一致性问题），要么放本地（Failover 就丢）。
-4. **JVM 重型依赖**：Flink / Spark 拉起一个集群要 JDK + ZK + S3 + 配置中心；硬件成本和冷启动延迟都不友好。
-5. **容错靠吼**：节点挂了，运维要在 5 分钟内抢修；Work-Stealing 是少数派。
-6. **扩展不友好**：加一个新的数据源 / 算子，Flink 要写 Java SPI、k8s 要写 CRD；学习曲线和发布周期都长。
+1. **Multi-source fusion is hard.** Joining exchange ticks with news, 5 consumers + 3 joins + 2 state machines across processes / languages.
+2. **Rate-limit = cost.** Five strategies needing BTC feed = five WS connections, hitting Binance rate limit.
+3. **State is awkward to manage.** EMA / MACD / ASOF JOIN all imply state; either put in Redis (network hop + consistency problem) or local (state lost on failover).
+4. **JVM-heavy stacks.** Flink / Spark need JDK + ZK + S3 + config center; hardware cost and cold-start latency are both unfriendly.
+5. **Failover is reactive.** Node goes down, ops has 5 minutes to scramble; Work-Stealing is rare.
+6. **Extensibility is unfriendly.** Adding a new data source / operator means writing Java SPI for Flink, or writing a CRD for k8s; long learning curve and release cycle.
 
-### 3.2 现有方案的不足
+### 3.2 Shortcomings of existing solutions
 
-| 方案 | 短板 |
+| Solution | Shortcoming |
 | --- | --- |
-| Apache Flink | JVM 重、状态后端选型复杂、对插件支持薄弱 |
-| Apache Spark Streaming | 微批而非真流；延迟秒级起；JVM |
-| Materialize | 强 Postgres 绑定；与限流数据源 / 插件系统无解 |
-| Kafka Streams | 强 Kafka 绑定；JVM；单机上限 |
-| kdb+ / InfluxDB | 时序场景专精；非通用管道 |
-| Airflow / n8n | 批 / 工作流场景，**不是流** |
-| 自建（Python + asyncio + Celery） | 不可扩展、不可观测、不可控 |
+| Apache Flink | JVM-heavy, complex state backend choice, weak plugin support |
+| Apache Spark Streaming | Micro-batch not true streaming; latency starts at seconds; JVM |
+| Materialize | Strong Postgres binding; no solution for rate-limited data sources / plugin system |
+| Kafka Streams | Strong Kafka binding; JVM; single-machine ceiling |
+| kdb+ / InfluxDB | Time-series-specific, not general pipelines |
+| Airflow / n8n | Batch / workflow scenarios, **not streaming** |
+| Custom (Python + asyncio + Celery) | Not scalable, observable, or controllable |
 
-### 3.3 Bee 的破局点
+### 3.3 Bee's breakthrough points
 
-- **单二进制 + 零外部依赖**：一个 `bee` 进程同时是 Worker 和 Raft 参与者；不依赖外部 KV / ZK。
-- **数据面 P2P**：低延迟、无单点。
-- **控制面 Raft**：强一致的归属、Failover、限流配额分配。
-- **Datasource-as-Phase + Producer 模式**：限流数据源天然共享（见 architecture.md §8.3）。
-- **插件一等公民**：Handler / Adapter 走动态库，热加载、热升级。
-
----
-
-## 4. 核心场景
-
-### 场景 A：量化决策流水线（来自 [README §1 SQL 示例](../README.md)）
-
-**用户故事**：作为一个量化研究员，我想把"5 分钟 BTC 行情"和"Google 新闻舆情"拼成决策信号，写入 InfluxDB / MongoDB。
-
-**Bee 的支持方式**：
-
-- 行情流用 `binance.subscribe('BTC/USDT', '5min')` —— Producer Pipeline 自动共享。
-- 新闻流用 `google_news.search('BitCoin')` —— 同上。
-- 用 `ASOF JOIN` 拼多频流（高低频时间对齐）。
-- 决策层用 `decision_tree(...)` UDF。
-- 多路输出用 `EMIT INTO influxdb(...)` / `EMIT INTO mongodb(...)`。
-
-> **重要**：以上 `binance` / `google_news` / `influxdb` / `mongodb` / `decision_tree` / `ASOF JOIN` 都是**第三方插件或 SQL 扩展**，**不在 Bee 核心**。Bee 核心提供：DSL 框架、`use` 编译、Adapter / Handler trait、Registry、Producer 共享、跨 Pipeline 边、Failover。具体的行情/新闻/UDF 实现由社区或用户团队在独立的 Plugin crate 中提供，编译为 `cdylib` 由 Bee 加载。
-
-**用户的工作量**：写一段 SQL；剩下的 Bee 自动搞定。
-
-### 场景 B：实时多源监控
-
-**用户故事**：作为平台 SRE，我想把"API 网关日志 + 业务错误率 + 数据库慢查询 + 第三方依赖健康"实时聚合到告警通道。
-
-**Bee 的支持方式**：
-
-- 4 个 Input Adapter：`k8s_logs` / `metrics` / `mysql_slow` / `external_health`。
-- 一个 Pipeline 做阈值 + EWMA 平滑。
-- `EMIT INTO pagerduty(...)` 输出告警。
-
-### 场景 C：跨团队数据共享
-
-**用户故事**：作为数据中台团队，我想让"用户点击流"被 4 个下游团队（推荐、风控、BI、广告）独立订阅，且互不影响。
-
-**Bee 的支持方式**：
-
-- 上游一个 Producer Pipeline 跑 Kafka consumer。
-- 4 个下游 Pipeline 各自订阅、计算不同指标。
-- 任何下游 Pipeline 挂掉不影响其他。
-- 上游限流 / 配额天然在 Producer 一侧管理。
+- **Single binary, zero external dependencies**: one `bee` process is simultaneously a Worker and Raft participant; no external KV / ZK.
+- **Data Plane P2P**: low latency, no single point of failure.
+- **Control Plane Raft**: strong consistency for ownership, Failover, rate-limit quota allocation.
+- **Datasource-as-Phase + Producer pattern**: rate-limited data sources shared naturally (see architecture.md §6.4 / ADR-0003 / ADR-0010).
+- **Plugins as first-class citizens**: Handler / Adapter via dynamic libraries, hot-load, hot-upgrade.
 
 ---
 
-## 5. 产品能力
+## 4. Core scenarios
 
-| 能力 | 描述 | 用户价值 | 状态 |
+### Scenario A: Quant decision pipeline (from the original SQL example)
+
+**User story**: As a quant researcher, I want to combine "5-minute BTC tick data" with "Google news sentiment" into a decision signal, written to InfluxDB / MongoDB.
+
+**How Bee supports it**:
+
+- Tick stream via `binance.subscribe('BTC/USDT', '5min')` — Producer Pipeline auto-shared.
+- News stream via `google_news.search('Bitcoin')` — same.
+- Use `ASOF JOIN` to align multi-frequency streams.
+- Decision layer with `decision_tree(...)` UDF.
+- Multi-sink output with `EMIT INTO influxdb.emit(...)` / `EMIT INTO mongodb.emit(...)`.
+
+> **Important**: `binance` / `google_news` / `influxdb` / `mongodb` / `decision_tree` / `ASOF JOIN` are all **third-party plugins or SQL extensions**, **not in Bee core**. Bee core provides: DSL framework, `use` compiler, Adapter / Handler trait, Registry, Stream sharing, cross-Pipeline edges, Failover. The concrete ticker/news/UDF implementations are provided by the community or user teams in independent Plugin crates, compiled as `cdylib` and loaded by Bee.
+
+**User's workload**: write a SQL snippet; Bee handles the rest automatically (including: Datasource registration, Stream sharing, Binance credential management, rate-limit avoidance).
+
+> **On Datasource config granularity**: **connection-level config** (API key, base URL, rate limits) is written by the admin at Datasource registration time; **per-call config** (symbol, interval, query string) is written by the Pipeline Author in SQL. These two layers are **strictly separated** — the same Datasource `binance` can be called by any number of Pipelines with different per-call args.
+
+### Scenario B: Real-time multi-source monitoring
+
+**User story**: As a platform SRE, I want to aggregate "API gateway logs + business error rate + database slow queries + third-party dependency health" in real time to an alerting channel.
+
+**How Bee supports it**:
+
+- 4 Input Adapters: `k8s_logs` / `metrics` / `mysql_slow` / `external_health`.
+- A Pipeline does thresholding + EWMA smoothing.
+- `EMIT INTO pagerduty.emit(...)` outputs alerts.
+
+### Scenario C: Cross-team data sharing
+
+**User story**: As the data platform team, I want the "user click stream" to be subscribed to by 4 downstream teams (recommendation, risk control, BI, advertising) independently, without affecting each other.
+
+**How Bee supports it**:
+
+- Upstream has a Producer Pipeline running a Kafka consumer.
+- 4 downstream Pipelines each subscribe and compute different metrics.
+- Any downstream Pipeline going down doesn't affect the others.
+- Upstream rate limit / quota is managed centrally on the Producer side.
+
+---
+
+## 5. Product capabilities
+
+| Capability | Description | User value | Status |
 | --- | --- | --- | --- |
-| **SQL / Lua DSL** | 类 SQL 语法 + 有限扩展（`ASOF JOIN`、`EMIT INTO`），同时支持 Lua 算子 | 工程师 0 学习成本即可上手 | 0.2 起步 |
-| **DAG 编译** | SQL/Lua → 类型化 DAG | 编译期类型校验，运行时无 schema 漂移 | 0.2 |
-| **分布式部署** | 自动把 Phase 调度到集群节点 | 用户不关心 Node 拓扑 | 0.3 |
-| **自动 Failover** | 节点挂 → 3× 心跳 → Work-Stealing → 自动迁移 | 业务 0 感知 | 0.4 |
-| **限流数据源共享** | Producer Pipeline 模式 | 1 个外部连接服务 N 个 Pipeline | 0.5 |
-| **Datasource 管理** | `use binance;` 引用模式 + CLI 注册/探活/挂起 + 凭证托管 + 租户隔离 | 凭证不入 SQL；admin 集中管控；合规可审计 | 0.5–0.6 (S29–S31) |
-| **插件系统** | Handler / Adapter 动态库，热加载 | 接入新数据源 = 2 小时 | 0.6 |
-| **跨 Pipeline 组合** | Cross-Pipeline 边 + 类型流 | 像搭积木一样拼 Pipeline | 0.5 |
-| **Pipeline 优化器** | 基于运行时指标重排 Phase | 自动调优，无需手工调参 | 0.7 |
-| **观测面板** | Phase 状态 / 耗时 / 资源 / 错误率 | 故障秒级定位 | 0.8 |
-| **Schema 演进** | 流字段可版本化、可回放 | 上下游解耦演进 | 1.x |
-| **多租户隔离** | `uint16` 命名空间 + Datasource ACL | 一个集群服务多团队 / 多客户 | 1.x 强制启用 |
+| **SQL / Lua DSL** | SQL-like syntax with limited extensions (`ASOF JOIN`, `EMIT INTO`), plus Lua operators | Engineers get started with zero learning cost | 0.2 onwards |
+| **DAG compilation** | SQL/Lua → typed DAG | Compile-time type validation, no schema drift at runtime | 0.2 |
+| **Distributed deployment** | Auto-schedule Phases to cluster Nodes | Users don't care about Node topology | 0.3 |
+| **Auto Failover** | Node down → 3× heartbeat → Work-Stealing → auto-migration | Business is 0-aware | 0.4 |
+| **Rate-limit Datasource sharing** | Producer Pipeline pattern | 1 external connection serves N Pipelines | 0.5 |
+| **Datasource management** | `use binance;` reference model + CLI register/probe/pause + credential custody + tenant isolation | Credentials never in SQL; admin central control; compliance audit | 0.5–0.6 (S29–S31) |
+| **Plugin system** | Handler / Adapter dynamic libraries, hot-load | New Datasource = 2 hours | 0.6 |
+| **Cross-Pipeline composition** | Cross-Pipeline edges + typed streams | Compose Pipelines like Lego | 0.5 |
+| **Pipeline optimizer** | Reorder Phases based on runtime metrics | Auto tuning, no manual parameter tuning | 0.7 |
+| **Observability panel** | Phase status / time / resources / error rate | Second-level fault localization | 0.8 |
+| **Schema evolution** | Stream fields can be versioned, replayable | Upstream and downstream can evolve independently | 1.x |
+| **Multi-tenant isolation** | `uint16` namespace + Datasource ACL | One cluster serves multiple teams / customers | 1.x enforcement enabled |
 
 ---
 
-## 6. 用户工作流
+## 6. User workflows
 
-### 6.1 写 Pipeline
+### 6.1 Writing a Pipeline
 
 ```
-1. 打开 SQL 文件 (本地 IDE / VS Code)
-2. 引用所需的 Adapter (binance / influxdb / ...)
-3. 引用所需的 UDF (decision_tree / macd / ...)
-4. 写 DAG: VIEW → JOIN → EMIT
-5. bee compile pipeline.sql → 检查类型 / 依赖
+1. Open SQL file (local IDE / VS Code)
+2. Reference required Adapters (binance / influxdb / ...) via `use`
+3. Reference required UDFs (decision_tree / macd / ...) via `use`
+4. Write the DAG: VIEW → JOIN → EMIT
+5. bee compile pipeline.sql → check types / dependencies
 ```
 
-### 6.2 部署与运行
+### 6.2 Deployment and operation
 
 ```
 1. bee deploy pipeline.sql
-   → 控制面批准调度计划
-   → 各 Node 拉起 Task
-   → 自动建立 BRP 数据通道
+   → Control plane approves the placement plan
+   → Each Node spins up the Task
+   → Auto-establish BRP data channels
 2. bee jobs
-   → 看到 JobId / 状态 / 各 Task owner
+   → See JobId / status / Task owner per Node
 3. bee jobs watch <JobId>
-   → 实时看数据流 / 背压 / 错误
+   → See data flow / backpressure / errors in real time
 ```
 
-### 6.3 监控与调试
+### 6.3 Monitoring and debugging
 
 ```
-1. bee jobs list → 全集群 Pipeline 清单
-2. bee jobs inspect <JobId> → DAG 可视化
-3. bee tasks list --node=N → 该 Node 上所有 Task
-4. bee diagnostics <TaskId> → 耗时 / CPU / 内存 / 错误日志
-5. 探针模式: bee trace <TaskId> → 抽样看实际数据流（脱敏）
+1. bee jobs list → all Pipeline inventory in the cluster
+2. bee jobs inspect <JobId> → DAG visualization
+3. bee tasks list --node=N → all Tasks on a given Node
+4. bee diagnostics <taskId> → time / CPU / memory / error log
+5. Probe mode: bee trace <taskId> → sample actual data flow (redacted)
 ```
 
-### 6.4 升级与扩展
+### 6.4 Upgrade and extension
 
 ```
-1. 升级 Adapter: 替换动态库文件 → Plugin Manager 自动 reload → 引用计数归零后生效
-2. 升级 Pipeline: 提交新版本 DAG → 新 JobId → 老 Job Draining
-3. 灰度: 同一 Pipeline 多版本并行，比例可调（1.x 路线）
+1. Upgrade Adapter: replace dynamic library file → Plugin Manager auto-reloads → takes effect after reference count drops to zero
+2. Upgrade Pipeline: submit new DAG version → new JobId → old Job Draining
+3. Canary: same Pipeline multiple versions in parallel, ratio adjustable (1.x roadmap)
 ```
 
-### 6.5 Datasource 管理（admin 工作流）
+### 6.5 Datasource management (admin workflow)
 
 ```
-1. 注册新 Datasource:
+1. Register a new Datasource (one Provider wraps one Adapter, config holds only connection-level params):
    bee datasource create binance \
-     --adapter binance \
+     --adapter binance_subscribe \
      --plugin-version ^1.0 \
-     --config '{"base_url": "wss://api.binance.com"}' \
+     --config '{"base_url":"wss://api.binance.com","rate_limit_per_sec":10}' \
      --secret api_key=secret-001
-   → Bee 写入 Registry (Raft)
-   → 凭证存 secret store，SQL 里看不到原始 key
+   → Bee writes to Registry (Raft)
+   → Credentials stored in secret store; raw key never appears in SQL
+   → The same Datasource can be called by multiple Pipelines via subscribe('...')/ticker('...') etc.
 
-2. 测试连通性:
+2. Test connectivity:
    bee datasource test binance
-   → 主动建连接 + 取一个 sample event
-   → 显示 "ok" 或错误
+   → Actively build connection + take one sample event
+   → Show "ok" or error
 
-3. 列出 / 检索:
+3. List / search:
    bee datasource list
    bee datasource list --tenant quant-team-a
    bee datasource inspect binance
-   → 元数据 / 当前 Producer Node / 健康指标
+   → Metadata / current Producer Node / health metrics
 
-4. 挂起 / 恢复 (维护窗口):
+4. Pause / resume (maintenance window):
    bee datasource pause binance
-   → 所有引用 Pipeline 触发 Draining
-   → 维护完后: bee datasource resume binance
+   → All referencing Pipelines trigger Draining
+   → After maintenance: bee datasource resume binance
 
-5. 升级 Datasource 版本:
+5. Upgrade Datasource version:
    bee datasource upgrade binance --to ^1.5
-   → 更新 Registry 中 version_spec
-   → 下次新部署的 Pipeline 自动用新版本；旧 Pipeline 继续用旧版本（多版本共存，ADR-0009）
+   → Update version_spec in Registry
+   → Future new Pipeline deployments use the new version automatically; old Pipelines continue with the old version (multi-version coexistence, ADR-0009)
 ```
 
-### 6.6 Pipeline 作者的 Datasource 使用
+### 6.6 Pipeline Author's Datasource usage
 
 ```
-1. SQL 顶部声明 (类似 USE database):
+1. Declare at the top of SQL (similar to USE database):
    use binance;
-   use coingecko;
+   use google_news;
    use influxdb;
+   use mongodb;
 
-2. 引用 (方法名来自 Adapter):
+2. Reference (method names come from the Adapter, per-call args go in the call):
    SELECT * FROM binance.subscribe('BTC/USDT', '5min') AS b
-   ASOF JOIN coingecko.subscribe('bitcoin') AS c ON ...;
+   ASOF JOIN google_news.search('Bitcoin') AS c ON ...;
 
-3. 编译期校验:
+3. Compile-time validation:
    bee compile pipeline.sql
-   → 校验 Datasource 存在 / Adapter 方法签名匹配
-   → 错误: Datasource 'foo' is not registered. Run: bee datasource create foo ...
+   → Validate Datasource is registered / Adapter method signature matches / per-call args types are correct
+   → Error: Datasource 'foo' is not registered. Run: bee datasource create foo ...
 
-4. 严格模式: 禁止 inline 写 API key
+4. Strict mode: inline API keys are forbidden (credentials must come from Datasource config)
+
+5. Stream auto-sharing:
+   5 Pipelines each `binance.subscribe('BTC/USDT', '5min')` →
+   → 5 Pipelines share 1 Producer (because StreamSignature is the same)
+   → 1 external WS connection, no rate-limit collision
 ```
 
 ---
 
-## 7. 用户界面与工具
+## 7. User interface and tools
 
-| 工具 | 目标用户 | 优先级 |
+| Tool | Target user | Priority |
 | --- | --- | --- |
-| **CLI** `bee` | 所有 | **P0**：MVP 必备 |
-| **REST / gRPC API** | 嵌入 Bee 到自家平台 | P0：API 优先于 UI |
-| **VS Code 扩展** | Pipeline 作者 | P1：语法高亮 + Schema 补全 |
-| **Web Console** | 集群运维 | P1：Pipeline 可视化、状态面板 |
-| **SDK (Rust / Python)** | 业务方 | P2：发布 / 订阅流的库 |
-| **插件市场** | 插件开发者 | P2：集中分发 + 评分 |
+| **CLI** `bee` | Everyone | **P0**: MVP required |
+| **REST / gRPC API** | Embed Bee into own platform | P0: API before UI |
+| **VS Code extension** | Pipeline Author | P1: syntax highlighting + schema completion |
+| **Web Console** | Cluster Operator | P1: Pipeline visualization, status panel |
+| **SDK (Rust / Python)** | Business side | P2: library for publishing / subscribing to streams |
+| **Plugin marketplace** | Plugin Developer | P2: centralized distribution + ratings |
 
-**MVP（0.x）只承诺 CLI + API。** 任何带 UI 的需求都推到 1.x 之后。
+**MVP (0.x) only promises CLI + API.** Any UI-bearing needs are pushed to 1.x+.
 
 ---
 
-## 8. 差异化定位
+## 8. Differentiation
 
-| 维度 | Bee | Flink | Materialize | Spark Streaming | kdb+ |
+| Dimension | Bee | Flink | Materialize | Spark Streaming | kdb+ |
 | --- | --- | --- | --- | --- | --- |
-| 运行时 | 单 Rust 二进制 | JVM + ZK + S3 | Postgres 强绑定 | JVM + YARN/K8s | 商业 |
-| 部署成本 | 极低 | 高 | 中 | 高 | 极高 |
-| 状态后端 | 内嵌（无外部依赖） | RocksDB / S3 | Postgres | HDFS / S3 | 内嵌 |
-| 限流数据源 | 天然共享（Producer） | 每 Job 一份 | 每 Job 一份 | 每 Job 一份 | N/A |
-| 插件系统 | 一等公民 | 弱（Java SPI） | 弱 | 无 | 无 |
-| 跨 Pipeline 组合 | 原生 | 需要 Savepoint | 需要复制 | 不支持 | 不支持 |
-| 真延迟 | 毫秒级 | 毫秒级 | 毫秒级 | 秒级 | 毫秒级 |
-| 学习曲线 | 低（SQL） | 高 | 中 | 高 | 极高 |
+| Runtime | Single Rust binary | JVM + ZK + S3 | Postgres-bound | JVM + YARN/K8s | Commercial |
+| Deployment cost | Very low | High | Medium | High | Very high |
+| State backend | Embedded (no external deps) | RocksDB / S3 | Postgres | HDFS / S3 | Embedded |
+| Rate-limited Datasource | Naturally shared (Producer) | One per Job | One per Job | One per Job | N/A |
+| Plugin system | First-class citizen | Weak (Java SPI) | Weak | None | None |
+| Cross-Pipeline composition | Native | Requires Savepoint | Requires copy | Not supported | Not supported |
+| True latency | ms-level | ms-level | ms-level | s-level | ms-level |
+| Learning curve | Low (SQL) | High | Medium | High | Very high |
 
-**核心叙事**：Bee = "**Flink 级别的实时性 + SQLite 级别的部署成本 + 插件市场的可扩展性**"。
+**Core narrative**: Bee = "**Flink-level real-time + SQLite-level deployment cost + plugin-marketplace extensibility**".
 
 ---
 
-## 9. 产品架构概览
+## 9. Product architecture overview
 
 ```mermaid
 graph TB
-    User[Pipeline 作者] -->|SQL/Lua| BeeNode[Bee 节点集群]
-    BeeNode -->|P2P BRP 数据面| BeeNode
-    BeeNode -->|Raft 控制面| BeeNode
+    User[Pipeline Author] -->|SQL/Lua| BeeNode[Bee node cluster]
+    BeeNode -->|P2P BRP Data Plane| BeeNode
+    BeeNode -->|Raft Control Plane| BeeNode
 
-    subgraph BeeNode[单个 Bee 节点]
-        Runtime[Runtime / Phase 引擎]
-        Compiler[DAG 编译器]
-        Scheduler[调度器]
+    subgraph BeeNode[Single Bee Node]
+        Runtime[Runtime / Phase engine]
+        Compiler[DAG compiler]
+        Scheduler[Scheduler]
         PluginMgr[Plugin Manager]
-        Registry[虚拟 Registry]
+        Registry[Virtual Registry]
     end
 
-    PluginMgr -->|加载| AdapterLib[Adapter 动态库]
-    PluginMgr -->|加载| HandlerLib[Handler 动态库]
-    AdapterLib -->|限流连接| External[外部数据源]
-    HandlerLib -->|纯函数| Runtime
+    PluginMgr -->|loads| AdapterLib[Adapter dynamic library]
+    PluginMgr -->|loads| HandlerLib[Handler dynamic library]
+    AdapterLib -->|rate-limited connection| External[External Datasource]
+    HandlerLib -->|pure function| Runtime
 ```
 
-**用户视角的 Bee 是一个"集群黑盒"**：用户只关心写 Pipeline / 看监控 / 装插件；节点之间怎么协调、Task 怎么调度、Failover 怎么走——都是 Bee 内部的事。
+**From the user's perspective, Bee is a "cluster black box"**: users only care about writing Pipelines, viewing monitoring, and installing plugins. How Nodes coordinate, how Tasks are scheduled, how Failover runs — all internal.
 
-完整技术架构见 [docs/architecture.md](./architecture.md)。
+Full technical architecture: [docs/architecture.md](./architecture.md).
 
 ---
 
-## 10. 商业模式
+## 10. Business model
 
-> **当前阶段：开源核心、自托管、零商业化。** 本节作为未来 1.x 的指引，不是 0.x 的承诺。
+> **Current stage: open-source core, self-hosted, zero commercialization.** This section is guidance for future 1.x/2.x, not a 0.x commitment.
 
-| 模式 | 描述 | 时间窗 |
+| Mode | Description | Time window |
 | --- | --- | --- |
-| **OSS Core** | Apache 2.0 / MIT；`bee` 单一二进制；社区驱动 | 0.x – 1.x |
-| **Enterprise** | Auth / RBAC / 多租户 / 高级监控 / SLA 保障 | 1.x+ |
-| **Managed Cloud** | 托管 Bee 服务；按节点 × 时长计费 | 2.x+ |
-| **Plugin Marketplace** | 官方 + 第三方 Adapter / Handler 分发；Bee 抽成 | 2.x+ |
+| **OSS Core** | Apache 2.0 / MIT; `bee` single binary; community-driven | 0.x – 1.x |
+| **Enterprise** | Auth / RBAC / multi-tenant / advanced monitoring / SLA guarantees | 1.x+ |
+| **Managed Cloud** | Managed Bee service; billed per node × time | 2.x+ |
+| **Plugin Marketplace** | Official + third-party Adapter / Handler distribution; Bee takes a cut | 2.x+ |
 
-**短期（0.x – 1.x）的生存策略**：靠咨询 + 量化团队的私有部署合同养活核心团队，不做 SaaS。
+**Short-term (0.x – 1.x) survival strategy**: bootstrap the core team via consulting + private deployment contracts with quant teams; no SaaS.
 
 ---
 
-## 11. 产品路线图
+## 11. Product roadmap
 
-与 [docs/architecture.md §11](./architecture.md#11-路线图) 对齐；这里只标用户可见里程碑。
+Aligned with [docs/architecture.md §12.1](./architecture.md#121-roadmap) and [docs/stories.md](./stories.md). This list highlights user-visible milestones.
 
-| 阶段 | 用户可见成果 |
+| Stage | User-visible outcome |
 | --- | --- |
-| **0.1 – 0.2** | **单机能跑**：本机 `bee run pipeline.sql`，能在终端看到流。Demo 给种子用户。 |
-| **0.3 – 0.4** | **小集群**：3 节点 Failover 演示。**有第一个外部付费用户在用**。 |
-| **0.5** | **限流共享 + 跨 Pipeline**：场景 A（量化）可上线，**第一个量化策略在生产**。 |
-| **0.6 – 0.7** | **插件系统**：第三方能写 Adapter；**有 3 个外部 Adapter 在社区**。 |
-| **0.8 – 1.0** | **生产可用**：观测面板 + Schema 演进；**公开发布 1.0 公告**。 |
-| **1.x** | Enterprise 特性 + 文档站 + 培训。 |
-| **2.x** | Managed Cloud 试点 + 插件市场上线。 |
+| **0.1 – 0.2** | **Single-node works**: `bee run pipeline.sql` locally shows the stream. Demo to seed users. |
+| **0.3 – 0.4** | **Small cluster**: 3-node Failover demo. **First external paying user**. |
+| **0.5** | **Rate-limit sharing + cross-Pipeline**: scenario A (quant) goes to production, **first quant strategy in production**. |
+| **0.6 – 0.7** | **Plugin system**: third parties can write Adapters; **3 external Adapters in the community**. |
+| **0.8 – 1.0** | **Production-ready**: observability panel + Schema evolution; **public 1.0 announcement**. |
+| **1.x** | Enterprise features + docs site + training. |
+| **2.x** | Managed Cloud pilot + plugin marketplace. |
 
 ---
 
-## 12. 成功指标
+## 12. Success metrics
 
-### 12.1 北极星指标
+### 12.1 North star metric
 
-> **Bee 集群每日处理的 Phase × 数据条数**（衡量"实际跑起来的分布式工作量"）。
+> **Total Phase × data items processed by Bee clusters per day** (measures "real distributed workload running").
 
-### 12.2 关键指标
+### 12.2 Key metrics
 
-| 类别 | 指标 | 目标（1.0 时） |
+| Category | Metric | Target (at 1.0) |
 | --- | --- | --- |
-| 性能 | 跨 Node p99 延迟 | < 10 ms |
-| 性能 | 单 Node 吞吐 | > 100K evt/s |
-| 可靠性 | Failover 平均恢复时间 | < 60 s（= 1 个 orphan 超时） |
-| 可用性 | 单 Pipeline 月度可用率 | > 99.9% |
-| 易用 | 从 `bee deploy` 到第一次看到数据的中位时间 | < 5 min |
-| 生态 | 公开 Adapter 数量 | > 20 |
-| 社区 | 月活贡献者 | > 30 |
-| 商业 | 自托管付费客户数 | > 10 |
+| Performance | Cross-Node p99 latency | < 10 ms |
+| Performance | Single-Node throughput | > 100K events/sec |
+| Reliability | Mean Failover recovery time | < 60 s (1 Orphaned period) |
+| Availability | Per-Pipeline monthly availability | > 99.9% |
+| Usability | Median time from `bee deploy` to first data seen | < 5 min |
+| Ecosystem | Public Adapters count | > 20 |
+| Community | Monthly active contributors | > 30 |
+| Commercial | Self-hosted paying customers | > 10 |
 
 ---
 
-## 13. 风险与开放问题
+## 13. Risks and open questions
 
-| 风险 | 描述 | 缓解 |
+| Risk | Description | Mitigation |
 | --- | --- | --- |
-| **Raft 心跳拖垮数据面** | 简化拓扑下数据 Worker 同时是 Raft 参与者；GC 暂停 / 长尾延迟可能触发频繁选举 | 1.x 考虑独立控制面部署；生产默认 5 节点 |
-| **状态存储选型** | EMA / MACD / ASOF JOIN 的状态可能很大；放哪里？ | 0.4 之前用 in-memory + WAL；后续评估 RocksDB |
-| **跨语言 Handler** | 插件用 C ABI 还是 Rust trait objects？两者扩展性差异巨大 | 0.6 前决定；倾向 C ABI（更广的生态接入） |
-| **多 DSL 语义对齐** | SQL 里的 `EMIT INTO` 跟 Lua 里的 `emit` 是否完全等价？ | 0.8 前用一组等价性测试覆盖 |
-| **限流配额的公平性** | Producer Pipeline 多个订阅者争抢带宽时如何分配？ | 0.5 设计"加权轮询"或"优先级队列" |
-| **Schema 演进** | 流字段增减时，跨 Pipeline 订阅者是否自动适配？ | 1.x 路线，避免过早设计 |
-| **冷启动延迟** | 节点从 0 拉起到能处理流要多长时间？ | 0.3 测一次；目标 < 10 s |
+| **Raft heartbeat dragging down data plane** | Simplified topology: data Workers are also Raft participants; GC pauses / long-tail latency may trigger frequent elections | 1.x consider dedicated control plane; default 5 nodes in production |
+| **State storage choice** | EMA / MACD / ASOF JOIN state can be large; where to put it? | Use in-memory + WAL before 0.4; evaluate RocksDB later |
+| **Cross-language Handler** | C ABI vs Rust trait objects? | Decide before 0.6; lean toward C ABI (broader ecosystem) |
+| **Multi-DSL semantic alignment** | Is `EMIT INTO` in SQL fully equivalent to `emit` in Lua? | 0.8 cover with equivalence tests |
+| **Rate-limit quota fairness** | How to allocate bandwidth when multiple subscribers compete for a shared Producer? | 0.5 design weighted round-robin or priority queue |
+| **Schema evolution** | When stream fields change, do cross-Pipeline subscribers auto-adapt? | 1.x roadmap; avoid premature design |
+| **Cold start latency** | How long from Node 0 to processing? | 0.3 measure once; target < 10 s |
+| **Datasource as managed entity — operational burden** | Will admins actually register every Datasource before any Pipeline can use it, or will they revolt? | Prototype the workflow with seed users; make the CLI workflow frictionless; allow `bee datasource auto-create` mode for prototyping only |
 
 ---
 
-## 附录 A：与现有文档的交叉引用
+## Appendix A: Cross-references
 
-- 术语定义：[CONTEXT.md](../CONTEXT.md)
-- 技术架构（含 4 个 mermaid 时序图）：[docs/architecture.md](./architecture.md)
-- 决策记录：[docs/adr/](./adr/)（共 9 条）
+- **Terminology**: [CONTEXT.md](../CONTEXT.md)
+- **Technical architecture** (with 4 mermaid sequence diagrams): [docs/architecture.md](./architecture.md)
+- **Decision records**: [docs/adr/](./adr/) (10 ADRs)
   - 0001 [Data Plane P2P + Control Plane Raft](./adr/0001-data-plane-p2p-control-plane-raft.md)
   - 0002 [Datasource is a Phase with an Adapter](./adr/0002-datasource-is-a-phase.md)
   - 0003 [Producer Pipeline pattern for rate-limited sharing](./adr/0003-producer-pipeline-pattern.md)
@@ -400,11 +408,12 @@ graph TB
   - 0008 [Optimizer / Scheduler; runtime adaptive optimization](./adr/0008-optimizer-scheduler-adaptive.md)
   - 0009 [Plugin multi-version + hash identity + strict ABI](./adr/0009-plugin-multiversion-hash-abi.md)
   - 0010 [Datasource as a managed entity with `use` syntax and tenant namespace](./adr/0010-datasource-managed-entity.md)
-- 项目概览：[README.md](../README.md)（注：README 仍是 v1 范围，需要同步到 v2）
+- **Implementation backlog**: [docs/stories.md](./stories.md) (32 vertical slices)
+- **Implementation details**: [docs/internals.md](./internals.md)
 
-## 附录 B：本文档待办
+## Appendix B: Open questions for this document
 
-- [ ] 加用户旅程图（user journey）
-- [ ] 决定商业模式的具体开源协议（Apache 2.0 vs MIT）
-- [ ] 量化场景的"决策延迟 SLA"（p99 应在多少毫秒内）
-- [ ] 与具体潜在客户（种子用户）做完 3 次访谈后回填 §2 / §4
+- [ ] Add a user journey diagram
+- [ ] Decide the open-source license (Apache 2.0 vs MIT)
+- [ ] Quant scenario decision latency SLA (p99 should be within X milliseconds)
+- [ ] Fill in §2 / §4 with insights from 3 seed user interviews

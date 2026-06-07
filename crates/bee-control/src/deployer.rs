@@ -228,15 +228,16 @@ impl Deployer {
             }
         }
 
-        self.cluster
-            .submit(
-                leader,
-                Op::RegisterJob {
-                    job_id,
-                    dag_hash: pipeline.name.clone(),
-                    owner_node: leader,
-                },
-            )
+            self.cluster
+                .submit(
+                    leader,
+                    Op::RegisterJob {
+                        job_id,
+                        dag_hash: pipeline.name.clone(),
+                        owner_node: leader,
+                        tenant: 0, // S29 MVP: deployer defaults to tenant 0 (global)
+                    },
+                )
             .await
             .map_err(DeployError::Submit)?;
 

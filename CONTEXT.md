@@ -4,22 +4,22 @@ A distributed dataflow pipeline compute service. User-authored Pipelines are dec
 
 ## Architecture
 
-**数据面 (Data Plane)**:
+**Data Plane**:
 The P2P traffic layer that carries Phase-to-Phase data, remote Handler invocations, and Input/Output flows over BRP. No coordinator sits in the data path.
-_Avoid_: "去中心化网络" (misleading — Bee is hybrid, not pure P2P)
+_Avoid_: "decentralized network" (misleading — Bee is hybrid, not pure P2P)
 
-**控制面 (Control Plane)**:
+**Control Plane**:
 The Raft-replicated authoritative state for membership, Pipeline/Phase ownership, orphan detection, and Work-Stealing arbitration. All mutations go through the Raft Leader.
-_Avoid_: "中心服务器" (it is a replicated state machine, not a single server)
+_Avoid_: "central server" (it is replicated, not standalone)
 
-**Raft 集群 (Raft Cluster)**:
+**Raft Cluster**:
 The replicated state machine that backs the Control Plane. Every ownership or membership change requires quorum commit.
 
 ## Topology
 
-**节点 (Node)**:
+**Node**:
 A single Bee process / OS-level deployment unit. Each Node runs one Raft participant (in the simplest topology) and acts as a worker in the Data Plane.
-_Avoid_: using 节点 for a vertex inside a Pipeline — that is a Phase (a 顶点 / vertex of the DAG).
+_Avoid_: using "Node" for a vertex inside a Pipeline — that is a Phase (a vertex of the DAG).
 
 ## Data Model
 
@@ -28,20 +28,20 @@ A user-authored, named DAG of Phases. Phases may emit to Phases in other Pipelin
 _Avoid_: using "Pipeline" for a running instance — that is a Pipeline Job.
 
 **Phase**:
-A 顶点 (vertex) in a Pipeline DAG. Has one or more typed input streams and one or more output streams; calls a Handler to transform them.
+A vertex in a Pipeline DAG. Has one or more typed input streams and one or more output streams; calls a Handler to transform them.
 _Avoid_: using "Phase" for a scheduled instance — that is a Phase Assignment.
 
 **Handler**:
 A pure compute function invoked by a Phase. The runtime treats Handlers as stateless; any persistent per-Job state lives at the Job or Phase-Assignment level.
 
-**Datasource (管理态 / Management View)**:
-A named, registered entity in Bee that bundles a connection to an external system — its name, the Adapter it uses, its configuration (including secrets), its lifecycle status, and the tenant it belongs to. Pipelines reference Datasources via the `use <name>` SQL directive. The runtime representation of a Datasource is still a Phase with an Adapter (ADR-0002); the managed entity is the **view** that makes that Phase discoverable, governable, and reusable.
-_Avoid_: thinking of "Datasource" as just a runtime Phase role — it is also a **management object** with its own ID, lifecycle, and ACL.
+**Datasource (managed Provider)**:
+A named, registered **Provider** in Bee that bundles a connection to an external system — its name, the Adapter it wraps, its **connection-level** configuration (credentials, base URL, rate-limit settings), its lifecycle status, and the tenant it belongs to. A Datasource does NOT carry per-call arguments (symbol, interval, query string); those go in the SQL at the call site. Pipelines reference Datasources via `use <name>;` and call Adapter methods with per-call args (e.g., `binance.subscribe('BTC/USDT', '5min')`).
+_Avoid_: confusing Datasource (Provider = connection) with Stream (the result of a specific call). Two different calls on the same Datasource produce two different Streams and may have two different Producers (per ADR-0003 refined by ADR-0010).
 
 **Adapter**:
-The plugin contract for talking to an external system. Implemented as a dynamically loaded library (per ADR-0005); provides Input (subscribe/pull) and Output (emit/push) kinds. A Datasource managed entity references exactly one Adapter plus a config payload. The Adapter supplies the method names (e.g., `subscribe`, `emit`) that Pipelines call after `use`-ing the Datasource.
+The plugin contract for talking to an external system. Implemented as a dynamically loaded library; provides Input (subscribe/pull) and Output (emit/push) kinds. A Datasource Phase references exactly one Adapter plus a config payload. The Adapter supplies the method names (e.g., `subscribe`, `emit`) that Pipelines call after `use`-ing the Datasource.
 
-**Cross-Pipeline Edge (跨 Pipeline 边)**:
+**Cross-Pipeline Edge**:
 An edge in the DAG whose source Phase and target Phase belong to different Pipelines. The runtime resolves the edge at deploy time: if both Phases are in the same Job, the edge is in-process; if they are in different Jobs, the edge is a BRP data-channel subscription.
 _Avoid_: a separate "Inter-Pipeline Bus" type (the same BRP data channel carries every edge).
 
@@ -67,7 +67,7 @@ A Phase Assignment being handed off from one Node to another (during Work-Steali
 
 ## State & Storage
 
-**KV 集群 (KV Cluster)**:
+**KV Cluster**:
 A cluster-shared key-value store that runs as a second logical state machine on the same Raft cluster as the Control Plane. Stores Task State, Checkpoints, and Saved Offsets. Provides linearizable reads/writes and multi-key transactions. API: `get / put / cas / txn(ops)` over opaque bincode values; no range scan or index in MVP.
 _Avoid_: thinking of it as a "time-series database" or "shared cache" — it is the durable state backbone of Bee, not an analytics store.
 
@@ -76,7 +76,7 @@ Per-Task private state, owned by exactly one Task at a time, stored in the KV Cl
 _Avoid_: storing business data (K-lines, news) directly in Task State — that goes through the Data Plane.
 
 **Checkpoint**:
-An atomic snapshot of `(Task State, Saved Offset)` for a Task, stored in the KV Cluster. The granularity of snapshotting and the recovery protocol are described in architecture.md §8.2.
+An atomic snapshot of `(Task State, Saved Offset)` for a Task, stored in the KV Cluster. The granularity of snapshotting and the recovery protocol are described in architecture.md §7.2.
 
 ## Plugin System
 

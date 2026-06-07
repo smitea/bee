@@ -200,6 +200,7 @@ mod tests {
             job_id: 1,
             dag_hash: "h1".into(),
             owner_node: 1,
+        tenant: 0,
         })
         .unwrap();
         let s = format_jobs(&cp);
@@ -216,6 +217,7 @@ mod tests {
             job_id: 1,
             dag_hash: "h1".into(),
             owner_node: 1,
+        tenant: 0,
         })
         .unwrap();
         cp.apply_op(&crate::kv::Op::UpdateJobLifecycle {
@@ -234,6 +236,7 @@ mod tests {
             job_id: 1,
             dag_hash: "h1".into(),
             owner_node: 1,
+        tenant: 0,
         })
         .unwrap();
         cp.apply_op(&crate::kv::Op::UpdateJobLifecycle {
@@ -252,6 +255,7 @@ mod tests {
             job_id: 1,
             dag_hash: "h1".into(),
             owner_node: 1,
+        tenant: 0,
         })
         .unwrap();
         cp.apply_op(&crate::kv::Op::UpdateJobLifecycle {
@@ -279,6 +283,7 @@ mod tests {
             job_id: 1,
             dag_hash: "my-pipeline".into(),
             owner_node: 1,
+            tenant: 0,
         })
         .unwrap();
         cp.apply_op(&crate::kv::Op::RegisterTask {

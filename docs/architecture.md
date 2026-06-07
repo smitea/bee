@@ -1,583 +1,625 @@
-# 🐝 Bee 架构设计说明书 v2
+# 🐝 Bee Architecture
 
-> **范围**：本文档描述 Bee 分布式数据流管道计算服务的完整架构——数据流模型、调度、注册中心、故障转移，以及承载它们的 BRP 网络协议。
+> **Audience**: This document is for **everyone** evaluating, operating, extending, or reviewing Bee. It describes the system at the architectural level — what it does, why, how the pieces fit together, and how to operate it. Implementation details (crate boundaries, wire format, build instructions) live in [docs/internals.md](./internals.md).
 >
-> **阅读建议**：先浏览 [CONTEXT.md](../CONTEXT.md) 了解领域术语，再回到本文档。BRP 协议的 4 层 / 报文格式独立于上层数据模型，可按需跳读。
+> **Reading order**: §1 → §2 → §3 for the pitch and rules. §4–§6 for the system itself. §7–§9 for using and running it. §10–§12 for cross-cutting concerns.
+>
+> **Related documents**:
+> - [CONTEXT.md](../CONTEXT.md) — domain glossary (Pipeline, Phase, Datasource, …)
+> - [docs/product-design.md](./product-design.md) — who uses Bee and why
+> - [docs/stories.md](./stories.md) — implementation backlog
+> - [docs/adr/](./adr/) — irreversible design decisions
+> - [docs/internals.md](./internals.md) — implementation details
 
-## 目录
+## Table of contents
 
-0. [修订记录](#0-修订记录)
-1. [设计目标](#1-设计目标)
-2. [核心数据模型（静态）](#2-核心数据模型静态)
-3. [运行实体（动态）](#3-运行实体动态)
-4. [生命周期状态机](#4-生命周期状态机)
-5. [系统拓扑](#5-系统拓扑)
-6. [BRP 协议分层](#6-brp-协议分层)
-7. [二进制报文格式](#7-二进制报文格式)
-8. [关键流程](#8-关键流程)
-9. [注册中心（Registry）](#9-注册中心registry)
-10. [时序图](#10-时序图)
-11. [路线图](#11-路线图)
-12. [附录：crate 边界草案](#附录crate-边界草案)
-
----
-
-## 0. 修订记录
-
-| 版本 | 范围 | 关键变化 |
-| --- | --- | --- |
-| **v1** | 仅 BRP 网络协议 | 4 层分层、15 字节 Header、两个时序图 |
-| **v2** | 完整 Bee 系统 | 引入 DAG 数据模型、Job/Task、Producer Pipeline、Datasource-as-Phase、Failover 流程；BRP 协议部分保留为第 6、7 章 |
-
-v1 中"控制面 / 数据面"是协议内部的分层；v2 中这两个术语上升到**系统架构**层面（见 ADR-0001），含义更广。
+1. [Overview](#1-overview)
+2. [Why Bee exists](#2-why-bee-exists)
+3. [Design principles](#3-design-principles)
+4. [High-level architecture](#4-high-level-architecture)
+5. [Core abstractions](#5-core-abstractions)
+6. [Subsystems](#6-subsystems)
+7. [Key flows](#7-key-flows)
+8. [Deployment](#8-deployment)
+9. [Operations](#9-operations)
+10. [Security model](#10-security-model)
+11. [Performance characteristics](#11-performance-characteristics)
+12. [Roadmap and references](#12-roadmap-and-references)
 
 ---
 
-## 1. 设计目标
+## 1. Overview
 
-| 类别 | 目标 | 体现 |
-| --- | --- | --- |
-| **架构** | 数据面 P2P，控制面 Raft | 详见 ADR-0001 |
-| **可表达** | 用户用 SQL / Lua 写 Pipeline，编译为 DAG | 运行时支持多 DSL 互译 |
-| **可扩展** | 跨 Pipeline 边实现 Pipeline 组合与 Datasource 共享 | Producer Pipeline 模式（§8.3） |
-| **可插拔** | Handler 与 Adapter 通过动态库加载 | Plugin Manager + 热重载 |
-| **高可用** | 节点失效 → Task 自动 Work-Stealing | Orphaned / Migrating 状态机 |
-| **限流友好** | 5 个 Pipeline 共用一个外部数据源 → 1 个网络连接 | Producer Pipeline 自动共享 |
-| **零运行时外部依赖** | 仅 `tokio` + `bytes` + `bincode` | 传输与编解码 |
+**Bee is a distributed compute service for streaming data pipelines.** You write what data to read, how to transform it, and where to send it — in SQL or a Rust plugin — and Bee compiles that into a DAG, schedules it across a cluster, and keeps it running through node failures. Adapters to external systems (exchanges, news feeds, databases) are loaded as plugins, with credentials, rate limits, and lifecycle managed centrally.
+
+The single most distinctive design choice: **data flows peer-to-peer** between nodes over a custom binary protocol (BRP), while **control state lives in a Raft-replicated state machine** on the same nodes. Datasources are first-class managed entities, not inline strings in SQL. Rate-limited external sources are shared across pipelines automatically — five strategies subscribing to the same Binance feed cost one WebSocket connection, not five.
 
 ---
 
-## 2. 核心数据模型（静态）
+## 2. Why Bee exists
 
-### 2.1 静态实体关系
+### 2.1 The problem
 
-```mermaid
-graph TD
-    Pipeline["Pipeline<br/>（命名 DAG）"] -->|包含多个| Phase["Phase<br/>（顶点）"]
-    Phase -->|调用| Handler["Handler<br/>（纯函数）"]
-    Phase -.->|adapter 字段引用| Adapter["Adapter<br/>（插件）"]
-    Adapter -->|Input 种类| Input["采集外部"]
-    Adapter -->|Output 种类| Output["写出外部"]
-    Phase <-.->|跨 Pipeline 边| Phase2["另一 Pipeline 的 Phase"]
-```
+Real-time data pipelines are everywhere — quant trading, IoT, monitoring, ML feature pipelines. Building one in 2026 still means gluing together a half-dozen tools, each with its own deployment model, failure modes, and operational story. Specifically:
 
-### 2.2 定义
+- **Multi-source fusion is hard.** Joining exchange ticks with news sentiment, both streaming, requires custom glue between 5 consumers, 3 joiners, 2 state machines.
+- **Rate-limited sources are expensive.** Five strategies needing the same BTC feed means five WebSocket connections, possibly hitting the exchange's rate limit.
+- **State is awkward.** Stateful operators (EMAs, ASOF JOINs, sliding windows) need somewhere to live. In-memory is fast but loses data on crash; external KV is durable but adds a hop.
+- **JVM-heavy stacks are friction.** Flink and Spark pull in JDK, Zookeeper, S3, a config center — high cold-start latency, high operational cost.
+- **Plugins are an afterthought.** Adding a new data source to most frameworks means writing Java SPI, rebuilding the world.
+- **Failover is reactive, not automatic.** Most operators are paged for a node failure and have to manually reassign work.
 
-| 概念 | 性质 | 备注 |
-| --- | --- | --- |
-| **Pipeline** | 命名 DAG，编译后不可变 | 见 [CONTEXT.md](../CONTEXT.md) |
-| **Phase** | DAG 顶点，调用 Handler；带可选 `adapter` 字段 | 一切 Phase 地位平等，Datasource 是带 Adapter 的 Phase |
-| **Handler** | 纯计算函数 | 状态在 Job / Task 层 |
-| **Adapter** | 外部系统插件；Input / Output 两种 kind | 通过 Plugin Manager 加载 |
-| **Cross-Pipeline Edge** | 源 Phase 与目标 Phase 分属不同 Pipeline | 部署时按 Job 归属解析为 in-process / BRP 订阅 |
+### 2.2 Goals
 
-### 2.3 Datasource-as-Phase（ADR-0002）
+| Goal | What it means |
+| --- | --- |
+| **Pipelines survive node failures** | Tasks are automatically reassigned within ~30s of a node becoming unreachable; in-flight state is recovered from a shared KV; downstream consumers don't notice. |
+| **Rate-limited sources shared by default** | Multiple pipelines calling the same `(Datasource, method, args)` share a single Producer. No code to write for this. |
+| **Single binary, zero external runtime deps** | One `bee` process runs the data plane, control plane, KV store, and plugin loader. No JDK, no Zookeeper, no external KV. |
+| **Plugins as first-class citizens** | Adapters and Handlers are `.so` files dropped into a directory. Hash-identified, multi-version coexisting, hot-reloadable, ABI-version-checked. |
+| **Credentials never touch SQL** | API keys live in a secret store; pipelines reference Datasources by name; the SQL is sharable. |
+| **Domain is open, framework is opinionated** | The framework is ours (Bee core). Datasources, UDFs, business logic are all plugins. |
+| **Sub-millisecond latency when needed** | Micro-batch windows tunable to 10ms; per-event mode available; in-memory state cache; priority scheduling. |
 
-```
-Datasource 不是独立的一等公民，而是"带 Adapter 字段的 Phase"。
-所以 SQL 中的 binance.subscribe(...)、EMIT INTO influxdb(...)
-在编译器里都生成普通的 Phase 节点。
-```
+### 2.3 Non-goals
 
-为什么这样设计：
-
-- 模型只有一种节点（Phase），运行时只有一种调度单元（Task）。
-- 跨 Pipeline 边、Input、Output 在运行时都是"流过数据的边"，用同一种机制（BRP 数据通道）。
-- 限流数据源的共享变成"上游 Phase 的 fork"——见 §8.3。
-
----
-
-## 3. 运行实体（动态）
-
-### 3.1 动态实体关系
-
-```mermaid
-graph TD
-    Job["Pipeline Job<br/>(JobId)"] -->|编译自| Def["Pipeline Definition"]
-    Job -->|包含多个| Task["Phase Assignment / Task<br/>(TaskId)"]
-    Task -->|调度到| Node["Node"]
-    Task -->|运行| Handler["Handler"]
-    Task -.->|加载| Adapter["Adapter"]
-    Job <-.->|跨 Job 边| OtherJob["另一 Pipeline Job"]
-    ProducerJob["Producer Pipeline<br/>(Datasource-as-Pipeline)"] -->|输出流被订阅| SubscriberJob["Subscriber Job"]
-```
-
-### 3.2 定义
-
-| 概念 | 性质 | 备注 |
-| --- | --- | --- |
-| **Pipeline Job** | 一次具体的部署运行 | `JobId` 全局唯一 |
-| **Phase Assignment (Task)** | Phase 在某 Node 的运行体 | `TaskId` 全局唯一，是 Failover 单元 |
-| **Producer Pipeline** | 专门发布流给其他 Job 订阅的 Pipeline | 典型形态是 Datasource-as-Pipeline：单 Phase Pipeline，零上游 |
-
-### 3.3 标识符（建议草案）
-
-```
-JobId    = ULID
-TaskId   = (JobId, PhaseIndex) 或全局 ULID
-AdapterId = 全局字符串（"binance" / "influxdb" / ...）
-DatasourceSignature = hash(AdapterId + config_payload)   ← 决定是否共享 Producer
-```
-
-`DatasourceSignature` 是 Producer 共享的关键——见 §8.3。
+| Non-goal | Why |
+| --- | --- |
+| **Batch processing** | Bee is for streams. Batch jobs belong in Airflow, Spark Batch, or DuckDB. |
+| **Multi-DSL at MVP** | MVP supports SQL only. Lua is a 1.x addition. Python, JSON DSLs — not on the roadmap. |
+| **Cross-language plugins at MVP** | MVP plugins are Rust cdylibs compiled against Bee's exact toolchain version. C ABI for other languages is a 1.x feature. |
+| **BYO control plane components** | The control plane and KV live in the same Raft group as the Worker. Splitting them is a 1.x evolution behind explicit trigger conditions, not a configuration option. |
+| **Cross-cluster federation** | One Bee cluster = one Raft group. Multi-region deployment is not in scope. |
+| **Strong exactly-once across heterogeneous sinks** | We provide at-least-once with deterministic replay from saved offsets. External sinks that don't support idempotency may see duplicates. |
+| **Schema evolution in MVP** | Pipeline schema changes are an explicit 1.x feature. Until then, schema changes require a versioned redeploy. |
 
 ---
 
-## 4. 生命周期状态机
+## 3. Design principles
 
-### 4.1 Pipeline Job
+Six rules govern every decision in Bee. If a change violates one of these, the change needs an ADR.
 
-```mermaid
-stateDiagram-v2
-    [*] --> Pending: 提交
-    Pending --> Deploying: 控制面批准调度计划
-    Deploying --> Running: 所有 Task 进入 Scheduled
-    Running --> Draining: 收到停止请求
-    Draining --> Stopped: 所有 Task 清理完毕
-    Running --> Failed: 不可恢复错误
-    Deploying --> Failed: 调度失败
-    Stopped --> [*]
-    Failed --> [*]
-```
-
-### 4.2 Phase Assignment（Task）
-
-```mermaid
-stateDiagram-v2
-    [*] --> Pending: 等待调度
-    Pending --> Scheduled: 控制面决策 (Node N 部署)
-    Scheduled --> Running: Node N 启动 Task<br/>从 KV 读最近 Checkpoint
-    Running --> Draining: Job 收到停止
-    Running --> Orphaned: 3 × heartbeat 失联
-    Orphaned --> Migrating: StealTask 批准 (Node M 接管)
-    Running --> Migrating: 计划内重平衡
-    Migrating --> Running: Node M 从 KV 读 Checkpoint<br/>+ 重连上游 → 恢复消费
-    Migrating --> Revoked: 源端关闭
-    Draining --> Completed: 数据流空
-    Orphaned --> Revoked: StealTask 超时
-    Running --> Failed: Handler 不可恢复错误
-    Completed --> [*]
-    Revoked --> [*]
-    Failed --> [*]
-```
-
-### 4.3 关键状态说明
-
-- **Orphaned**：Task 在 Raft 里登记着 owner Node，但 owner 失联。**3 × heartbeat_interval** 触发（默认 30s）。期间新 StealTask 可被批准。
-- **Migrating**：目标 Node 从 **KV 集群**读取最新 Checkpoint（包含 Task State + Saved Offset），恢复状态后重连上游 BRP 数据通道，从 Saved Offset 之后继续消费。源端 Node 若恢复，控制面通知其清空本地缓冲并退出。详细时序见 §8.2。
-- **Draining**：Job 收到停止，停止接收新输入；已有数据流空后 Task 退出。
+1. **Hybrid by design, not by accident.** Data flows P2P; control state goes through Raft. These are the two channels, and they have different latency, throughput, and consistency budgets. Mixing them corrupts both.
+2. **Datasource is a managed Provider, not a runtime Phase.** Connection-level config (credentials, base URL, rate limits) lives in a managed registry. Per-call args (symbol, interval, query) live in the SQL. Same Datasource + different args = different streams + different Producers.
+3. **One Datasource, one Provider, multiple Streams.** A Datasource wraps an Adapter with config. The same Datasource can be the source of many Streams (one per call signature). Streams are the unit of Producer sharing; Datasources are the unit of governance.
+4. **Per-Task state, shared via DAG, not memory.** State is per-Task private. "Sharing" between two Phases means A's output becomes B's input. There's no shared mutable state in the runtime — DAG composition is the only coupling.
+5. **Plugin identity is content, not version.** Two binaries with the same `version = "1.0"` string are different Plugins if their bytes differ. State is keyed by `sha256(binary)`. Version strings are human-readable metadata; the hash is the binding truth.
+6. **Bee core is business-agnostic.** No exchange, no database, no ML model lives in the Bee binary. Every concrete Datasource or UDF is a Plugin. The only Adapter in core is a generic test fixture.
 
 ---
 
-## 5. 系统拓扑
+## 4. High-level architecture
 
-### 5.1 节点与集群
+### 4.1 The big picture
 
 ```mermaid
 graph TB
-    subgraph RaftCluster[Raft 集群 控制面]
-        N1[Node 1<br/>Raft Participant]
-        N2[Node 2<br/>Raft Participant]
-        N3[Node 3<br/>Raft Participant]
+    subgraph Cluster[Bee Cluster 3-5 Nodes]
+        N1[Node 1<br/>Worker + Raft + KV]
+        N2[Node 2<br/>Worker + Raft + KV]
+        N3[Node 3<br/>Worker + Raft + KV]
     end
-    subgraph DataPlane[数据面 P2P Mesh]
-        N1 <-.->|BRP 数据通道| N2
-        N2 <-.->|BRP 数据通道| N3
-        N3 <-.->|BRP 数据通道| N1
+
+    subgraph External
+        Binance[Binance WS API]
+        News[Google News API]
+        InfluxDB[InfluxDB]
     end
+
+    N1 <-.->|BRP Data Channel<br/>P2P| N2
+    N2 <-.->|BRP Data Channel<br/>P2P| N3
+    N3 <-.->|BRP Data Channel<br/>P2P| N1
+
+    N1 <-->|HTTPS / gRPC<br/>Submit + Query| User((Pipeline Author))
+    N2 <-->|HTTPS / gRPC<br/>Admin| Admin((Cluster Admin))
+
+    N1 -->|WebSocket| Binance
+    N3 -->|REST| News
+    N2 -->|Line Protocol| InfluxDB
 ```
 
-- 简化拓扑下，每个 Bee 进程**同时是 Raft 参与者、KV 节点和数据面 Worker**（ADR-0007）。
-- Raft 集群规模由 `bee.cluster.raft_size` 配置；**默认 3（开发） / 5（生产）**。
-- 任意两个 Node 之间建立**一条**长 TCP 连接（Full-Mesh），多路复用所有 Phase↔Phase 流量。
-- **优先级机制**：控制面 RPC + Heartbeat 走高优先级通道，不和 Worker 数据流抢带宽。这是为了在简化拓扑下，Worker 高负载不至于拖垮 Raft 共识延迟。
-- **切到独立控制面（拓扑 B）的触发条件**（任一）：
-  1. Raft p99 共识延迟 > 10ms 持续 1 周
-  2. Worker 池 > 50 Node
-  3. 用户明确要求独立扩缩容控制面
-- 简化拓扑下 Raft 集群 ≈ Worker 集群；规模化限制在 7-15 Node 健康共识（与 etcd 同源经验）。
+A Bee cluster is **3 or 5 identical nodes** running the same `bee` binary. Each node is simultaneously a Worker (executes Phases), a Raft participant (consensus for control state and KV), and a KV node (serves `get/put/cas/txn`). External systems are touched only by Adapters loaded as Plugins.
 
-### 5.2 单 Node 内部
+### 4.2 Hybrid: Data Plane P2P + Control Plane Raft
 
-```mermaid
-graph LR
-    SQL[SQL/Lua 入口] --> Compiler[DAG 编译器<br/>+ Optimizer]
-    Compiler --> Scheduler[调度器<br/>Control Plane 客户端]
-    Scheduler -->|Raft RPC| Raft[(Raft 集群)]
-    Compiler --> Runtime[Runtime<br/>Phase 执行引擎]
-    Runtime -->|消费 metrics| RuntimeSched[Runtime Scheduler<br/>MLFQ 默认<br/>SJFNRTNHRRN 可选]
-    RuntimeSched --> Runtime
-    Runtime --> Codec[BeeCodec]
-    Codec --> Net[BRP Network]
-    PluginMgr[Plugin Manager<br/>本地 Adapter/Handler 注册] --> Registry[虚拟 Registry]
-    NetworkSync[Network Sync<br/>Raft 缓存读] --> Registry
-    Registry --> Runtime
-```
+The data plane carries Phase-to-Phase business events (e.g., a K-line tick, a sentiment score) — high volume, latency-sensitive, can tolerate occasional loss with replay. It runs over BRP (see §6.1), full-mesh TCP connections between nodes, with multi-plexed RequestID-correlated RPC.
 
-**三层层级（ADR-0008）：**
+The control plane carries ownership metadata, heartbeats, Job/Task state, and KV operations — low volume, requires strong consistency. It runs as a single Raft group on the same nodes, with two logical state machines: a ControlPlane SM (Job/Task registry) and a KV SM (Task state, checkpoints, Datasource metadata).
 
-- **Optimizer**（Compiler 内部）—— 编译期 DAG 重写（Filter+Project 融合、跨 Node 边折叠、Producer/Subscriber 亲和）+ DataFusion SQL 优化
-- **Scheduler**（Control Plane）—— 跨 Node Task 放置：bin-packing + Work-Stealing；0.7 加运行时指标反馈再平衡
-- **Runtime Scheduler**（Runtime 内部）—— Node 内部 Task CPU-share 调度；默认 MLFQ，备选 SJF / HRRN / SRTN；通过 `bee.runtime.scheduler_policy` 配置
+The two planes are physically separate channels over the same TCP connections. Control RPCs and heartbeats run at high priority; worker data flows are best-effort. This keeps Raft consensus latency from being dragged down by worker load.
+
+→ Decision rationale: [ADR-0001](./adr/0001-data-plane-p2p-control-plane-raft.md)
+
+### 4.3 Data flow narrative
+
+When you `bee deploy pipeline.sql`:
+
+1. Compiler reads SQL → resolves `use` directives against the Datasource Registry → checks per-call args match Adapter method signatures → emits a physical DAG.
+2. Control plane proposes a placement (which Task runs on which Node) — bin-packing by declared resource needs vs Node capacity.
+3. Each Node receives a `TaskPlacement` over the BRP control channel; spawns the local Task.
+4. Tasks that depend on each other establish BRP data channels; events flow P2P.
+5. When a Task calls a Datasource method (e.g., `binance.subscribe('BTC/USDT', '5min')`), the runtime checks the StreamSignature against the existing Producers. If one already exists, the Task subscribes; if not, a Producer is created on some Node (the one with the matching Adapter loaded and capacity available).
+6. Events flow: external source → Producer → stream → Subscriber Tasks → next Phase → ... → Output Adapter → external sink.
 
 ---
 
-## 6. BRP 协议分层
+## 5. Core abstractions
 
-> BRP 是承载数据面与控制面的统一传输协议。分层设计与 v1 保持一致。
+Bee's domain has 4 layers of concepts. The full glossary is in [CONTEXT.md](../CONTEXT.md). This section gives the mental model.
+
+### 5.1 Definitions (what you write)
+
+| Concept | One-line description | Example |
+| --- | --- | --- |
+| **Pipeline** | A named DAG of Phases. Compiled once, immutable. | `pipeline_btc_strategy1.sql` |
+| **Phase** | A vertex in the DAG. One input, one transform, one output. | `MACD(...)` UDF Phase |
+| **Handler** | A pure compute function invoked by a Phase. | `MACD(open_price, 26, 12, 9, timestamp)` |
+| **Datasource (Provider)** | A managed connection to an external system. Has name, Adapter, config (credentials, base URL). | `binance`, `google_news` |
+| **Adapter** | A plugin that provides methods to talk to an external system. | `binance_subscribe` (the Rust trait) |
+| **Cross-Pipeline Edge** | An edge whose endpoints live in different Pipelines. | `pipeline_b.output → pipeline_a.input` |
+
+### 5.2 Instances (what runs at runtime)
+
+| Concept | One-line description |
+| --- | --- |
+| **Pipeline Job** | A running instance of a Pipeline, identified by `JobId`. |
+| **Phase Assignment (Task)** | A running instance of a Phase, scheduled to a specific Node. The unit of failover. |
+| **Producer Pipeline** | A single-Phase Pipeline whose stream N other Jobs subscribe to. The canonical case is "one Datasource, one Producer, N Subscribers". |
+
+### 5.3 Lifecycle states
+
+Every Task goes through these states:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Pending
+    Pending --> Scheduled
+    Scheduled --> Running
+    Running --> Draining
+    Draining --> Stopped
+    Running --> Orphaned
+    Orphaned --> Migrating
+    Migrating --> Revoked
+    Migrating --> Completed
+    Draining --> Completed
+    Running --> Failed
+    Stopped --> [*]
+    Revoked --> [*]
+    Completed --> [*]
+    Failed --> [*]
+```
+
+### 5.4 The shared state backbone (KV Cluster)
+
+Task state, checkpoints, saved offsets, and Datasource metadata all live in a **cluster-shared KV** built as a second logical state machine on the same Raft group. API: `get / put / cas / txn(ops)` over opaque bincode values. Linearizable reads/writes. No range scan, no secondary index in MVP.
+
+When a Task migrates, the new owner reads the latest Checkpoint from the KV (one Raft read) and resumes from the saved offset. State is never transferred over BRP — the KV is the single source of truth.
+
+→ Decision rationale: [ADR-0004](./adr/0004-bee-kv-cluster.md)
+
+---
+
+## 6. Subsystems
+
+### 6.1 Data Plane (BRP Protocol)
+
+BRP (Bee Transport Protocol) is a custom binary protocol layered over TCP. Four layers, top-down:
 
 ```mermaid
 graph TD
-    App[应用层 Application Layer <br/> Phase 执行 / Runtime 业务]
-    Session[语义会话层 Session Layer <br/> RequestID 多路复用 / 心跳保活 / 节点路由]
-    Codec[编解码帧层 Framing/Codec Layer <br/> 15 字节固定 Header + 变长 Body / bincode 序列化]
-    Transport[传输层 Transport Layer <br/> tokio::net::TcpStream 异步非阻塞套接字]
-
-    App --> Session
-    Session --> Codec
-    Codec --> Transport
+    App[Application Layer<br/>Phase execution / Runtime business]
+    Session[Session Layer<br/>RequestID multiplexing / heartbeat / routing]
+    Codec[Codec Layer<br/>15-byte fixed header + bincode body]
+    Transport[Transport Layer<br/>tokio::net::TcpStream]
+    App --> Session --> Codec --> Transport
 ```
 
-- **应用层**：Runtime 把 Phase 间的 typed stream 切成 BRP 消息体（StreamData / StreamAck / StealTask / StealResponse / Heartbeat …）。
-- **会话层**：RequestID 复用单连接；维护对端路由表与心跳。
-- **编解码层**：解决 TCP 粘包/半包；Header 固定 15 字节（§7）。
-- **传输层**：纯裸 TCP 字节流。
+The wire format is **fixed 15-byte Header + variable Body** — magic bytes `0x42 0x45` ("BE"), 1-byte Message Type, 8-byte Request ID, 4-byte Body Length. Body is `bincode`-serialized. Magic bytes filter obvious garbage; Header length solves TCP 粘包/半包; bincode keeps payloads tight.
 
-### 6.1 两条逻辑通道
+**Why not HTTP/2 or gRPC?** We considered both. BRP wins on:
+- Per-message overhead (~15B vs HTTP/2's ~9B header + framing overhead)
+- No protocol negotiation cost on every connection
+- Trivially extensible Message Type space
+- Zero external dependency (gRPC needs `tonic` + `prost` + more)
 
-| 通道 | 流量 | 特征 |
-| --- | --- | --- |
-| **数据通道** | Phase↔Phase 业务流、Handler 远程调用返回 | 量大、对延迟敏感、可丢（流式重传） |
-| **控制通道** | StealTask、Heartbeat、Job/Task 元数据同步 | 量小、要求可靠（基于 RequestID 的 RPC） |
+The cost: we own the protocol. Mitigation: keep Message Type list small (~10 types), use a single shared repo for the `.proto`-like spec (Rust structs, not IDL).
 
-两条通道**共用一条 TCP 连接**（多路复用），但 Session 层用不同 Message Type 区分。
+→ Wire format details: [internals.md §1 BRP wire format](./internals.md#1-brp-wire-format)
 
----
+### 6.2 Control Plane (Raft)
 
-## 7. 二进制报文格式
+The control plane is a single Raft group on the Bee cluster nodes, with **two logical state machines**:
 
-> 同 v1。
+- **ControlPlane SM** — Job/Task registry, ownership, Orphaned/Migrating status, StealTask arbitration.
+- **KV SM** — Task state, checkpoints, saved offsets, Datasource metadata, secrets.
 
-```
-+--------------------+--------------------+--------------------+--------------------+
-|  Magic Number (2B) |  Message Type (1B) |   Request ID (8B)  |   Body Length (4B) |  → 固定 Header (15 Bytes)
-+--------------------+--------------------+--------------------+--------------------+
-|                                                                                   |
-|                                Body Data (变长, 由 Body Length 决定)              |  → 变长 Body
-|                                                                                   |
-+-----------------------------------------------------------------------------------+
-```
+Both SMs share the same Raft log; commands are prefixed to route to the right SM at apply time. A Raft-batched write commits both SMs atomically when needed (e.g., Checkpoint = state + saved offset).
 
-字段说明见 [CONTEXT.md](../CONTEXT.md) 附注或 v1 文档。
+**Priority mechanism**: control RPCs and heartbeats run at high priority and are scheduled on a dedicated channel that bypasses worker data flow. This keeps Raft consensus latency from being dragged down by worker load. Does not eliminate interference — that's the trigger for moving to a dedicated control plane (1.x).
 
----
+→ Decision rationale: [ADR-0007](./adr/0007-simplified-raft-topology-mvp.md)
 
-## 8. 关键流程
+**Trigger conditions for splitting control plane to dedicated nodes (1.x):**
 
-### 8.1 Pipeline 提交与部署
+1. Raft p99 consensus latency > 10 ms sustained for 1 week
+2. Worker pool > 50 Nodes
+3. Explicit user request for independent control-plane scaling
 
-```mermaid
-sequenceDiagram
-    autonumber
-    actor User
-    participant Compiler
-    participant Leader as Raft Leader
-    participant Scheduler
-    participant NodeA as Node A
-    participant NodeB as Node B
-    participant Codec as BeeCodec/Net
+### 6.3 Plugin System
 
-    User->>Compiler: 提交 SQL/Lua 文本
-    Compiler->>Compiler: 解析 → DAG (含 Datasource-as-Phase)
-    Compiler->>Compiler: Datasource 共享检测 (签名 hash)
-    Compiler->>Leader: ProposeJob (DAG, 调度约束)
-    Leader->>Leader: Raft 共识
-    Leader-->>Compiler: JobId + TaskPlacement 计划
-    Compiler->>NodeA: DeployTask (TaskId=1, role=Phase_1)
-    Compiler->>NodeB: DeployTask (TaskId=2, role=Phase_2)
-    NodeA->>Codec: 建立 BRP 长连接到 NodeB
-    NodeA->>NodeB: DataPacket (ReqID=1, Phase_1 → Phase_2)
-    NodeA-->>Compiler: Task Scheduled
-    NodeB-->>Compiler: Task Scheduled
-    Note over User,NodeB: Job 进入 Running
-```
+Bee is business-agnostic — the only Adapter in core is a generic test fixture. Every concrete Datasource (Binance, InfluxDB, Kafka, …) and every UDF (MACD, decision tree, sentiment analyzer) ships as a separate Plugin.
 
-**Datasource 共享检测**是关键步骤：
+**MVP scope**: plugins are **Rust crates compiled as `cdylib`**, exposed via `#[no_mangle] extern "C" fn bee_plugin_init(...)`. Loaded with `libloading`. The mechanism (dlopen, opaque handle, vtable) is the same as the future C ABI path; the *content* is Rust.
 
-- 计算每个 Datasource Phase 的 `signature = hash(AdapterId + config_payload)`
-- 查找 Raft 中是否已存在 `JobId -> ProducerJob` 的注册（signature 索引）
-- 若有：当前 Job 的"该 Datasource Phase"变为订阅边，指向已有 Producer
-- 若无：当前 Job 内部标记该 Phase 为 "Producer 候选"；首个匹配此 signature 的 Job 部署时会作为 Producer
+**Plugin identity** is the content hash: `PluginId = sha256(plugin_binary_content)`. Version strings in the Plugin Manifest are human-readable metadata. Two different builds with the same version string have different PluginIds. State is keyed by hash (`state/task/{TaskId}/h{hash}/...`), so state isolation is robust to author mis-tagging.
 
-### 8.2 Failover：Orphan → Work-Stealing → Migrating (via KV Cluster)
+**Multi-version coexistence**: multiple `.so` files for the same logical Plugin (same `name`, different `feature_version`, different `sha256`) load simultaneously. Pipelines pin to a specific version via `use binance@1.4.2` or a SemVer range like `use binance@^1.0`. Old Pipelines continue with their bound version; new Pipelines opt in to the new version.
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant NodeA as Node A (失联)
-    participant Leader as Raft Leader
-    participant KV as KV Cluster<br/>(Raft logical SM)
-    participant NodeB as Node B (空闲 / 新 owner)
+**ABI compatibility is strict.** Each Plugin Manifest declares an `abi_version` (e.g., `"1.0"`). Bee has a configured supported ABI range. An incompatible Plugin is **rejected outright at load time** with a clear error — no fallback, no "best effort". Plugin authors must recompile against the current Bee SDK to ship a compatible upgrade.
 
-    Note over NodeA: 心跳停止
-    Note over Leader: 1× heartbeat: 标记 NodeA suspect
-    Note over Leader: 3× heartbeat: NodeA 上所有 Task → Orphaned
-    Note over Leader: 在 ControlPlane SM 记录孤儿列表
-    NodeB->>Leader: StealTask (ThiefID=NodeB, TaskId=Task_2)
-    Leader->>Leader: 校验：Task_2 确实是孤儿？<br/>无人抢先？
-    Leader-->>NodeB: StealResponse (Success)
-    Note over NodeB,KV: Task_2 → Migrating
-    NodeB->>KV: kv.get("state/checkpoint/Task_2")
-    KV-->>NodeB: Checkpoint (TaskState + SavedOffset)
-    NodeB->>NodeB: 恢复 TaskState 到内存
-    NodeB->>NodeB: 与上游 Task_1 重连 BRP 数据通道<br/>从 SavedOffset 之后开始消费
-    Note over NodeB: Task_2 → Running
-```
+→ Decisions: [ADR-0005](./adr/0005-plugin-ffi-rust-cdylib-mvp.md), [ADR-0009](./adr/0009-plugin-multiversion-hash-abi.md)
 
-要点：
+### 6.4 Datasource Management (Provider / Stream separation)
 
-- **不抢锁**：Leader 是唯一仲裁者；StealTask 失败不会脏状态。
-- **状态来自 KV 不来自源端**：旧设计需要源端序列化状态经 BRP 传输；新设计（ADR-0004）新 owner 直接从 KV 读 Checkpoint，延迟 ~1–5ms。
-- **依赖重连**：Task_2 上游是 Task_1（可能在另一 Node）；Migrating 完成后由 Node B 与上游 Node 重建 BRP 数据通道，从 SavedOffset 之后开始重放。
-- **源端恢复时**：Node A 重新上线后，控制面通知它 Task_2 已被接管；Node A 丢弃本地缓存、清空输出缓冲、退出。
+This is the most distinctive **operational** feature of Bee. Datasources are not just runtime Phases — they are **managed entities** in Bee, with their own lifecycle, credentials, and ACL.
 
-### 8.3 Datasource 共享（Producer Pipeline 模式，ADR-0003）
+**The Provider/Stream separation (ADR-0010):**
 
-这是你提的"限流数据源成本"问题的解决方案。**核心思想：把"5 个 Pipeline 用同一 Datasource"翻译成"5 个 Job 订阅 1 个 Producer"**。
-
-```mermaid
-sequenceDiagram
-    autonumber
-    actor User
-    participant Compiler
-    participant Leader as Raft Leader
-    participant NodeX as Node X (Producer owner)
-    participant NodeY as Node Y (Subscriber1)
-    participant NodeZ as Node Z (Subscriber2)
-    participant Exchange as Binance API (限流)
-
-    User->>Compiler: 提交 Job 1 (含 binance.subscribe)
-    Compiler->>Leader: ProposeJob (signature=binance:BTCUSDT:5min)
-    Leader-->>Compiler: JobId_1, TaskProducer 调度到 NodeX
-    NodeX->>Exchange: 建立 1 个 WS 连接 (受 rate limit 约束)
-    NodeX-->>Leader: Producer Job 进入 Running
-    Note over Leader: 记录 signature → JobId_1 映射
-
-    User->>Compiler: 提交 Job 2 (同 Datasource)
-    Compiler->>Leader: ProposeJob (signature=binance:BTCUSDT:5min)
-    Leader-->>Compiler: 检测到已有 Producer (JobId_1)<br/>Job 2 的 Datasource Phase 变为订阅边
-    NodeY-->>NodeX: 建立 BRP 数据通道 (订阅)
-    Note over Exchange,NodeZ: 不再产生新的 Binance 连接
-
-    User->>Compiler: 提交 Job 3/4/5 (略，同上)
-    Note over NodeX: 同一 Producer 服务 5 个 Subscriber
-    Note over Exchange: 总计 1 个 WS 连接
-```
-
-**关键属性：**
-
-- **Producer 是普通 Pipeline Job**：Datasource Phase + 零上游，编译为单 Phase Pipeline；生命周期 = Job 生命周期。
-- **订阅是普通 Phase-to-Phase 边**：Subscriber Job 里的"Datasource Phase"在编译时降级为订阅边，运行时等价于"BRP 数据通道 + typed stream 解码"。
-- **failover 联动**：Producer 失联 → 所有订阅者 Job 进入 `Waiting for Upstream`；Producer 重新部署后，订阅者自动重连。
-- **限流天然成立**：永远只有 1 个连接打到 Binance。
-
-### 8.4 跨 Pipeline 边解析
-
-编译器在编译期做一次全局 DAG 合并（按 Phase 引用关系）：
-
-```
-DAG 合并
-  ├── 同 Job 内: in-process 通道 (mpsc channel)
-  ├── 跨 Job 同 Node: in-process 通道 (省一次网络)
-  └── 跨 Job 跨 Node: BRP 数据通道
-```
-
-- 部署期：Raft 把"JobId → Node 列表"持久化；运行时 Phase 用 BRP 路由表找到对端 Task。
-- Job 失败：见 §8.2；订阅者进入 `Waiting for Upstream`，Producer 恢复后重连。
-
----
-
-## 9. 注册中心（Registry）
-
-### 9.1 三个层
-
-```mermaid
-graph LR
-    PMR["Plugin Manager Registry<br/>本地 · 文件监听"] --> V["虚拟 Registry<br/>(统一查询接口)"]
-    NSR["Network Sync Registry<br/>Raft 缓存读"] --> V
-    V --> Runtime
-```
-
-| 层 | 范围 | 一致性 | 触发 |
+| Layer | What it is | What goes here | Example |
 | --- | --- | --- | --- |
-| **Plugin Manager** | 本地动态库插件（Adapter / Handler） | 强一致（本地） | 配置文件目录变更 / 手动 install / reload |
-| **Network Sync** | 集群范围内的归属："Handler X 的 owner 是 Node Y" | 写强一致（Raft），读最终一致（本地缓存 + 短 TTL） | Job 部署 / Task 调度 / Adapter 注册 |
-| **虚拟 Registry** | Runtime 只看到这个统一接口 | 透传 | — |
+| **Datasource (Provider)** | A managed connection | Credentials, base URL, rate limits, Adapter binding | `binance` |
+| **Stream** | A specific call signature | Symbol, interval, query string | `binance.subscribe('BTC/USDT', '5min')` |
 
-### 9.2 解析顺序（推荐）
+The Provider is registered by an admin (once per environment, per Datasource). Streams are written by Pipeline Authors in SQL. The Datasource config carries **only connection-level** parameters; per-call args go in the SQL.
 
+**SQL usage:**
+
+```sql
+use binance;                                    -- declare Provider
+SELECT * FROM binance.subscribe('BTC/USDT', '5min');  -- select Stream
 ```
-Runtime 收到 "我需要 Handler X"
-  1. 查本地缓存 (Network Sync 的副本) → 命中且新鲜 → 用
-  2. 查 Plugin Manager (本地) → 命中 → 加载并执行
-  3. 转发 Raft (Raft 同步读最新归属) → 拿到 owner Node → 远程调用 BRP
-```
 
-### 9.3 Plugin Manager 行为（ADR-0005 + ADR-0009）
+**Why strict mode**: a Pipeline cannot reference an Adapter function without a prior `use`. No inline API keys. No permissiveness. Compile error at submit time if the Datasource isn't registered or the method signature doesn't match. This makes Datasources governable, auditable, and rotatable independently of any Pipeline.
 
-- 监听配置的动态库目录（默认如 `/etc/bee/plugins/`）
-- 加载：发现 `.so` / `.dylib` → 计算 `sha256(binary)` 作为 `PluginId` → 解析导出符号 → 读取 Plugin Manifest（含 `abi_version`）→ **ABI 兼容性检查**（不通过则拒绝加载并报错）→ 注册到本地
-- **多版本共存**：同一逻辑 Plugin 的不同版本（即不同 binary hash）可同时加载。`bee plugin list` 显示所有加载版本 + 各自的 hash + 引用计数。
-- 卸载 / Reload：引用计数归零后 `dlclose`；或 `bee plugin unload --force` 强制卸载（中断使用中的 Pipeline，1.x 才完全支持；MVP 警告而非强制）
-- 与 Network Sync 协同：本地注册的 Adapter 写一条元数据到 Raft（"Adapter `binance` feature_version=`1.4` abi_version=`1.0` hash=`a3f5...` 存在于 Node A"）
-- **Pipeline 引用 Plugin 时的解析**：`binance:^1.0` 这样的版本范围在 Pipeline 提交时由控制面解析为具体 PluginId（hash）；解析不到时编译失败
-- **状态隔离**：KV state key 含 hash —— `state/task/{TaskId}/h{hash}/...`；新旧版本的 state 天然分离
+**Stream-level Producer sharing**: `StreamSignature = sha256(datasource_name || adapter_method || call_args)`. Two Pipelines calling `binance.subscribe('BTC/USDT', '5min')` with the same args share a Producer. Calling `binance.subscribe('ETH/USDT', '5min')` (different args) creates a separate Producer — even though the Datasource (Provider) is the same and the API key is reused. This is the correct granularity for rate-limit-friendly sharing.
 
-### 9.4 Datasource Registry（ADR-0010）
-
-**Datasource 是管理态的一等公民**，是"带 adapter 的 Phase"（ADR-0002 运行时表示）的**命名 + 可治理视图**。
-
-> **关于示例命名**：本节用 `binance` 作为示例 Datasource。**这只是文档示例名**——真实的 `binance` 行情插件是**第三方 Plugin**，不在 Bee 核心。Bee 核心提供 `Datasource` 抽象 + `use` 编译 + Registry；任何具体的 Datasource（行情 / 新闻 / 数据库 / 业务系统）由用户在独立 Plugin crate 中实现。详见 [stories.md §Naming conventions for examples](./stories.md#naming-conventions-for-examples)。
-
-#### 9.4.1 数据模型
+**Multi-tenancy** (structural; not enforced in MVP):
 
 ```yaml
 Datasource:
-  name: "binance"                    # 用户可见名 (Pipeline 里 use 的名字)
-  tenant: 0                          # uint16 租户命名空间 (0 = global)
-  adapter: "binance"                 # 来自哪个 Adapter (Plugin 提供的)
-  plugin_id: "a3f5..."               # sha256 (ADR-0009)
-  version_spec: "^1.0"               # SemVer 范围；默认 latest
-  config:
-    api_key_secret_id: "secret-001"  # 引用 secret store (S30 落地)
-    base_url: "wss://api.binance.com"
-    # ... Adapter 需要的其他参数
-  status: Active | Paused | Disabled
-  created_at: ...
-  updated_at: ...
-  owner_node: "Node 1"               # 当前运行 Producer 的 Node
+  name: "binance"
+  tenant: 0                      # uint16; 0 = global
+  adapter: "binance_subscribe"
+  ...
 ```
 
-存储位置：KV 集群的 `ds/{tenant}/{name}` key。强一致（Raft），全集群可见。
-
-#### 9.4.2 `use` SQL 指令的编译流程
-
-```sql
-use binance;
-SELECT * FROM binance.subscribe('BTC/USDT', '1m');
+```yaml
+PipelineJob:
+  job_id: "j-7fa3"
+  tenant: 0                      # from submission context
+  ...
 ```
 
-```
-SQL 文本
-  ↓
-① 预处理：识别 "use binance;"
-  ↓
-  查 Datasource Registry:
-    ds/0/binance = { adapter: "binance", plugin_id: "a3f5...", version_spec: "^1.0", ... }
-  ↓
-  检查 job_tenant: if ds.tenant != job.tenant && ds.tenant != 0 → 编译失败
-  ↓
-  解析 "binance.subscribe('BTC/USDT', '1m')"
-  ↓
-  校验 subscribe() 来自已 use 的 binance 的 Adapter → DAG 节点
-  ↓
-② 剩余 SQL 交给 DataFusion 解析
-  ↓
-③ 输出物理 DAG
-```
+Access rule: `ds.tenant == job.tenant || ds.tenant == 0`. MVP carries the field but doesn't enforce; 1.x turns it on.
 
-#### 9.4.3 严格模式 (Strict Mode)
+→ Decision: [ADR-0010](./adr/0010-datasource-managed-entity.md)
 
-- ✅ 允许：`use binance; SELECT ... FROM binance.subscribe(...)`
-- ❌ 编译错误：未 `use` 直接引用 adapter（无 `api_key=...` 内联）
-- 错误信息：`Datasource 'binance' is not registered. Run: bee datasource create binance --adapter binance`
+### 6.5 SQL Runtime
 
-#### 9.4.4 版本选择
+Bee's SQL runtime is built on **Apache Arrow DataFusion**, extended with:
 
-```sql
-use binance;            -- 默认: latest 兼容版 (由 version_spec 决定)
-use binance@1.4.2;     -- 精确锁定
-use binance@^1.0;      -- 1.x 兼容
-```
+- **`ASOF JOIN`** as a new `JoinKind` (essential for financial time-series; matches the behavior of kdb+ / DolphinDB).
+- **`EMIT INTO`** as a new top-level statement that drives a continuous query to an Output Adapter.
+- **Custom UDFs** for `MACD / EMA / KRONOS / sentiment_analyzer / decision_tree / MAP_CONSTRUCT` etc., loaded via DataFusion's UDF extension mechanism.
 
-#### 9.4.5 与 Producer Pipeline 模式（ADR-0003）的关系
+Continuous queries are driven by a **micro-batch executor** with a configurable window (default 1 second, can be tightened to 10ms for quant scenarios). A special **per-event mode** is available for ultra-low latency. The DataFusion optimizer is exposed via Bee's Pipeline config — users can override rules, hint the planner, tune cost models.
 
-- Datasource 的运行时 = **1 个 Producer + N 个 Subscriber**
-- "Datasource 已存在" = 已有 1 个 Producer 在跑
-- 新 Pipeline 引用已存在 Datasource → 自动转 Subscriber
-- Datasource 销毁 (`bee datasource delete`) = Producer Draining + Subscriber 全部 `Waiting for Upstream`
+**Not in MVP**: Lua runtime (deferred to 1.x via mlua), other DSLs (Python, JSON, YAML).
 
-#### 9.4.6 Datasource CLI (admin)
+→ Decision: [ADR-0006](./adr/0006-sql-runtime-datafusion.md)
 
-| 命令 | 功能 |
-| --- | --- |
-| `bee datasource list` | 列出本租户可见的所有 Datasource |
-| `bee datasource create <name> --adapter <a> --config <json>` | 注册新 Datasource |
-| `bee datasource inspect <name>` | 显示元数据 + 当前 Producer 所在 Node + 健康指标 |
-| `bee datasource test <name>` | 主动探活（独立于任何 Pipeline） |
-| `bee datasource pause <name>` | 挂起：所有引用 Pipeline 触发 Draining |
-| `bee datasource resume <name>` | 恢复 |
-| `bee datasource delete <name>` | 销毁（需要先 pause） |
+### 6.6 Registry and Discovery
+
+The "Registry" is conceptually a single interface; physically it is three layers:
+
+| Layer | Scope | Consistency | Trigger |
+| --- | --- | --- | --- |
+| **Plugin Manager** | Local dynamic library plugins (Adapters, Handlers) | Strong (local) | Directory change / manual install / reload |
+| **Network Sync** | Cluster-wide ownership: "Handler X's owner is Node Y" | Writes via Raft, reads eventually consistent (local cache + short TTL) | Job deploy / Task schedule / Adapter register |
+| **Virtual Registry** | Runtime sees only this unified interface | Transparent | — |
+
+Plugins are loaded from a configured directory (default `/etc/bee/plugins/`). The Plugin Manager watches the directory, computes `sha256(binary)` for each new file, checks `abi_version` against the supported range, and registers Adapters/Handlers with the local Registry. The local Registry replicates metadata into the Network Sync layer (via Raft), so any node can answer "who owns Handler X?" in a Raft read.
 
 ---
 
-## 10. 时序图
+## 7. Key flows
 
-> §8.1 / §8.2 / §8.3 已包含三个核心时序图。下面补充两个补充场景。
-
-### 10.1 Handler 远程调用（本地无 Handler）
+### 7.1 Pipeline deployment
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant NodeA as Node A (Pipeline owner, 无 Handler X)
+    actor User
+    participant Compiler
     participant Leader as Raft Leader
-    participant NodeB as Node B (Handler X owner)
-    participant Registry as 虚拟 Registry
-
-    NodeA->>Registry: 需要 Handler X
-    Registry-->>NodeA: 本地无；查 Network Sync
-    NodeA->>Leader: Raft 读：Handler X 的 owner
-    Leader-->>NodeA: NodeB
-    NodeA->>NodeB: BRP 控制通道 InvokeHandler (ReqID=N)
-    NodeB->>NodeB: 加载本地 Handler X，执行
-    NodeB-->>NodeA: BRP 控制通道 HandlerResponse (ReqID=N)
+    participant NodeA
+    participant NodeB
+    User->>Compiler: bee deploy pipeline.sql
+    Compiler->>Compiler: Parse + use resolution + DAG compile
+    Compiler->>Leader: ProposeJob (DAG, resource hints)
+    Leader->>Leader: Raft consensus
+    Leader-->>Compiler: JobId + TaskPlacement plan
+    Compiler->>NodeA: DeployTask (Task_1)
+    Compiler->>NodeB: DeployTask (Task_2)
+    NodeA->>NodeB: establish BRP data channel
+    NodeA-->>Compiler: Task Scheduled
+    NodeB-->>Compiler: Task Scheduled
+    Note over User,NodeB: Job enters Running
 ```
 
-### 10.2 Datasource / Input 远程运行
+### 7.2 Failover: Orphan → Work-Stealing → Migrating
 
-Input Phase 在某 Node 调度，Input Adapter 必须在该 Node（或可访问的共享位置）。如果当前 Node 没有对应 Adapter 插件：触发与 §10.1 相同的"远程 Adapter 加载 + 调用"路径，但负载更重（要走 Plugin Manager 调度而非 in-process invoke）。
+```mermaid
+sequenceDiagram
+    autonumber
+    participant NodeA as Node A (lost)
+    participant Leader as Raft Leader
+    participant KV as KV Cluster
+    participant NodeB as Node B (new owner)
+    Note over NodeA: heartbeats stop
+    Note over Leader: 3× heartbeat elapsed, Task_2 → Orphaned
+    NodeB->>Leader: StealTask (TaskId=Task_2)
+    Leader->>Leader: validate: Orphan? no race?
+    Leader-->>NodeB: approved
+    Note over NodeB,KV: Task_2 → Migrating
+    NodeB->>KV: kv.get("state/checkpoint/Task_2")
+    KV-->>NodeB: Checkpoint (TaskState + SavedOffset)
+    NodeB->>NodeB: restore state + reconnect upstream BRP<br/>resume from SavedOffset
+    Note over NodeB: Task_2 → Running
+```
 
-> **实际建议**：限流/敏感 Adapter 由 Producer 模式承担（§8.3）；只在边缘场景用远程 Adapter 加载。
+### 7.3 Datasource sharing (Producer Pipeline)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User
+    participant Compiler
+    participant Leader
+    participant NodeX as Node X (Producer owner)
+    participant NodeY as Node Y (Subscriber)
+    User->>Compiler: submit Job 1 (uses binance.subscribe('BTC/USDT', '5min'))
+    Compiler->>Leader: ProposeJob
+    Leader-->>Compiler: create Producer
+    NodeX->>NodeX: open 1 Binance WS connection
+    User->>Compiler: submit Job 2 (same Datasource, same args)
+    Compiler->>Leader: ProposeJob
+    Leader-->>Compiler: existing Producer detected
+    NodeY->>NodeX: establish BRP data channel (subscribe)
+    Note over NodeX,NodeY: 1 WS connection serves 2 Subscribers
+```
 
 ---
 
-## 11. 路线图
+## 8. Deployment
 
-| 阶段 | 范围 | 里程碑 |
-| --- | --- | --- |
-| **0.1** | BRP PoC：4 层编解码 + 15 字节 Header + 单节点 echo | 协议可独立测试 |
-| **0.2** | Pipeline 编译：SQL/Lua → DAG；本地单 Job 部署 | 一个 Pipeline 跑通，无跨 Job |
-| **0.3** | Raft 控制面：Job/Task 调度、Heartbeat、Orphan 检测 | Failover 雏形 |
-| **0.4** | Work-Stealing + Migrating | 节点失效自动恢复 |
-| **0.5** | 跨 Pipeline 边 + Datasource 共享 (Producer Pipeline) | 限流场景落地 |
-| **0.6** | 插件系统 (Plugin Manager + Adapter / Handler 动态库) | 第三方扩展能力 |
-| **0.7** | 优化器：基于运行时指标的 Phase 重排 + DataFusion 优化器扩展点暴露 + **Runtime Scheduler (MLFQ 默认 + SJF/HRRN/SRTN 可选)** + 跨 Node 再平衡 | 调度策略可调 |
-| **0.8** | SQL 性能调优：毫秒级微批 / UDF 性能分析 / Hint 语法 | 量化场景可调 |
-| **1.0** | 公开 API 稳定化 + 首版 crate 发布 | 生产可用 |
+### 8.1 Single node (development)
+
+```bash
+# Build
+cargo build --release
+
+# Run
+bee run --node-id node-1 --raft-size 1 --data-dir ./data
+# → Single-node cluster; no Raft consensus overhead; for local dev only
+```
+
+### 8.2 Production cluster
+
+```bash
+# On each of 3 (or 5) machines:
+bee run \
+  --node-id $HOSTNAME \
+  --raft-peers node-1,node-2,node-3 \
+  --data-dir /var/lib/bee \
+  --plugins-dir /etc/bee/plugins
+```
+
+Topology: **simplified (all-in-one)** for MVP. Every node is simultaneously a Worker, Raft participant, and KV node. Healthy up to ~7-15 nodes (matching etcd's empirical range). Past that, split to dedicated control plane (1.x, per ADR-0007 trigger conditions).
+
+### 8.3 Plugin installation
+
+Drop a `.so` (Linux) / `.dylib` (macOS) / `.dll` (Windows) into the plugin directory:
+
+```bash
+cp libbee_plugin_binance.so /etc/bee/plugins/
+# Plugin Manager detects → computes sha256 → checks abi_version → registers
+# Or rejects with a clear error if the Plugin is incompatible
+```
+
+No restart required. Hot-reload is the default; refcounted `dlclose` on removal.
+
+### 8.4 Datasource registration
+
+```bash
+# 1. Store API key in the secret store
+bee secret put binance_api_key --value 'XXXX'
+
+# 2. Register the Datasource (Provider), with only connection-level config
+bee datasource create binance \
+  --adapter binance_subscribe \
+  --plugin-version ^1.0 \
+  --config '{"base_url":"wss://api.binance.com","rate_limit_per_sec":10}' \
+  --secret api_key=secret-001
+
+# 3. Probe connectivity (independent of any Pipeline)
+bee datasource test binance
+```
+
+Once registered, `binance` is available to any Pipeline that does `use binance;`.
 
 ---
 
-## 附录：crate 边界草案
+## 9. Operations
 
-> 与 v1 保持一致；随实现推进可能调整。
+### 9.1 Monitoring
 
-| Crate | 层级 | 关键导出 |
+```bash
+bee cluster status
+# Raft: Leader=Node 1, term=42, log lag=[0,0,0]
+# Datasources:
+#   binance         Node 1   156 events/min   0 errors
+#   google_news     Node 2   12 events/min    0 errors
+# Plugins: 8 loaded
+
+bee jobs list
+# JOB ID   NAME           STATUS   TASKS   DATASOURCES
+# j-7fa3   btc_strategy1  Running  5/5     binance, google_news, ...
+
+bee jobs inspect j-7fa3
+# DAG visualization + per-Task status
+
+bee diagnostics j-7fa3 --phase v_final_decision
+# Latency p50/p99, throughput, CPU, mem, backpressure
+```
+
+### 9.2 Maintenance windows
+
+```bash
+# Pause a Datasource (e.g., during a planned exchange outage)
+bee datasource pause binance
+# → All 3 referencing Jobs enter Draining
+# → Existing in-flight events flush; Subscribers complete; Job lifecycle ends cleanly
+
+# After maintenance
+bee datasource resume binance
+# → Producer re-establishes connection
+# → Subscribers re-attach automatically
+```
+
+### 9.3 Failover recovery
+
+Bee handles failover automatically. The operator's only job is to investigate why a node went down (network partition, hardware failure, OOM, etc.) and replace it. After replacing:
+
+```bash
+# On the new node:
+bee run --node-id node-3 --raft-peers node-1,node-2,node-3 --data-dir /var/lib/bee
+# → Joins the existing Raft group
+# → Re-replicates log entries it missed
+# → Takes ownership of the orphaned Tasks that the cluster assigned to it
+```
+
+No manual `StealTask` required. The control plane arbitrates ownership transitions in Raft; new nodes pick up unowned work automatically.
+
+### 9.4 Plugin upgrades
+
+```bash
+# 1. Drop the new version into the plugin directory
+cp libbee_plugin_binance_v1.5.so /etc/bee/plugins/
+# → Bee computes new sha256 (b7c2... vs a3f5...)
+# → ABI check passes (same abi_version)
+# → New version registered alongside the old
+
+# 2. Update the Datasource to prefer the new version
+bee datasource upgrade binance --to ^1.5
+# → version_spec updated
+# → Future new Pipeline deployments use v1.5
+# → Existing Pipelines continue with v1.4 (multi-version coexistence)
+
+# 3. After all old-version Pipelines naturally retire
+# → v1.4 .so refcount drops to 0 → dlclose → unloaded
+```
+
+---
+
+## 10. Security model
+
+### 10.1 Credential management
+
+**Credentials never appear in SQL.** API keys, tokens, and connection strings are stored in Bee's **secret store** (KV-backed in MVP; 1.x integration with HashiCorp Vault / AWS Secrets Manager planned). Datasource configs reference secrets by ID:
+
+```yaml
+config:
+  api_key_secret_id: "secret-001"     # not the raw key
+  base_url: "wss://api.binance.com"
+```
+
+The Plugin reads the actual value at runtime via `BeeHost.secret_get(secret_id)`. SQL authors never see or write API keys.
+
+### 10.2 Multi-tenancy
+
+Structural support via `tenant: u16` on both Datasource and Job:
+
+- Tenant `0` is the global / public namespace.
+- Tenants `1`–`65535` are reserved for individual tenants.
+- Access rule: `ds.tenant == job.tenant || ds.tenant == 0`.
+- MVP enforces the field but not the rule. 1.x turns enforcement on.
+
+A Datasource's `tenant` is set at registration. A Job's `tenant` is set by the submission context (API key, CLI auth, etc.).
+
+### 10.3 Threat model
+
+| Threat | Mitigation |
+| --- | --- |
+| Operator reads raw API key from config | Secret store; config references ID, not value |
+| Cross-tenant Datasource access | `tenant` ACL (1.x enforcement) |
+| Malicious plugin | ABI version check; Plugins are loaded from a controlled directory; in 1.x consider a WASM sandbox for untrusted plugins |
+| Datasource credentials leaked in logs | Logging filter strips secret IDs from output; secret values are read at runtime, never serialized to logs |
+| Network MITM on BRP | TLS termination at the load balancer (1.x); MVP assumes trusted internal network |
+
+### 10.4 Audit
+
+`bee jobs inspect` shows the full provenance: which Datasource, which Plugin, which version, which Tenant. Suitable for compliance review.
+
+---
+
+## 11. Performance characteristics
+
+Quantitative targets. These are aspirational MVP targets; actual numbers will be measured as the implementation lands.
+
+| Metric | Target | Notes |
 | --- | --- | --- |
-| `bee-transport` | 传输层 | `TcpFramed`、`Listener` |
-| `bee-codec` | 编解码层 | `Frame`、`BeeCodec`、`BeeMessage` |
-| `bee-session` | 会话层 | `ConnectionPool`、`RequestRouter` |
-| `bee-runtime` | 应用层 / 编译 | `Phase`、`Handler`、`Dag`、`Compiler` |
-| `bee-control` | 控制面 | `RaftClient`、`Scheduler`、`StealArbiter` |
-| `bee-registry` | 注册中心 | `PluginManager`、`NetworkSync`、`Registry` (trait) |
-| `bee-dsl-sql` | DSL | SQL parser / planner (DataFusion-based, ADR-0006) |
+| Cross-Node p99 latency | < 10 ms | For typical stream events at 5min K-line granularity |
+| Single-Node throughput | > 100K events/sec | Without network hops |
+| Failover recovery time | < 60 s | 1 Orphaned period (3× heartbeat_interval at default 10s) + ~30s migration |
+| Micro-batch window | 10 ms — 1 s | Tunable; tighter window reduces latency at higher CPU cost |
+| Heartbeat interval | 10 s | Orphaned threshold = 3× = 30s |
+| Plugin load time | < 100 ms | `dlopen` + symbol resolution |
+| Bee binary size (release) | < 50 MB | Single statically-linked binary |
+| Memory per Task | < 100 MB (default cap) | Plus in-memory state cache |
+
+Per-Task state size default cap: **1 GB** (over the cap falls back to upstream replay). Job-stop TTL for state: **7 days**.
+
+---
+
+## 12. Roadmap and references
+
+### 12.1 Roadmap
+
+The full implementation backlog is in [docs/stories.md](./stories.md) — 32 vertical slices organized into 7 parallel paths after the foundational MVP layer.
+
+**Milestone slices** (each is a demoable end-to-end artifact):
+
+- **S07**: 3-node Raft cluster; control plane SM visible
+- **S10**: First end-to-end demoable — 3-node Bee running a hard-coded multi-Phase Pipeline
+- **S12**: Full failover loop — kill a node, see Task go Orphaned, auto-Work-Stealing recovers
+- **S17**: Quant scenario A — binance mock + multiple Pipelines sharing 1 Producer
+- **S25**: 0.7 roadmap core — runtime adaptive scheduling
+- **S28**: 0.x → 1.0 production-ready (CLI observability + scheduling + diagnostic)
+- **S29–S31**: Datasource management — `use` syntax + secret store + pause/resume
+
+### 12.2 Where to next?
+
+- **If you want to evaluate Bee** for your use case: start with [docs/product-design.md](./product-design.md) §4 (use cases) and §5 (capabilities).
+- **If you want to run Bee**: see [§8 Deployment](#8-deployment) and [internals.md](./internals.md) for build instructions.
+- **If you want to extend Bee** (write a Plugin): see [§6.3 Plugin System](#63-plugin-system) and the planned `bee-plugin-sdk` crate.
+- **If you want to understand a design decision**: see [docs/adr/](./adr/) for 10 ADRs covering hybrid architecture, KV cluster, Plugin identity, MLFQ scheduler, Datasource management, and more.
+- **If you want to implement a slice**: see [docs/stories.md](./stories.md) for the 32 vertical slices, each with acceptance criteria.
+
+### 12.3 Glossary and decisions
+
+- **Domain glossary**: [CONTEXT.md](../CONTEXT.md) — every term used in this document
+- **Architecture decisions**: [docs/adr/](./adr/) — 10 ADRs, all Accepted
+- **Implementation backlog**: [docs/stories.md](./stories.md) — 32 vertical slices
+- **Product context**: [docs/product-design.md](./product-design.md) — who uses Bee and why
+- **Implementation details**: [docs/internals.md](./internals.md) — crate structure, BRP wire format, build configuration

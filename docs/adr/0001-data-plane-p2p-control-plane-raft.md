@@ -1,6 +1,6 @@
 # 0001: Data Plane P2P + Control Plane Raft
 
-The original sketch labeled Bee a "去中心化网络" while also describing a Raft Leader arbitrating StealTask — these are mutually exclusive. We resolve the contradiction by adopting a hybrid architecture that matches the way the rest of the design is already written: BRP carries P2P data flow between Nodes, while a Raft-replicated Control Plane owns all "who owns what" state (membership, Pipeline/Phase/Handler/Datasource ownership, orphan detection, Work-Stealing arbitration). The data path never touches the Raft Leader; the control path always does.
+The original sketch labeled Bee a "decentralized network" while also describing a Raft Leader arbitrating StealTask — these are mutually exclusive. We resolve the contradiction by adopting a hybrid architecture that matches the way the rest of the design is already written: BRP carries P2P data flow between Nodes, while a Raft-replicated Control Plane owns all "who owns what" state (membership, Pipeline/Phase/Handler/Datasource ownership, orphan detection, Work-Stealing arbitration). The data path never touches the Raft Leader; the control path always does.
 
 ## Consequences
 

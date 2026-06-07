@@ -9,3 +9,4 @@ When multiple Pipeline Jobs reference the same rate-limited external source (e.g
 - Subscriber failover is coupled to Producer failover: subscribers can only resume when the Producer is back.
 - If the Producer is intentionally taken down (e.g., for Adapter upgrade), all subscribers experience a coordinated pause; this is the price of paying for one network connection instead of N.
 - Backpressure flows naturally: a slow subscriber slows the Producer's consumption, which back-pressures the upstream (the rate-limited source).
+- **Refined by [ADR-0010](./0010-datasource-managed-entity.md)**: the `DatasourceSignature` is more precisely a `StreamSignature = sha256(datasource_name || adapter_method || canonicalized_call_args)`. Two Pipelines calling `binance.subscribe('BTC/USDT', '5min')` and `binance.subscribe('ETH/USDT', '5min')` get **different** Producers (different streams), even though they share the same Datasource config (same API key).

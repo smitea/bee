@@ -103,6 +103,7 @@ mod tests {
             job_id: 1,
             dag_hash: "my-job".into(),
             owner_node: 1,
+            tenant: 0,
         })
         .unwrap();
         cp.apply_op(&Op::RegisterTask {
@@ -132,6 +133,7 @@ mod tests {
             job_id: 1,
             dag_hash: "h".into(),
             owner_node: 1,
+            tenant: 0,
         })
         .unwrap();
         cp.apply_op(&Op::RegisterTask {

@@ -174,6 +174,7 @@ mod tests {
                     job_id: 1,
                     dag_hash: "h".into(),
                     owner_node: leader,
+                    tenant: 0,
                 },
             )
             .await
