@@ -34,10 +34,12 @@ use std::time::Duration;
 use bee_codec::{Frame, MessageType};
 use bee_control::cluster_status;
 use bee_control::diagnostics_view;
+use bee_control::datasource::{Datasource, DatasourceInspection, DatasourceRegistry};
 use bee_control::jobs_view;
 use bee_control::raft::cluster::{Cluster, ClusterConfig};
 use bee_control::secret_store::{InMemorySecretStore, SecretStore};
 use bee_dsl_sql::{run_pipeline_with_config, RunConfig};
+use bee_plugin_sdk::{compute_plugin_id, VersionSpec};
 use bee_transport::Connection;
 
 const PKG_NAME: &str = env!("CARGO_PKG_NAME");
@@ -127,6 +129,13 @@ async fn main() -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("{}: secret failed: {}", PKG_NAME, e);
+                ExitCode::from(1)
+            }
+        },
+        Some("datasource") => match run_datasource_cli(&args[1..]).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("{}: datasource failed: {}", PKG_NAME, e);
                 ExitCode::from(1)
             }
         },
@@ -399,6 +408,120 @@ async fn run_secret_cli(args: &[String]) -> Result<(), String> {
     }
 }
 
+/// S31 `bee datasource list` / `bee datasource inspect <name>` — MVP:
+/// an in-process DatasourceRegistry is the backing store. The
+/// factory seeds a `binance` Datasource + a few referencing Jobs
+/// for the demo (similar to the S24/S27/S28 demo pattern).
+/// Production wires a Node admin RPC.
+async fn run_datasource_cli(args: &[String]) -> Result<(), String> {
+    let sub = args.first().map(String::as_str);
+    let mut registry = DatasourceRegistry::new();
+    seed_demo_registry(&mut registry);
+
+    match sub {
+        Some("list") => {
+            // Optional --tenant <n> filter
+            let mut tenant: Option<u16> = None;
+            let mut iter = args[1..].iter().map(String::as_str);
+            while let Some(a) = iter.next() {
+                if a == "--tenant" {
+                    tenant = Some(
+                        iter.next()
+                            .ok_or_else(|| "--tenant requires an argument".to_string())?
+                            .parse()
+                            .map_err(|e: std::num::ParseIntError| format!("invalid tenant: {e}"))?,
+                    );
+                }
+            }
+            let ds_list = registry.list(tenant);
+            if ds_list.is_empty() {
+                println!("(no datasources)");
+            } else {
+                println!("name         | tenant | adapter | status    | version");
+                println!("-------------+--------+---------+-----------+---------");
+                for ds in ds_list {
+                    println!(
+                        "{:<12} | {:6} | {:<7} | {:<9} | {}",
+                        ds.name,
+                        ds.tenant,
+                        ds.adapter,
+                        format!("{}", ds.status),
+                        ds.version_spec,
+                    );
+                }
+            }
+            Ok(())
+        }
+        Some("inspect") => {
+            let name = args
+                .get(1)
+                .ok_or_else(|| "datasource inspect requires <name>".to_string())?;
+            print_datasource_inspect(&registry, name);
+            Ok(())
+        }
+        Some(other) => Err(format!("unknown datasource subcommand `{other}`")),
+        None => Err("datasource requires a subcommand: list|inspect".to_string()),
+    }
+}
+
+fn seed_demo_registry(registry: &mut DatasourceRegistry) {
+    // One demo Datasource so the user can see the surface. In
+    // production the registry is populated by `bee datasource
+    // create` (S29 CLI follow-up) and the Raft-KV persistence.
+    let ds = Datasource::new(
+        "binance".into(),
+        0,
+        "binance".into(),
+        compute_plugin_id(b"binance-v1"),
+        VersionSpec::Latest,
+        r#"{"api_key_secret_id": "binance-api-key"}"#.into(),
+    );
+    // Pretend a Producer is running on node 1.
+    let mut ds = ds;
+    ds.owner_node = Some(1);
+    let _ = registry.create(ds);
+    // Add some referencing jobs.
+    let _ = registry.add_referencing_job(0, "binance", 100);
+    let _ = registry.add_referencing_job(0, "binance", 101);
+    // Seed a couple of probe results so the health view is non-empty.
+    let _ = registry.record_probe_success(0, "binance");
+    let _ = registry.record_probe_failure(0, "binance", "timeout".into());
+    let _ = registry.record_probe_failure(0, "binance", "timeout".into());
+}
+
+fn print_datasource_inspect(registry: &DatasourceRegistry, name: &str) {
+    let i: DatasourceInspection = match registry.inspect(0, name) {
+        Some(i) => i,
+        None => {
+            println!("datasource {name} not found");
+            return;
+        }
+    };
+    let ds = &i.datasource;
+    let h = &i.health;
+    println!("Datasource {} ({} / {})", ds.name, ds.adapter, ds.version_spec);
+    println!("  status:           {}", ds.status);
+    println!("  tenant:           {}", ds.tenant);
+    println!("  plugin_id:        {}", ds.plugin_id);
+    println!("  config:           {}", ds.config);
+    println!("  owner_node:       {:?}", ds.owner_node);
+    println!("  created_at_ms:    {}", ds.created_at_ms);
+    println!("  updated_at_ms:    {}", ds.updated_at_ms);
+    println!("  referencing_jobs: {}", i.referencing_job_count);
+    println!();
+    println!("  --- health (S31) ---");
+    println!("  connection_success_total:    {}", h.connection_success_total);
+    println!("  connection_failure_total:    {}", h.connection_failure_total);
+    println!("  consecutive_failures:        {}", h.consecutive_failures);
+    println!("  auto_pause_threshold:        {}", h.auto_pause_threshold);
+    println!("  last_success_at_ms:          {}", h.last_success_at_ms);
+    println!("  last_failure_at_ms:          {}", h.last_failure_at_ms);
+    println!(
+        "  error_message_recent:        {}",
+        h.error_message_recent.as_deref().unwrap_or("(none)")
+    );
+}
+
 fn print_help() {
     println!("{} {} — {}", PKG_NAME, PKG_VERSION, PKG_DESCRIPTION);
     println!();
@@ -439,4 +562,10 @@ fn print_help() {
     println!("    secret list               List secret IDs in tenant 0 (S30 acceptance: IDs only,");
     println!("                              not values).");
     println!("    secret delete <id>        Remove a secret.");
+    println!("    datasource list [--tenant <n>]  List Datasources (S29). MVP: in-process demo");
+    println!("                                  registry; production: Node admin RPC + Raft KV");
+    println!("                                  (S30+).");
+    println!("    datasource inspect <name> Show Datasource header + per-Datasource health");
+    println!("                                  (S31 acceptance: Producer Node, plugin_id, version,");
+    println!("                                  health metrics, referencing Job count).");
 }
