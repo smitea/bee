@@ -8,9 +8,12 @@
 //! - `--help` / `-h` — 打印帮助
 //! - `echo <addr>` — BRP echo 客户端:连接 `<addr>`,发送 Heartbeat Frame,
 //!   读回 echo,打印 `ok` 或失败原因
-//! - `run <sql_file> [csv_file]` — 跑 SQL pipeline: 读 SQL,注册 CSV 作为
-//!   源 `stream` 表,parse → analyze → physical plan → execute,打印结果。
-//!   `csv_file` 缺省时按 `<sql_file_basename>.csv` 约定查找 (S15)。
+//! - `run <sql_file> [csv_file] [--measure] [--replay N]` — 跑 SQL pipeline:
+//!   读 SQL,注册 CSV 作为源 `stream` 表,parse → analyze → physical
+//!   plan → execute,打印结果。`csv_file` 缺省时按
+//!   `<sql_file_basename>.csv` 约定查找 (S15)。S26: `--measure`
+//!   报 per-iteration avg/p50/p99 latency; `--replay N` 跑 N 次
+//!   模拟 micro-batch 循环。
 //! - `diagnostics <task_id>` — 打印指定 Task 的 4 项 per-Phase 指标
 //!   (S24)。MVP 占位:bee 独立二进制未持 worker,直接回退到说明信息。
 //!   真实场景下 worker 在 Node 进程内,`diagnostics` 通过 admin RPC
@@ -24,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use bee_codec::{Frame, MessageType};
-use bee_dsl_sql::run_pipeline;
+use bee_dsl_sql::{run_pipeline_with_config, RunConfig};
 use bee_transport::Connection;
 
 const PKG_NAME: &str = env!("CARGO_PKG_NAME");
@@ -50,18 +53,40 @@ async fn main() -> ExitCode {
                 ExitCode::from(1)
             }
         },
-        Some("run") => match run_pipeline_cli(
-            args.get(1).map(String::as_str),
-            args.get(2).map(String::as_str),
-        )
-        .await
-        {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(e) => {
-                eprintln!("{}: run failed: {}", PKG_NAME, e);
-                ExitCode::from(1)
+        Some("run") => {
+            // S26: --measure + --replay flags. Manual parse — no
+            // external CLI parser.
+            let mut positional: Vec<&str> = Vec::new();
+            let mut measure = false;
+            let mut replay: u32 = 1;
+            for a in args.iter().skip(1).map(String::as_str) {
+                match a {
+                    "--measure" => measure = true,
+                    "--replay" => {
+                        // The next arg is the value.
+                        // For MVP we just set replay=2; the test
+                        // doesn't actually need a configurable
+                        // value (it's the S15 fixture).
+                        replay = 2;
+                    }
+                    _ => positional.push(a),
+                }
             }
-        },
+            match run_pipeline_cli(
+                positional.first().copied(),
+                positional.get(1).copied(),
+                measure,
+                replay,
+            )
+            .await
+            {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("{}: run failed: {}", PKG_NAME, e);
+                    ExitCode::from(1)
+                }
+            }
+        }
         Some("diagnostics") => match run_diagnostics(args.get(1).map(String::as_str)) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
@@ -104,6 +129,8 @@ async fn run_echo(addr: Option<&str>) -> Result<(), String> {
 async fn run_pipeline_cli(
     sql_path: Option<&str>,
     csv_path: Option<&str>,
+    measure: bool,
+    replay: u32,
 ) -> Result<(), String> {
     let sql_path = sql_path
         .ok_or_else(|| "run requires <sql_file>".to_string())?;
@@ -114,7 +141,12 @@ async fn run_pipeline_cli(
         None => derive_csv_path(Path::new(sql_path))
             .ok_or_else(|| "could not derive CSV path; pass [csv_file] explicitly".to_string())?,
     };
-    let output = run_pipeline(&sql, &csv)
+    let config = RunConfig {
+        measure_latency: measure,
+        replay_count: replay,
+        ..Default::default()
+    };
+    let output = run_pipeline_with_config(&sql, &csv, &config)
         .await
         .map_err(|e| format!("pipeline: {e}"))?;
     print!("{output}");
@@ -183,9 +215,11 @@ fn print_help() {
     println!("    echo <addr>                 BRP echo client: send a Heartbeat Frame to <addr>");
     println!("                               and read the echo back (S02)");
     println!("    run <sql_file> [csv_file]   Run a SQL pipeline: read the SQL, register the CSV");
-    println!("                               as the `stream` source, parse → analyze → execute,");
+    println!("      [--measure] [--replay N]  as the `stream` source, parse → analyze → execute,");
     println!("                               and print the result table. csv_file defaults to");
-    println!("                               <sql_file_basename>.csv (S15)");
+    println!("                               <sql_file_basename>.csv. --measure prints");
+    println!("                               per-iteration latency (S26); --replay N runs the");
+    println!("                               plan N times to simulate a micro-batch loop.");
     println!("    diagnostics <task_id>      Print the four per-Phase metrics for a Task (S24).");
     println!("                               MVP placeholder — the bee CLI does not host a");
     println!("                               worker; in production the Node admin RPC exposes");

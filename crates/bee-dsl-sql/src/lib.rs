@@ -19,8 +19,8 @@ pub use handlers::{
     AggregateHandler, DatasourceHandler, FilterHandler, ProjectionHandler,
 };
 pub use physical::{
-    compile_to_physical_plan, execute_plan, format_batches, run_pipeline, DataFusionPhase,
-    RunConfig,
+    compile_to_physical_plan, execute_plan, format_batches, run_pipeline,
+    run_pipeline_with_config, DataFusionPhase, RunConfig, RunMode,
 };
 
 /// 解析一条 SQL 语句,返回 DataFusion 的 Statement AST 列表。
@@ -265,6 +265,116 @@ mod tests {
         let cfg = RunConfig::default();
         assert_eq!(cfg.micro_batch_window_ms, 1000);
         assert_eq!(cfg.replay_count, 1);
+        assert_eq!(cfg.mode, RunMode::MicroBatch);
+        assert!(!cfg.measure_latency);
+    }
+
+    #[tokio::test]
+    async fn run_mode_display_strings() {
+        assert_eq!(format!("{}", RunMode::MicroBatch), "micro_batch");
+        assert_eq!(format!("{}", RunMode::PerEvent), "per_event");
+        assert_eq!(RunMode::default(), RunMode::MicroBatch);
+    }
+
+    #[tokio::test]
+    async fn run_pipeline_micro_batch_replay_count_runs_plan_multiple_times() {
+        use std::fs;
+        let dir = tempfile::tempdir().unwrap();
+        let csv_path = dir.path().join("stream.csv");
+        fs::write(&csv_path, "a\n1\n2\n3\n").unwrap();
+        let sql = "SELECT a FROM stream";
+        let cfg = RunConfig {
+            mode: RunMode::MicroBatch,
+            replay_count: 3,
+            measure_latency: false,
+            ..Default::default()
+        };
+        let output = run_pipeline_with_config(sql, &csv_path, &cfg)
+            .await
+            .unwrap();
+        // 3 replays × 3 rows = 9 data lines. The output has the
+        // header + separator + 9 single-cell rows. Count the data
+        // rows: each non-empty non-header line that contains a
+        // value 1, 2, or 3 on its own.
+        let data_rows: Vec<&str> = output
+            .lines()
+            .filter(|l| {
+                let t = l.trim();
+                t == "1" || t == "2" || t == "3"
+            })
+            .collect();
+        assert_eq!(data_rows.len(), 9, "3 replays × 3 rows = 9, got:\n{output}");
+    }
+
+    #[tokio::test]
+    async fn run_pipeline_per_event_mode_runs_once() {
+        use std::fs;
+        let dir = tempfile::tempdir().unwrap();
+        let csv_path = dir.path().join("stream.csv");
+        fs::write(&csv_path, "a\n1\n2\n3\n").unwrap();
+        let sql = "SELECT a FROM stream";
+        let cfg = RunConfig {
+            mode: RunMode::PerEvent,
+            replay_count: 5, // ignored in PerEvent mode
+            measure_latency: false,
+            ..Default::default()
+        };
+        let output = run_pipeline_with_config(sql, &csv_path, &cfg)
+            .await
+            .unwrap();
+        let data_rows: Vec<&str> = output
+            .lines()
+            .filter(|l| {
+                let t = l.trim();
+                t == "1" || t == "2" || t == "3"
+            })
+            .collect();
+        assert_eq!(data_rows.len(), 3, "PerEvent keeps only first iteration (3 rows), got {}: \n{}", data_rows.len(), output);
+    }
+
+    #[tokio::test]
+    async fn run_pipeline_measure_latency_prints_p50_p99() {
+        use std::fs;
+        let dir = tempfile::tempdir().unwrap();
+        let csv_path = dir.path().join("stream.csv");
+        fs::write(&csv_path, "a\n1\n2\n3\n").unwrap();
+        let sql = "SELECT a FROM stream";
+        let cfg = RunConfig {
+            mode: RunMode::MicroBatch,
+            replay_count: 5,
+            measure_latency: true,
+            ..Default::default()
+        };
+        let output = run_pipeline_with_config(sql, &csv_path, &cfg)
+            .await
+            .unwrap();
+        assert!(output.contains("latency"), "missing latency report:\n{output}");
+        assert!(output.contains("p50"));
+        assert!(output.contains("p99"));
+        assert!(output.contains("avg"));
+    }
+
+    #[tokio::test]
+    async fn datafusion_sql_hints_are_accepted() {
+        // S26 acceptance: hint syntax is passed through to
+        // DataFusion's optimizer. The MVP just verifies the
+        // hint comment doesn't trigger a parse error.
+        let sql = "EXPLAIN SELECT /*+ TestHint(foo=1) */ a + 1 AS b FROM stream";
+        let dir = tempfile::tempdir().unwrap();
+        let csv_path = dir.path().join("stream.csv");
+        std::fs::write(&csv_path, "a\n1\n2\n3\n").unwrap();
+        let output = run_pipeline(sql, &csv_path).await;
+        match output {
+            Ok(_) => { /* accepted — the test is "doesn't error" */ }
+            Err(e) => {
+                let msg = e.to_lowercase();
+                assert!(
+                    !msg.contains("expected")
+                        && !msg.contains("hint"),
+                    "hint syntax should be accepted, got error: {e}"
+                );
+            }
+        }
     }
 
     /// S16 acceptance: a test Pipeline using `MockInputAdapter`

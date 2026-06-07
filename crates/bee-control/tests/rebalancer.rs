@@ -98,15 +98,15 @@ async fn rebalance_triggers_when_one_node_exceeds_threshold() {
 
     let mut loads = HashMap::new();
     loads.insert(1, NodeLoad::new(1, 80.0));
-    loads.insert(2, NodeLoad::new(2, 10.0));
-    loads.insert(3, NodeLoad::new(3, 10.0));
+    loads.insert(2, NodeLoad::new(2, 5.0));
+    loads.insert(3, NodeLoad::new(3, 15.0));
 
     let events = rebalancer.tick(&cluster, &loads).await;
     assert_eq!(events.len(), 1, "expected one migration, got {events:?}");
     let e = &events[0];
     assert_eq!(e.task_id, 1);
     assert_eq!(e.from_node, 1, "task was on node 1");
-    assert_eq!(e.to_node, 2, "target is most underloaded (node 2)");
+    assert_eq!(e.to_node, 2, "target is most underloaded (node 2 at 5%)");
     assert_eq!(e.timestamp_ms, 1_000_000_000);
 }
 

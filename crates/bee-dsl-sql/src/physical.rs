@@ -31,22 +31,56 @@ use datafusion::execution::TaskContext;
 use datafusion::physical_plan::{collect, ExecutionPlan};
 use datafusion::prelude::{CsvReadOptions, SessionContext};
 
+/// S26 execution mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RunMode {
+    /// S26 default: micro-batch. The plan runs in `replay_count`
+    /// iterations, each iteration is one batch. Production
+    /// (S18+ cross-Pipeline edges, S17 Producer/Subscriber) drives
+    /// the loop on a timer keyed by `micro_batch_window_ms`.
+    #[default]
+    MicroBatch,
+    /// Per-event mode: bypass batching for ultra-low latency. The
+    /// MVP runs the plan once over the whole input (CSV is the
+    /// batch); the production path (S18+ with the Adapter stream)
+    /// would invoke the plan per event.
+    PerEvent,
+}
+
+impl std::fmt::Display for RunMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RunMode::MicroBatch => f.write_str("micro_batch"),
+            RunMode::PerEvent => f.write_str("per_event"),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RunConfig {
+    /// S26 execution mode.
+    pub mode: RunMode,
     /// Micro-batch window in milliseconds (ADR-0006 default = 1000).
-    /// S15 MVP does not drive a timer loop; this is a config field
-    /// reserved for the S16+ micro-batch executor.
+    /// Production tightens to 10 for quant scenarios.
     pub micro_batch_window_ms: u64,
-    /// Number of times the input stream is "replayed" to simulate a
-    /// continuous source. The MVP CLI replays exactly once.
+    /// Number of times the input is "replayed" to simulate a
+    /// continuous source. Default 1. Set > 1 to drive the
+    /// micro-batch loop; 0 = run continuously (until cancelled;
+    /// MVP treats 0 as 1).
     pub replay_count: u32,
+    /// S26: when true, the runner measures per-iteration latency
+    /// and prints p50/p99 alongside the result. Driven by
+    /// `bee run --measure`.
+    pub measure_latency: bool,
 }
 
 impl Default for RunConfig {
     fn default() -> Self {
         Self {
+            mode: RunMode::default(),
             micro_batch_window_ms: 1000,
             replay_count: 1,
+            measure_latency: false,
         }
     }
 }
@@ -146,20 +180,83 @@ fn arrow_array_value_to_string(
 
 /// End-to-end: SQL + CSV → formatted string output.
 ///
-/// This is the function the `bee run` CLI calls. It uses
-/// `RunConfig::default()` (1s micro-batch window, 1 replay).
+/// S26: respects `RunConfig.mode` and `RunConfig.replay_count`.
+/// MicroBatch mode runs the plan `replay_count` times (each
+/// iteration is one batch — production wires a timer keyed by
+/// `micro_batch_window_ms`). PerEvent mode runs the plan once
+/// (CSV is the whole input; production would invoke per event).
 ///
 /// S16 redo: Bee core is business-agnostic. The MVP CLI is a thin
 /// DataFusion wrapper; concrete Datasource Adapters (Binance,
 /// CoinGecko, InfluxDB, etc.) ship as **external plugins** in
 /// their own crates and are not part of the `bee run` path.
 pub async fn run_pipeline(sql: &str, csv_path: &Path) -> Result<String, String> {
-    let _ = RunConfig::default();
+    run_pipeline_with_config(sql, csv_path, &RunConfig::default()).await
+}
+
+/// S26: variant of `run_pipeline` that takes an explicit config.
+pub async fn run_pipeline_with_config(
+    sql: &str,
+    csv_path: &Path,
+    config: &RunConfig,
+) -> Result<String, String> {
     let plan = compile_to_physical_plan(sql, csv_path)
         .await
         .map_err(|e| format!("compile: {e}"))?;
-    let batches = execute_plan(&plan).await.map_err(|e| format!("execute: {e}"))?;
-    Ok(format_batches(&batches))
+    // S26: per-iteration latency tracker.
+    let mut latencies: Vec<std::time::Duration> = Vec::new();
+    let iterations = if config.replay_count == 0 {
+        1
+    } else {
+        config.replay_count as usize
+    };
+
+    let mut all_batches: Vec<RecordBatch> = Vec::new();
+    for i in 0..iterations {
+        let start = std::time::Instant::now();
+        let batches = execute_plan(&plan)
+            .await
+            .map_err(|e| format!("execute: {e}"))?;
+        if config.measure_latency {
+            latencies.push(start.elapsed());
+        }
+        // In MicroBatch mode we accumulate across iterations; in
+        // PerEvent mode we only keep the first (the per-event path
+        // is conceptually one event at a time — for the MVP CSV
+        // input it's one shot).
+        if matches!(config.mode, RunMode::MicroBatch) || i == 0 {
+            all_batches.extend(batches);
+        }
+    }
+
+    let mut out = format_batches(&all_batches);
+    if config.measure_latency {
+        out.push_str(&format_latency_report(&latencies));
+    }
+    Ok(out)
+}
+
+fn format_latency_report(latencies: &[std::time::Duration]) -> String {
+    if latencies.is_empty() {
+        return String::new();
+    }
+    let mut sorted: Vec<std::time::Duration> = latencies.to_vec();
+    sorted.sort();
+    let p = |q: f64| -> std::time::Duration {
+        let idx = ((sorted.len() as f64 * q).ceil() as usize).saturating_sub(1);
+        sorted[idx.min(sorted.len() - 1)]
+    };
+    let sum: std::time::Duration = sorted.iter().sum();
+    let avg = sum / sorted.len() as u32;
+    let p50 = p(0.5);
+    let p99 = p(0.99);
+    format!(
+        "\n--- latency (n={}, mode=micro_batch) ---\n\
+         avg: {avg:?}\n\
+         p50: {p50:?}\n\
+         p99: {p99:?}\n",
+        sorted.len()
+    )
 }
 
 /// `Bee` Handler that wraps a DataFusion `ExecutionPlan`.
