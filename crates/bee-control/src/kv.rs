@@ -75,6 +75,20 @@ pub enum Op {
     /// wins). Subsequent deploys of the same Datasource become
     /// Subscribers pointing at the existing Producer.
     RegisterDatasourceProducer { signature: String, job_id: u32 },
+    /// S18 cross-Pipeline dependencies: declare that `downstream_job`
+    /// reads from `upstream_job`'s named output `stream`. Recorded on
+    /// the downstream Job's `dependencies` list. Idempotent (same
+    /// upstream+stream pair is preserved on re-apply).
+    RegisterDependency {
+        downstream_job: u32,
+        upstream_job: u32,
+        stream: String,
+    },
+    /// S18 Job lifecycle transitions. Applied as `last-writer-wins`
+    /// for `job.lifecycle`. The orchestrator drives Pending →
+    /// Scheduled → Running (or WaitingForUpstream → Running once deps
+    /// are met).
+    UpdateJobLifecycle { job_id: u32, state: JobLifecycleState },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,6 +99,23 @@ pub enum TaskStatus {
     Orphaned,
     Migrating,
     Revoked,
+    Completed,
+    Failed,
+}
+
+/// S18: high-level lifecycle of a Pipeline Job. `WaitingForUpstream`
+/// means the Job is registered but at least one declared dependency
+/// (`Job B depends on Job A's output`) has not yet reached `Running`.
+/// The deployer / orchestrator drives transitions: Pending → Scheduled
+/// → Running (or WaitingForUpstream → Running once deps are met).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum JobLifecycleState {
+    #[default]
+    Pending,
+    Scheduled,
+    /// S18: dependencies declared but not all upstreams are `Running`.
+    WaitingForUpstream,
+    Running,
     Completed,
     Failed,
 }
@@ -160,12 +191,14 @@ impl KVStateMachine {
                 self.cas_checked(key, expected.as_deref(), new.clone())
             }
             Op::Txn { ops } => self.txn(ops.clone()),
-            Op::RegisterJob { .. }
-            | Op::RegisterTask { .. }
-            | Op::UpdateTaskStatus { .. }
-            | Op::Heartbeat { .. }
-            | Op::StealTask { .. }
-            | Op::RegisterDatasourceProducer { .. } => Err(TxnError::WrongSm),
+                Op::RegisterJob { .. }
+                | Op::RegisterTask { .. }
+                | Op::UpdateTaskStatus { .. }
+                | Op::Heartbeat { .. }
+                | Op::StealTask { .. }
+                | Op::RegisterDatasourceProducer { .. }
+                | Op::RegisterDependency { .. }
+                | Op::UpdateJobLifecycle { .. } => Err(TxnError::WrongSm),
         }
     }
 
@@ -181,7 +214,9 @@ impl KVStateMachine {
                 | Op::UpdateTaskStatus { .. }
                 | Op::Heartbeat { .. }
                 | Op::StealTask { .. }
-                | Op::RegisterDatasourceProducer { .. } => return Err(TxnError::WrongSm),
+                | Op::RegisterDatasourceProducer { .. }
+                | Op::RegisterDependency { .. }
+                | Op::UpdateJobLifecycle { .. } => return Err(TxnError::WrongSm),
                 _ => {}
             }
         }
@@ -219,7 +254,9 @@ impl KVStateMachine {
                 | Op::UpdateTaskStatus { .. }
                 | Op::Heartbeat { .. }
                 | Op::StealTask { .. }
-                | Op::RegisterDatasourceProducer { .. } => unreachable!("non-KV op checked above"),
+                | Op::RegisterDatasourceProducer { .. }
+                | Op::RegisterDependency { .. }
+                | Op::UpdateJobLifecycle { .. } => unreachable!("non-KV op checked above"),
             }
         }
         Ok(())

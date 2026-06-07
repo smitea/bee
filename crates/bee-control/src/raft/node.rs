@@ -255,7 +255,9 @@ impl Node {
                 | Op::UpdateTaskStatus { .. }
                 | Op::Heartbeat { .. }
                 | Op::StealTask { .. }
-                | Op::RegisterDatasourceProducer { .. } => {
+                | Op::RegisterDatasourceProducer { .. }
+                | Op::RegisterDependency { .. }
+                | Op::UpdateJobLifecycle { .. } => {
                     let _ = cp.apply_op(&entry.op);
                 }
             }

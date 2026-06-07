@@ -2,7 +2,7 @@
 
 > **Status**: Active implementation backlog
 > **Source**: distilled from [CONTEXT.md](../CONTEXT.md), [docs/architecture.md](./architecture.md), [docs/product-design.md](./product-design.md), and [docs/adr/](./adr/) (9 ADRs).
-> **Granularity**: 29 vertical slices (tracer bullets), each end-to-end demoable.
+> **Granularity**: 32 vertical slices (tracer bullets), each end-to-end demoable.
 > **Conventions**: all stories are AFK (no human-in-the-loop required); HITL can be added per story by setting `Type: HITL` and noting the review milestone.
 
 ## How to use this document
@@ -11,6 +11,24 @@
 2. Each story is a thin vertical slice — it should produce a runnable / testable artifact, not a layer-only change.
 3. After implementing a story, mark its acceptance criteria and link any commits / PRs.
 4. When a story is done, unblock downstream stories. Stories on the same level (no shared dependency) can be done in parallel.
+
+## Naming conventions for examples
+
+Throughout this document, the following names appear in **test scenarios** and **documentation examples**. **None of these are part of Bee core.** They are illustrative names for **separate third-party plugins** (or, where explicitly noted, generic test fixtures that ship with Bee for mechanism verification only).
+
+| Name in docs | What it represents | Ships in Bee core? |
+| --- | --- | --- |
+| `binance` | A hypothetical exchange-data Datasource plugin | **No** — third-party plugin |
+| `coingecko` / `google_news` | Hypothetical market data / news Datasource plugins | **No** — third-party plugins |
+| `influxdb` / `mongodb` | Hypothetical sink Adapter plugins | **No** — third-party plugins |
+| `macd` / `ema` / `kronos` | Hypothetical quant-indicator UDFs | **No** — third-party Handler plugins (or built-in UDFs in a future `bee-dsl-sql-builtins` crate, also separate) |
+| `decision_tree` / `sentiment_analyzer` | Hypothetical UDFs | **No** — third-party Handler plugins |
+| `mock_input` (S16) | A **generic test fixture** for verifying the Adapter mechanism | **Yes** — but only as a test util, not a production Datasource |
+
+Bee core provides:
+- The framework (Adapter / Handler traits, Registry, Datasource managed entity, `use` syntax, control plane, KV, BRP)
+- A **generic mock** for testing the mechanism (`MockInputAdapter` in S16)
+- **No domain-specific Datasource implementations**
 
 ## Dependency graph (top-level)
 
@@ -56,7 +74,7 @@ Once **S10 (Scheduler bin-packing)** is done, the work forks into 7 paths that c
 - **S07**: 3 节点 Raft 集群能拉起，控制面 SM 写入可见
 - **S10**: 第一个**端到端 demoable**——3 节点 Bee 跑一个硬编码多 Phase Pipeline
 - **S12**: **Failover 完整闭环**——杀节点、Task Orphaned、自动 Work-Stealing 恢复
-- **S17**: **量化场景 A 完整跑通**——binance mock + 多 Pipeline 共享 1 个 Producer
+- **S17**: **量化场景 A 完整跑通**——用 `mock_input` 测试 fixture + 多 Pipeline 共享 1 个 Producer（验证机制；真实业务 Datasource 如 binance 是第三方插件，不在 Bee 核心）
 - **S25**: **0.7 路线图核心**——运行时自适应调度
 - **S28**: **0.x → 1.0 生产化就绪**（CLI 可观测 + 调度 + 故障可诊断）
 - **S29–S31**: **Datasource 管理**——`use` 语法 + secret store + 挂起/恢复 (admin 可视化管理)
@@ -427,21 +445,25 @@ In `bee-dsl-sql`:
 
 ---
 
-### S16 · Datasource Adapter trait + built-in mock Adapter
+### S16 · Datasource Adapter trait + test fixture Adapter (no business code)
 
 - **Type**: AFK
 - **Blocked by**: S15
 - **ADRs**: [0002](./adr/0002-datasource-is-a-phase.md), [0003](./adr/0003-producer-pipeline-pattern.md)
 
+> **Bee core is business-agnostic.** This story defines the **mechanism** (Adapter trait + registry) and a **generic test fixture**. Concrete business Datasources (Binance, Google News, InfluxDB, etc.) ship as **separate plugins** in their own crates — they are NOT compiled into the Bee binary. The test fixture in this story is a generic `MockInputAdapter` for verifying the mechanism, with no domain-specific logic.
+
 **What to build**
 - `trait InputAdapter`: `async fn open(config) -> Result<Self>`, `async fn next(&mut self) -> Result<Option<Event>>`, `async fn close(self)`
 - `trait OutputAdapter`: `async fn open`, `async fn emit(&mut self, event)`, `async fn close`
-- One built-in mock: `FakeBinanceAdapter` — generates random price events at 1Hz with a configurable symbol
+- Generic **test fixture** `MockInputAdapter` (lives in `bee-runtime` test-utils, NOT in main): emits `Event { timestamp: u64, sequence: u64, payload: Vec<u8> }` at a configurable rate. Configurable count so tests can deterministically produce N events then close.
+- Adapter discovery mechanism: Adapters are looked up by name in the Plugin Manager (S19). Built-in Adapters for the runtime are **limited to the trait implementations themselves**; concrete business Adapters (binance, etc.) are **plugins**.
 
 **Acceptance criteria**
-- [ ] Unit test: `FakeBinanceAdapter` generates 10 events then returns `Ok(None)` (signals end of stream)
-- [ ] Adapter is loaded as a built-in (compiled into Bee binary), not as a plugin
-- [ ] `bee run` with `binance.subscribe('BTC/USDT')` (a SQL syntax that maps to the mock adapter) produces events
+- [ ] `MockInputAdapter` produces exactly N events then returns `Ok(None)` (deterministic, testable)
+- [ ] No domain-specific Datasource implementation in `bee-runtime` or any other Bee core crate
+- [ ] The `binance` / `coingecko` / `influxdb` examples used elsewhere in this doc are clearly labeled as **external plugins** (not built-in) — see S19
+- [ ] A test Pipeline using `MockInputAdapter` (registered via S29's Datasource mechanism with `--adapter mock_input`) runs end-to-end and emits events
 
 ---
 

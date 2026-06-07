@@ -14,13 +14,32 @@
 
 use std::collections::HashMap;
 
-use crate::kv::{Op, TaskStatus, TxnError};
+use crate::kv::{JobLifecycleState, Op, TaskStatus, TxnError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobRecord {
     pub job_id: u32,
     pub dag_hash: String,
     pub owner_node: u32,
+    /// S18: lifecycle state. Defaults to `Pending` on `RegisterJob`.
+    pub lifecycle: JobLifecycleState,
+    /// S18: declared upstream dependencies. A Job with a non-empty
+    /// `dependencies` list is `WaitingForUpstream` until each listed
+    /// upstream is `Running`. The list is order-insensitive (the
+    /// deployer's orchestrator can satisfy deps in any order).
+    pub dependencies: Vec<DependencyRecord>,
+}
+
+/// S18: one upstream dependency declared by a downstream Job — for
+/// example, \"Job B reads from Job A's `output` stream\". Resolved
+/// at deploy time: same Node → in-process edge; different Node → BRP
+/// data channel subscription. S18 stops at the metadata layer; the
+/// actual data-channel resolution is the S25 cross-Node rebalance
+/// machinery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DependencyRecord {
+    pub upstream_job: u32,
+    pub stream: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,12 +73,23 @@ impl ControlPlaneStateMachine {
     pub fn apply_op(&mut self, op: &Op) -> Result<(), TxnError> {
         match op {
             Op::RegisterJob { job_id, dag_hash, owner_node } => {
+                // Preserve existing lifecycle + dependencies on a
+                // re-Register of the same job_id (the Deployer may
+                // re-register after a dep change).
+                let existing = self.jobs.get(job_id).cloned();
                 self.jobs.insert(
                     *job_id,
                     JobRecord {
                         job_id: *job_id,
                         dag_hash: dag_hash.clone(),
                         owner_node: *owner_node,
+                        lifecycle: existing
+                            .as_ref()
+                            .map(|j| j.lifecycle)
+                            .unwrap_or_default(),
+                        dependencies: existing
+                            .map(|j| j.dependencies)
+                            .unwrap_or_default(),
                     },
                 );
                 Ok(())
@@ -140,6 +170,55 @@ impl ControlPlaneStateMachine {
                 }
                 Ok(())
             }
+            Op::RegisterDependency {
+                downstream_job,
+                upstream_job,
+                stream,
+            } => {
+                let job = self.jobs.get_mut(downstream_job).ok_or_else(|| {
+                    TxnError::Conflict {
+                        key: format!("job_{downstream_job}_not_found"),
+                        expected: None,
+                        actual: None,
+                    }
+                })?;
+                let dep = DependencyRecord {
+                    upstream_job: *upstream_job,
+                    stream: stream.clone(),
+                };
+                let was_new = !job.dependencies.contains(&dep);
+                if was_new {
+                    job.dependencies.push(dep);
+                }
+                // Any new dependency must be re-evaluated: if the
+                // upstream is not Running, the Job must enter
+                // WaitingForUpstream. The orchestrator's tick will
+                // promote it to Running once the new dep is satisfied.
+                // (Idempotent re-RegisterDependency on a Job already
+                // WaitingForUpstream is a no-op on lifecycle.)
+                if was_new
+                    && matches!(
+                        job.lifecycle,
+                        JobLifecycleState::Running
+                            | JobLifecycleState::Pending
+                            | JobLifecycleState::Scheduled
+                    )
+                {
+                    job.lifecycle = JobLifecycleState::WaitingForUpstream;
+                }
+                Ok(())
+            }
+            Op::UpdateJobLifecycle { job_id, state } => {
+                let job = self.jobs.get_mut(job_id).ok_or_else(|| {
+                    TxnError::Conflict {
+                        key: format!("job_{job_id}_not_found"),
+                        expected: None,
+                        actual: None,
+                    }
+                })?;
+                job.lifecycle = *state;
+                Ok(())
+            }
             Op::Put { .. }
             | Op::Del { .. }
             | Op::Cas { .. }
@@ -176,6 +255,63 @@ impl ControlPlaneStateMachine {
 
     pub fn get_job(&self, job_id: u32) -> Option<&JobRecord> {
         self.jobs.get(&job_id)
+    }
+
+    /// S18: returns true if every declared upstream dependency of
+    /// `job_id` exists in the CP and is currently `Running`. A Job
+    /// with no dependencies is trivially satisfied.
+    pub fn job_dependencies_satisfied(&self, job_id: u32) -> bool {
+        let Some(job) = self.jobs.get(&job_id) else {
+            return false;
+        };
+        job.dependencies.iter().all(|d| {
+            self.jobs
+                .get(&d.upstream_job)
+                .is_some_and(|u| u.lifecycle == JobLifecycleState::Running)
+        })
+    }
+
+    /// S18: returns the lifecycle state that the orchestrator should
+    /// drive `job_id` toward. Pure function — does not mutate. Used
+    /// by the orchestrator to decide whether to submit an
+    /// `UpdateJobLifecycle` op.
+    pub fn evaluate_job_state(&self, job_id: u32) -> JobLifecycleState {
+        let Some(job) = self.jobs.get(&job_id) else {
+            return JobLifecycleState::Pending;
+        };
+        // Already terminal → keep it.
+        if matches!(
+            job.lifecycle,
+            JobLifecycleState::Completed | JobLifecycleState::Failed
+        ) {
+            return job.lifecycle;
+        }
+        // No deps → if Pending/Scheduled/Waiting, go Running.
+        if job.dependencies.is_empty() {
+            return JobLifecycleState::Running;
+        }
+        // Has deps → satisfied → Running, otherwise Waiting.
+        if self.job_dependencies_satisfied(job_id) {
+            JobLifecycleState::Running
+        } else {
+            JobLifecycleState::WaitingForUpstream
+        }
+    }
+
+    /// S18: list of downstream Jobs that declared a dependency on
+    /// `upstream_job`. Used by the orchestrator when the upstream
+    /// transitions to Running (so it can re-evaluate the
+    /// downstream's deps and possibly promote it).
+    pub fn downstream_jobs_of(&self, upstream_job: u32) -> Vec<u32> {
+        self.jobs
+            .values()
+            .filter(|j| {
+                j.dependencies
+                    .iter()
+                    .any(|d| d.upstream_job == upstream_job)
+            })
+            .map(|j| j.job_id)
+            .collect()
     }
 
     pub fn get_task(&self, task_id: u32) -> Option<&TaskRecord> {

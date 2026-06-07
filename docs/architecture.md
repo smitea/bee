@@ -437,6 +437,8 @@ Runtime 收到 "我需要 Handler X"
 
 **Datasource 是管理态的一等公民**，是"带 adapter 的 Phase"（ADR-0002 运行时表示）的**命名 + 可治理视图**。
 
+> **关于示例命名**：本节用 `binance` 作为示例 Datasource。**这只是文档示例名**——真实的 `binance` 行情插件是**第三方 Plugin**，不在 Bee 核心。Bee 核心提供 `Datasource` 抽象 + `use` 编译 + Registry；任何具体的 Datasource（行情 / 新闻 / 数据库 / 业务系统）由用户在独立 Plugin crate 中实现。详见 [stories.md §Naming conventions for examples](./stories.md#naming-conventions-for-examples)。
+
 #### 9.4.1 数据模型
 
 ```yaml

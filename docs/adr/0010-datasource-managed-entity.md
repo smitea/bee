@@ -9,6 +9,8 @@ use binance;
 SELECT * FROM binance.subscribe('BTC/USDT', '1m');
 ```
 
+> **Naming note**: `binance` is a **documentation example** for a third-party Datasource plugin. Bee core does **not** ship a Binance plugin, a Google News plugin, an InfluxDB plugin, or any other business-specific Datasource. The framework (Adapter trait, `use` syntax, Datasource Registry) is in Bee core; concrete implementations live in separate Plugin crates built as `cdylib`. The only Adapter in Bee core is a generic test fixture (`MockInputAdapter` per stories.md S16) used to verify the mechanism.
+
 Five design rules follow from the user's choices:
 
 1. **`use` is Pipeline-level**, declared at the top of the SQL file, like MySQL's `USE database`. Multiple `use` statements allowed. The scope is the entire compilation unit.

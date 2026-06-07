@@ -114,6 +114,8 @@
 - 决策层用 `decision_tree(...)` UDF。
 - 多路输出用 `EMIT INTO influxdb(...)` / `EMIT INTO mongodb(...)`。
 
+> **重要**：以上 `binance` / `google_news` / `influxdb` / `mongodb` / `decision_tree` / `ASOF JOIN` 都是**第三方插件或 SQL 扩展**，**不在 Bee 核心**。Bee 核心提供：DSL 框架、`use` 编译、Adapter / Handler trait、Registry、Producer 共享、跨 Pipeline 边、Failover。具体的行情/新闻/UDF 实现由社区或用户团队在独立的 Plugin crate 中提供，编译为 `cdylib` 由 Bee 加载。
+
 **用户的工作量**：写一段 SQL；剩下的 Bee 自动搞定。
 
 ### 场景 B：实时多源监控
