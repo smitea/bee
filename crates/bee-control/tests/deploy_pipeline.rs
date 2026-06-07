@@ -11,6 +11,8 @@ fn linear_3_pipeline() -> Pipeline {
                 task_id: id,
                 phase_id: 0,
                 handler_kind: HandlerKind::Started { tag: format!("T{id}") },
+                cpu_millicores: 0,
+                mem_mb: 0,
             })
             .collect(),
         edges: vec![
@@ -71,10 +73,13 @@ async fn control_plane_records_job_and_task_to_node_mapping() {
     let mapping = deployer.job_to_node_mapping(job_id).await;
     assert_eq!(mapping.len(), 3, "all 3 tasks must be in the mapping");
     let nodes: std::collections::HashSet<u32> = mapping.values().copied().collect();
-    assert_eq!(nodes.len(), 3, "round-robin placement: each task on a different node");
-    for task_id in 1..=3u32 {
-        let owner = mapping[&task_id];
-        assert_eq!(owner, task_id, "task {task_id} should be on worker {task_id}");
+    // With zero resource requirements, FFD is free to pack; the only hard
+    // requirement is that every task is mapped to some valid worker.
+    for (task_id, owner) in &mapping {
+        assert!(
+            (1..=3u32).contains(owner),
+            "task {task_id} mapped to unknown worker {owner}"
+        );
     }
 
     // Verify via direct cluster submission that the Job exists in CP.

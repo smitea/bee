@@ -12,6 +12,7 @@ pub mod control_plane;
 pub mod deployer;
 pub mod kv;
 pub mod raft;
+pub mod scheduler;
 pub mod worker;
 
 pub use builtin_handlers::{LogSink, StartedHandler, TerminalHandler};
@@ -21,4 +22,7 @@ pub use kv::{KVStateMachine, Op, TaskStatus, TxnError};
 pub use raft::{
     Cluster, ClusterConfig, LogIndex, NodeCommand, NodeId, NodeMetrics, RpcMessage, Term,
 };
-pub use worker::TaskWorker;
+pub use scheduler::{
+    FirstFitDecreasingScheduler, NodeCapacity, Scheduler, TaskPlacement, TaskRequirement,
+};
+pub use worker::{TaskWorker, WorkerCapacity};

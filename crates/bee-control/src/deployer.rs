@@ -25,14 +25,19 @@ use crate::builtin_handlers::LogSink;
 use crate::kv::TaskStatus;
 use crate::kv::{Op, TxnError};
 use crate::raft::cluster::{Cluster, ClusterConfig};
-use crate::worker::{TaskWorker, WorkerError};
+use crate::scheduler::{Scheduler, TaskRequirement};
+use crate::worker::{TaskWorker, WorkerCapacity, WorkerError};
 
+#[derive(Clone)]
 pub struct TaskSpec {
     pub task_id: u32,
     pub phase_id: u32,
     pub handler_kind: HandlerKind,
+    pub cpu_millicores: u32,
+    pub mem_mb: u32,
 }
 
+#[derive(Clone)]
 pub enum HandlerKind {
     Started { tag: String },
     Terminal { tag: String },
@@ -72,16 +77,22 @@ impl Pipeline {
                     task_id: 1,
                     phase_id: 0,
                     handler_kind: HandlerKind::Started { tag: "A".to_string() },
+                    cpu_millicores: 0,
+                    mem_mb: 0,
                 },
                 TaskSpec {
                     task_id: 2,
                     phase_id: 0,
                     handler_kind: HandlerKind::Started { tag: "B".to_string() },
+                    cpu_millicores: 0,
+                    mem_mb: 0,
                 },
                 TaskSpec {
                     task_id: 3,
                     phase_id: 0,
                     handler_kind: HandlerKind::Terminal { tag: "C".to_string() },
+                    cpu_millicores: 0,
+                    mem_mb: 0,
                 },
             ],
             edges: vec![Edge { from: 1, to: 2 }, Edge { from: 2, to: 3 }],
@@ -93,6 +104,7 @@ impl Pipeline {
 pub struct DeployerConfig {
     pub num_workers: usize,
     pub cluster_config: ClusterConfig,
+    pub worker_capacity: WorkerCapacity,
 }
 
 impl Default for DeployerConfig {
@@ -100,6 +112,7 @@ impl Default for DeployerConfig {
         Self {
             num_workers: 3,
             cluster_config: ClusterConfig::default(),
+            worker_capacity: WorkerCapacity::default(),
         }
     }
 }
@@ -108,6 +121,7 @@ pub struct Deployer {
     pub cluster: Cluster,
     pub workers: HashMap<u32, TaskWorker>,
     pub log: LogSink,
+    pub scheduler: Box<dyn Scheduler>,
     routing: HashMap<(u32, u32), Vec<(u32, u32)>>,
     inputs: HashMap<(u32, u32), mpsc::Sender<i64>>,
     forwarder_handles: Vec<JoinHandle<()>>,
@@ -115,16 +129,31 @@ pub struct Deployer {
 
 impl Deployer {
     pub async fn new(config: DeployerConfig) -> Self {
+        Self::with_scheduler(
+            config,
+            Box::new(crate::scheduler::FirstFitDecreasingScheduler::new()),
+        )
+        .await
+    }
+
+    pub async fn with_scheduler(
+        config: DeployerConfig,
+        scheduler: Box<dyn Scheduler>,
+    ) -> Self {
         let cluster = Cluster::new(config.cluster_config).await;
         let log = LogSink::new();
         let mut workers = HashMap::new();
         for i in 1..=config.num_workers as u32 {
-            workers.insert(i, TaskWorker::new(i, log.clone()));
+            workers.insert(
+                i,
+                TaskWorker::with_capacity(i, config.worker_capacity.clone(), log.clone()),
+            );
         }
         Self {
             cluster,
             workers,
             log,
+            scheduler,
             routing: HashMap::new(),
             inputs: HashMap::new(),
             forwarder_handles: Vec::new(),
@@ -153,25 +182,50 @@ impl Deployer {
 
     /// Deploy a Pipeline. Returns the assigned JobId.
     pub async fn deploy(&mut self, pipeline: Pipeline) -> Result<u32, DeployError> {
-        // Wait for the cluster to elect a leader (up to 3s).
         let leader = self
             .cluster
             .wait_for_leader(Duration::from_secs(3))
             .await
             .ok_or(DeployError::NoLeader)?;
         let job_id = next_job_id();
-        let mut worker_ids: Vec<u32> = self.workers.keys().copied().collect();
-        worker_ids.sort_unstable();
-        if worker_ids.is_empty() {
+
+        if self.workers.is_empty() {
             return Err(DeployError::NoWorkers);
         }
 
-        let mut placement: HashMap<u32, u32> = HashMap::new();
-        for (i, task) in pipeline.tasks.iter().enumerate() {
-            placement.insert(
-                task.task_id,
-                worker_ids[i % worker_ids.len()],
-            );
+        let requirements: Vec<TaskRequirement> = pipeline
+            .tasks
+            .iter()
+            .map(|t| TaskRequirement {
+                task_id: t.task_id,
+                cpu_millicores: t.cpu_millicores,
+                mem_mb: t.mem_mb,
+            })
+            .collect();
+        let mut node_capacities: Vec<crate::scheduler::NodeCapacity> = self
+            .workers
+            .values()
+            .map(|w| crate::scheduler::NodeCapacity {
+                node_id: w.node_id,
+                cpu_millicores_total: w.capacity.cpu_millicores_total,
+                mem_mb_total: w.capacity.mem_mb_total,
+            })
+            .collect();
+        node_capacities.sort_by_key(|n| n.node_id);
+
+        let placements = self.scheduler.place(&requirements, &node_capacities);
+        let mut placement_map: HashMap<u32, u32> = HashMap::new();
+        for (task, slot) in pipeline.tasks.iter().zip(placements.iter()) {
+            match slot {
+                Some(p) => {
+                    placement_map.insert(task.task_id, p.node_id);
+                }
+                None => {
+                    return Err(DeployError::InsufficientCapacity {
+                        task_id: task.task_id,
+                    });
+                }
+            }
         }
 
         self.cluster
@@ -187,12 +241,12 @@ impl Deployer {
             .map_err(DeployError::Submit)?;
 
         for task in &pipeline.tasks {
-            let worker_id = placement[&task.task_id];
+            let worker_id = placement_map[&task.task_id];
 
             self.cluster
                 .submit(
                     leader,
-                    Op::RegisterTask {
+                Op::RegisterTask {
                         task_id: task.task_id,
                         job_id,
                         phase_id: task.phase_id,
@@ -214,20 +268,9 @@ impl Deployer {
         }
 
         for edge in &pipeline.edges {
-            let from = (placement[&edge.from], edge.from);
-            let to = (placement[&edge.to], edge.to);
+            let from = (placement_map[&edge.from], edge.from);
+            let to = (placement_map[&edge.to], edge.to);
             self.routing.entry(from).or_default().push(to);
-        }
-
-        for (&worker_id, &task_id) in &placement {
-            let _worker = self
-                .workers
-                .get(&worker_id)
-                .ok_or(DeployError::NoWorker(worker_id))?;
-            // The deployer will use the worker's input via the input_sender
-            // accessor when wiring forwarders. Nothing to do here in this
-            // placeholder loop (the actual wiring is in the next loop).
-            let _ = task_id;
         }
 
         for ((worker_id, task_id), dests) in self.routing.clone() {
@@ -361,6 +404,7 @@ pub enum DeployError {
     NoWorkers,
     NoWorker(u32),
     NoTask(u32),
+    InsufficientCapacity { task_id: u32 },
     Submit(TxnError),
     Worker(WorkerError),
 }
@@ -372,6 +416,9 @@ impl std::fmt::Display for DeployError {
             DeployError::NoWorkers => write!(f, "no workers available"),
             DeployError::NoWorker(id) => write!(f, "no worker with id {id}"),
             DeployError::NoTask(id) => write!(f, "no task with id {id}"),
+            DeployError::InsufficientCapacity { task_id } => {
+                write!(f, "insufficient capacity to place task {task_id}")
+            }
             DeployError::Submit(e) => write!(f, "submit failed: {e:?}"),
             DeployError::Worker(e) => write!(f, "worker error: {e:?}"),
         }

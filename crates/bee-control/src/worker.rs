@@ -19,6 +19,21 @@ use tokio::task::JoinHandle;
 
 use crate::builtin_handlers::LogSink;
 
+#[derive(Clone, Debug)]
+pub struct WorkerCapacity {
+    pub cpu_millicores_total: u32,
+    pub mem_mb_total: u32,
+}
+
+impl Default for WorkerCapacity {
+    fn default() -> Self {
+        Self {
+            cpu_millicores_total: 1000,
+            mem_mb_total: 1024,
+        }
+    }
+}
+
 pub struct DeployedTask {
     pub task_id: u32,
     pub input_tx: mpsc::Sender<i64>,
@@ -29,14 +44,20 @@ pub struct DeployedTask {
 pub struct TaskWorker {
     pub node_id: u32,
     pub log: LogSink,
+    pub capacity: WorkerCapacity,
     pub deployed: HashMap<u32, DeployedTask>,
 }
 
 impl TaskWorker {
     pub fn new(node_id: u32, log: LogSink) -> Self {
+        Self::with_capacity(node_id, WorkerCapacity::default(), log)
+    }
+
+    pub fn with_capacity(node_id: u32, capacity: WorkerCapacity, log: LogSink) -> Self {
         Self {
             node_id,
             log,
+            capacity,
             deployed: HashMap::new(),
         }
     }
