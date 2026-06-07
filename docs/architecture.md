@@ -433,6 +433,90 @@ Runtime 收到 "我需要 Handler X"
 - **Pipeline 引用 Plugin 时的解析**：`binance:^1.0` 这样的版本范围在 Pipeline 提交时由控制面解析为具体 PluginId（hash）；解析不到时编译失败
 - **状态隔离**：KV state key 含 hash —— `state/task/{TaskId}/h{hash}/...`；新旧版本的 state 天然分离
 
+### 9.4 Datasource Registry（ADR-0010）
+
+**Datasource 是管理态的一等公民**，是"带 adapter 的 Phase"（ADR-0002 运行时表示）的**命名 + 可治理视图**。
+
+#### 9.4.1 数据模型
+
+```yaml
+Datasource:
+  name: "binance"                    # 用户可见名 (Pipeline 里 use 的名字)
+  tenant: 0                          # uint16 租户命名空间 (0 = global)
+  adapter: "binance"                 # 来自哪个 Adapter (Plugin 提供的)
+  plugin_id: "a3f5..."               # sha256 (ADR-0009)
+  version_spec: "^1.0"               # SemVer 范围；默认 latest
+  config:
+    api_key_secret_id: "secret-001"  # 引用 secret store (S30 落地)
+    base_url: "wss://api.binance.com"
+    # ... Adapter 需要的其他参数
+  status: Active | Paused | Disabled
+  created_at: ...
+  updated_at: ...
+  owner_node: "Node 1"               # 当前运行 Producer 的 Node
+```
+
+存储位置：KV 集群的 `ds/{tenant}/{name}` key。强一致（Raft），全集群可见。
+
+#### 9.4.2 `use` SQL 指令的编译流程
+
+```sql
+use binance;
+SELECT * FROM binance.subscribe('BTC/USDT', '1m');
+```
+
+```
+SQL 文本
+  ↓
+① 预处理：识别 "use binance;"
+  ↓
+  查 Datasource Registry:
+    ds/0/binance = { adapter: "binance", plugin_id: "a3f5...", version_spec: "^1.0", ... }
+  ↓
+  检查 job_tenant: if ds.tenant != job.tenant && ds.tenant != 0 → 编译失败
+  ↓
+  解析 "binance.subscribe('BTC/USDT', '1m')"
+  ↓
+  校验 subscribe() 来自已 use 的 binance 的 Adapter → DAG 节点
+  ↓
+② 剩余 SQL 交给 DataFusion 解析
+  ↓
+③ 输出物理 DAG
+```
+
+#### 9.4.3 严格模式 (Strict Mode)
+
+- ✅ 允许：`use binance; SELECT ... FROM binance.subscribe(...)`
+- ❌ 编译错误：未 `use` 直接引用 adapter（无 `api_key=...` 内联）
+- 错误信息：`Datasource 'binance' is not registered. Run: bee datasource create binance --adapter binance`
+
+#### 9.4.4 版本选择
+
+```sql
+use binance;            -- 默认: latest 兼容版 (由 version_spec 决定)
+use binance@1.4.2;     -- 精确锁定
+use binance@^1.0;      -- 1.x 兼容
+```
+
+#### 9.4.5 与 Producer Pipeline 模式（ADR-0003）的关系
+
+- Datasource 的运行时 = **1 个 Producer + N 个 Subscriber**
+- "Datasource 已存在" = 已有 1 个 Producer 在跑
+- 新 Pipeline 引用已存在 Datasource → 自动转 Subscriber
+- Datasource 销毁 (`bee datasource delete`) = Producer Draining + Subscriber 全部 `Waiting for Upstream`
+
+#### 9.4.6 Datasource CLI (admin)
+
+| 命令 | 功能 |
+| --- | --- |
+| `bee datasource list` | 列出本租户可见的所有 Datasource |
+| `bee datasource create <name> --adapter <a> --config <json>` | 注册新 Datasource |
+| `bee datasource inspect <name>` | 显示元数据 + 当前 Producer 所在 Node + 健康指标 |
+| `bee datasource test <name>` | 主动探活（独立于任何 Pipeline） |
+| `bee datasource pause <name>` | 挂起：所有引用 Pipeline 触发 Draining |
+| `bee datasource resume <name>` | 恢复 |
+| `bee datasource delete <name>` | 销毁（需要先 pause） |
+
 ---
 
 ## 10. 时序图

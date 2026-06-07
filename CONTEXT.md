@@ -89,3 +89,6 @@ Metadata about a Plugin (logical name, feature version, **abi_version**, content
 
 **Plugin Identity (PluginId)**:
 The content-hash-based unique identifier for a loaded Plugin: `PluginId = hex(sha256(plugin_binary_content))`. Two different builds of the same logical Plugin (even if they claim the same version string) have distinct PluginIds. The KV state key includes the hash (`state/task/{TaskId}/h{hash}/...`), and Pipelines bind to Plugins by PluginId, not by version string (ADR-0009).
+
+**Tenant Namespace**:
+A `uint16` identifier (0 to 65535) that scopes ownership of Datasources and Jobs. Tenant `0` is the global / public namespace; values 1-65535 are tenant IDs. A Job's tenant is set by the submission context (API key, CLI auth, etc.). A Job can `use` a Datasource only if `ds.tenant == job.tenant` or `ds.tenant == 0`. MVP carries the field but does not enforce the access rule; 1.x turns enforcement on (ADR-0010).

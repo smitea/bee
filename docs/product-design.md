@@ -148,11 +148,13 @@
 | **分布式部署** | 自动把 Phase 调度到集群节点 | 用户不关心 Node 拓扑 | 0.3 |
 | **自动 Failover** | 节点挂 → 3× 心跳 → Work-Stealing → 自动迁移 | 业务 0 感知 | 0.4 |
 | **限流数据源共享** | Producer Pipeline 模式 | 1 个外部连接服务 N 个 Pipeline | 0.5 |
+| **Datasource 管理** | `use binance;` 引用模式 + CLI 注册/探活/挂起 + 凭证托管 + 租户隔离 | 凭证不入 SQL；admin 集中管控；合规可审计 | 0.5–0.6 (S29–S31) |
 | **插件系统** | Handler / Adapter 动态库，热加载 | 接入新数据源 = 2 小时 | 0.6 |
 | **跨 Pipeline 组合** | Cross-Pipeline 边 + 类型流 | 像搭积木一样拼 Pipeline | 0.5 |
 | **Pipeline 优化器** | 基于运行时指标重排 Phase | 自动调优，无需手工调参 | 0.7 |
 | **观测面板** | Phase 状态 / 耗时 / 资源 / 错误率 | 故障秒级定位 | 0.8 |
 | **Schema 演进** | 流字段可版本化、可回放 | 上下游解耦演进 | 1.x |
+| **多租户隔离** | `uint16` 命名空间 + Datasource ACL | 一个集群服务多团队 / 多客户 | 1.x 强制启用 |
 
 ---
 
@@ -197,6 +199,60 @@
 1. 升级 Adapter: 替换动态库文件 → Plugin Manager 自动 reload → 引用计数归零后生效
 2. 升级 Pipeline: 提交新版本 DAG → 新 JobId → 老 Job Draining
 3. 灰度: 同一 Pipeline 多版本并行，比例可调（1.x 路线）
+```
+
+### 6.5 Datasource 管理（admin 工作流）
+
+```
+1. 注册新 Datasource:
+   bee datasource create binance \
+     --adapter binance \
+     --plugin-version ^1.0 \
+     --config '{"base_url": "wss://api.binance.com"}' \
+     --secret api_key=secret-001
+   → Bee 写入 Registry (Raft)
+   → 凭证存 secret store，SQL 里看不到原始 key
+
+2. 测试连通性:
+   bee datasource test binance
+   → 主动建连接 + 取一个 sample event
+   → 显示 "ok" 或错误
+
+3. 列出 / 检索:
+   bee datasource list
+   bee datasource list --tenant quant-team-a
+   bee datasource inspect binance
+   → 元数据 / 当前 Producer Node / 健康指标
+
+4. 挂起 / 恢复 (维护窗口):
+   bee datasource pause binance
+   → 所有引用 Pipeline 触发 Draining
+   → 维护完后: bee datasource resume binance
+
+5. 升级 Datasource 版本:
+   bee datasource upgrade binance --to ^1.5
+   → 更新 Registry 中 version_spec
+   → 下次新部署的 Pipeline 自动用新版本；旧 Pipeline 继续用旧版本（多版本共存，ADR-0009）
+```
+
+### 6.6 Pipeline 作者的 Datasource 使用
+
+```
+1. SQL 顶部声明 (类似 USE database):
+   use binance;
+   use coingecko;
+   use influxdb;
+
+2. 引用 (方法名来自 Adapter):
+   SELECT * FROM binance.subscribe('BTC/USDT', '5min') AS b
+   ASOF JOIN coingecko.subscribe('bitcoin') AS c ON ...;
+
+3. 编译期校验:
+   bee compile pipeline.sql
+   → 校验 Datasource 存在 / Adapter 方法签名匹配
+   → 错误: Datasource 'foo' is not registered. Run: bee datasource create foo ...
+
+4. 严格模式: 禁止 inline 写 API key
 ```
 
 ---
@@ -341,6 +397,7 @@ graph TB
   - 0007 [Simplified all-in-one Raft topology for MVP](./adr/0007-simplified-raft-topology-mvp.md)
   - 0008 [Optimizer / Scheduler; runtime adaptive optimization](./adr/0008-optimizer-scheduler-adaptive.md)
   - 0009 [Plugin multi-version + hash identity + strict ABI](./adr/0009-plugin-multiversion-hash-abi.md)
+  - 0010 [Datasource as a managed entity with `use` syntax and tenant namespace](./adr/0010-datasource-managed-entity.md)
 - 项目概览：[README.md](../README.md)（注：README 仍是 v1 范围，需要同步到 v2）
 
 ## 附录 B：本文档待办

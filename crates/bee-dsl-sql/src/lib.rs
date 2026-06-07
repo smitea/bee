@@ -19,8 +19,8 @@ pub use handlers::{
     AggregateHandler, DatasourceHandler, FilterHandler, ProjectionHandler,
 };
 pub use physical::{
-    compile_to_physical_plan, execute_plan, format_batches, run_pipeline, DataFusionPhase,
-    RunConfig,
+    compile_to_physical_plan, execute_plan, format_batches, parse_binance_subscribe,
+    run_binance_pipeline, run_pipeline, DataFusionPhase, RunConfig,
 };
 
 /// 解析一条 SQL 语句,返回 DataFusion 的 Statement AST 列表。
@@ -265,6 +265,42 @@ mod tests {
         let cfg = RunConfig::default();
         assert_eq!(cfg.micro_batch_window_ms, 1000);
         assert_eq!(cfg.replay_count, 1);
+    }
+
+    #[tokio::test]
+    async fn parse_binance_subscribe_extracts_symbol() {
+        use super::parse_binance_subscribe;
+        assert_eq!(
+            parse_binance_subscribe("SELECT * FROM binance.subscribe('BTC/USDT')"),
+            Some("BTC/USDT".to_string())
+        );
+        assert_eq!(
+            parse_binance_subscribe("binance.subscribe(\"ETH/USDT\")"),
+            Some("ETH/USDT".to_string())
+        );
+        assert_eq!(parse_binance_subscribe("SELECT 1"), None);
+    }
+
+    #[tokio::test]
+    async fn run_binance_subscribe_pipeline_prints_events() {
+        let sql = "SELECT * FROM binance.subscribe('BTC/USDT')";
+        let output = run_pipeline(sql, std::path::Path::new("/dev/null"))
+            .await
+            .unwrap();
+
+        // Header has the 3 columns
+        assert!(output.contains("symbol"), "missing symbol column:\n{output}");
+        assert!(output.contains("price"));
+        assert!(output.contains("ts_ms"));
+        // 10 events at delay=0
+        assert_eq!(output.matches("BTC/USDT").count(), 10, "full output:\n{output}");
+        // Prices 101.0..110.0 should each appear once
+        for v in &["101", "102", "103", "104", "105", "106", "107", "108", "109", "110"] {
+            assert!(
+                output.contains(v),
+                "expected price {v} in output:\n{output}"
+            );
+        }
     }
 
     #[tokio::test]

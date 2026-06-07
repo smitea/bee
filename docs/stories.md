@@ -26,13 +26,20 @@ graph LR
     S10 --> S19 --> S20 --> S21
     S10 --> S22 --> S23 --> S24 --> S25
     S10 --> S27 --> S28
+
+    S15 --> S29
+    S19 --> S29
+    S29 --> S30
+    S29 --> S31
+    S17 --> S31
+
     S12 -.-> S28
     S24 -.-> S28
 ```
 
-## 6 parallel paths after S10
+## 7 parallel paths after S10
 
-Once **S10 (Scheduler bin-packing)** is done, the work forks into 6 paths that can each be picked up by a different agent:
+Once **S10 (Scheduler bin-packing)** is done, the work forks into 7 paths that can each be picked up by a different agent:
 
 | Path | Stories | Theme |
 | --- | --- | --- |
@@ -42,6 +49,7 @@ Once **S10 (Scheduler bin-packing)** is done, the work forks into 6 paths that c
 | **D. Plugin 系统** | S19 → S20 → S21 | Rust 插件 + ABI 严格检查 + 多版本 + 版本范围 |
 | **E. 自适应调度** | S22 → S23 → S24 → S25 | MLFQ + 4 个备选调度策略 + 跨 Node 再平衡 |
 | **F. 可观测性** | S27 → S28 | CLI 面板 (jobs / inspect / diagnostics / cluster status) |
+| **G. Datasource 管理 (ADR-0010)** | S29 → S30, S31 | `use` 语法 + Datasource Registry + secret store + 健康/挂起 |
 
 ## Key milestones
 
@@ -51,6 +59,7 @@ Once **S10 (Scheduler bin-packing)** is done, the work forks into 6 paths that c
 - **S17**: **量化场景 A 完整跑通**——binance mock + 多 Pipeline 共享 1 个 Producer
 - **S25**: **0.7 路线图核心**——运行时自适应调度
 - **S28**: **0.x → 1.0 生产化就绪**（CLI 可观测 + 调度 + 故障可诊断）
+- **S29–S31**: **Datasource 管理**——`use` 语法 + secret store + 挂起/恢复 (admin 可视化管理)
 
 ---
 
@@ -730,6 +739,94 @@ In `bee-dsl-sql`:
 
 ## ADR conventions
 
-- Numbered sequentially (`0001`, `0002`, ...); next ADR is `0010`
+- Numbered sequentially (`0001`, `0002`, ...); next available is `0011`
 - When a decision is reversed, write a new ADR that supersedes; do not modify accepted ADRs
 - Update `docs/adr/README.md` index when adding a new ADR
+
+---
+
+## Phase 0.5 / 0.6 — Datasource management (ADR-0010)
+
+---
+
+### S29 · Datasource managed entity + `use` SQL syntax + strict mode
+
+- **Type**: AFK
+- **Blocked by**: S15 (DataFusion executor for SQL integration), S19 (Plugin loading for PluginId resolution)
+- **ADRs**: [0010](./adr/0010-datasource-managed-entity.md), [0002](./adr/0002-datasource-is-a-phase.md), [0003](./adr/0003-producer-pipeline-pattern.md)
+
+**What to build**
+Promote Datasource from runtime concept to **first-class managed entity**:
+
+- **Data model**: `Datasource { name: String, tenant: u16, adapter: String, plugin_id: String, version_spec: String, config: serde_json::Value, status: DatasourceStatus, created_at, updated_at, owner_node: Option<NodeId> }`. Stored in KV at `ds/{tenant}/{name}`.
+- **CLI**:
+  - `bee datasource list [--tenant <n>]`
+  - `bee datasource create <name> --adapter <a> --plugin-version <v> --config <json>`
+  - `bee datasource inspect <name>`
+  - `bee datasource test <name>` (probes via Plugin's `test_connection` method)
+  - `bee datasource pause <name>` / `resume <name>` / `delete <name>`
+- **SQL preprocessor**: scan for `use <name>[@<version_spec>];` statements at the top of the SQL file. Resolve each to a registered Datasource; bind to a specific `PluginId` (using the Datasource's `version_spec` if no explicit pin, or matching SemVer range if pinned).
+- **Strict mode enforcement**: any reference to an adapter function (e.g., `binance.subscribe(...)`) without a prior `use binance;` is a **compile error**. No inline Datasource references.
+- **Tenant field**: `tenant: u16` exists on both Datasource and Job structs. MVP enforcement: `ds.tenant == job.tenant || ds.tenant == 0` (struct field only, no ACL enforcement in MVP; 1.x turns it on).
+- **Output Datasources**: same `use` syntax works for sinks — `use influxdb; EMIT INTO influxdb('bitcoin.trade') SELECT ...`.
+
+**Acceptance criteria**
+- [ ] `bee datasource create binance --adapter binance --plugin-version ^1.0 --config '{}'` succeeds and the Datasource appears in `bee datasource list`
+- [ ] SQL: `use binance; SELECT * FROM binance.subscribe('BTC/USDT', '1m');` compiles and deploys
+- [ ] SQL: `SELECT * FROM binance.subscribe('BTC/USDT', '1m');` (no `use`) is a compile error with a clear message
+- [ ] SQL: `use binance; SELECT * FROM coingecko.subscribe(...);` is a compile error (coingecko is not used)
+- [ ] `use binance@^1.0;` resolves to the highest 1.x Plugin version loaded
+- [ ] `use binance@1.4.2;` resolves to exactly that version
+- [ ] `use binance;` with no version spec resolves to the Datasource's configured `version_spec`
+- [ ] `bee datasource pause binance` triggers Draining on all referencing Jobs
+- [ ] Job's `tenant` field defaults to 0; struct field exists but no ACL check in MVP
+
+---
+
+### S30 · Secret store integration for Datasource credentials
+
+- **Type**: AFK
+- **Blocked by**: S29 (Datasource management), S06 (KV client)
+- **ADRs**: [0010](./adr/0010-datasource-managed-entity.md)
+
+**What to build**
+Move credentials out of Datasource `config` and into a dedicated secret store:
+
+- `SecretStore` trait with `get(secret_id) -> Vec<u8>` / `put(secret_id, value)` / `delete(secret_id)`
+- MVP implementation: store secrets in KV at key `secret/{tenant}/{secret_id}`; values are opaque bytes (bincode or raw)
+- Datasource `config` references secrets by ID (e.g., `api_key_secret_id: "secret-001"`); the Plugin reads the actual value via the `BeeHost` API at runtime
+- `bee secret put/get/list/delete` CLI (admin)
+- Encryption-at-rest: MVP uses Raft log encryption if available; 1.x plugs in HashiCorp Vault / AWS Secrets Manager
+
+**Acceptance criteria**
+- [ ] `bee secret put api_key=secret-001 --value <raw>` stores the secret
+- [ ] Datasource config can reference `api_key_secret_id: "secret-001"` instead of inlining the key
+- [ ] Plugin reads the secret at runtime via `BeeHost.secret_get(secret_id)`; the raw value never appears in Datasource `config` or in any Pipeline log
+- [ ] `bee secret list` shows secret IDs only (not values)
+- [ ] Secrets are scoped per tenant (MVP: all tenant 0)
+
+---
+
+### S31 · Datasource health metrics + pause / resume behavior
+
+- **Type**: AFK
+- **Blocked by**: S29 (Datasource management), S17 (Producer Pipeline mode for Draining)
+- **ADRs**: [0010](./adr/0010-datasource-managed-entity.md)
+
+**What to build**
+Datasource-level observability and lifecycle:
+
+- **Health probe**: the Producer of a Datasource periodically probes the external connection (default every 30s). Metrics: connection_success_total, connection_failure_total, last_success_at, last_failure_at, error_message_recent.
+- **Auto-pause on N consecutive failures** (configurable, default 10): triggers Draining on all referencing Jobs (uses the S17 Producer's lifecycle).
+- **`bee datasource inspect <name>`** shows the health metrics + current Producer Node + referencing Job count.
+- **Pause behavior**:
+  - `bee datasource pause <name>`: Producer's Adapter stops receiving new events; existing in-flight events flush; Subscribers complete; Job lifecycle ends cleanly.
+  - `bee datasource resume <name>`: re-establish connection; if the original Plugin + config are still loaded, recreate Producer; Subscribers re-attach automatically.
+- **SLO dashboard** (basic, 1.x): `bee datasource sl` shows all Datasources with their health rollup.
+
+**Acceptance criteria**
+- [ ] `bee datasource inspect binance` shows: Producer Node, plugin_id, version, health metrics, referencing Job count
+- [ ] Killing the external connection 10 times in a row triggers auto-pause
+- [ ] `bee datasource pause binance` and `bee datasource resume binance` work end-to-end
+- [ ] Subscribers cleanly `Draining` during pause; cleanly reconnect on resume
+- [ ] Pause/resume does not lose events (either buffered or backpressured)

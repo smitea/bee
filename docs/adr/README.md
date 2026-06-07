@@ -15,6 +15,7 @@ This directory contains the architectural decisions made during the v2 design of
 | [0007](./0007-simplified-raft-topology-mvp.md) | Simplified all-in-one Raft topology for MVP | Accepted | Deployment |
 | [0008](./0008-optimizer-scheduler-adaptive.md) | Optimizer and Scheduler responsibilities; runtime adaptive optimization with MLFQ default | Accepted | Runtime |
 | [0009](./0009-plugin-multiversion-hash-abi.md) | Plugin multi-version coexistence; hash-based identity; strict ABI compatibility | Accepted | Plugins |
+| [0010](./0010-datasource-managed-entity.md) | Datasource as a managed entity with `use` syntax and tenant namespace | Accepted | Management |
 
 ## Conventions
 
@@ -35,6 +36,8 @@ This directory contains the architectural decisions made during the v2 design of
 | ADR-0008 | Real preemption (OS cgroup controls) | When cooperative scheduling proves insufficient |
 | ADR-0008 | Adaptive runtime DAG reordering | When static optimizer proves insufficient |
 | ADR-0009 | Online state migration (`bee plugin migrate`) | When first "must migrate old state" scenario surfaces |
+| ADR-0010 | Multi-tenant access enforcement (MVP carries `tenant: u16` struct field but does not check ACL) | 1.x when first multi-tenant deployment appears |
+| ADR-0010 | External secret store (HashiCorp Vault / AWS Secrets Manager) integration | 1.x when compliance requirements mandate it |
 | product-design | C ABI plugin marketplace | 2.x (per roadmap) |
 
 ## Known open questions (not yet ADRed)
