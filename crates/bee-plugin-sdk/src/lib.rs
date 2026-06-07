@@ -198,6 +198,10 @@ pub enum PluginError {
     /// could not be parsed (e.g. "garbage" or "").
     #[error("invalid abi_version '{0}' (expected form like '1.0' or 'v1')")]
     InvalidAbiVersion(String),
+    /// S21: `feature_version` or `VersionSpec` string could not be
+    /// parsed into a [`Version`] (e.g. "1.0.3.4" or "abc").
+    #[error("invalid version '{0}' (expected form like '1.0.0' or 'v1.4.2')")]
+    InvalidVersion(String),
 }
 
 pub type PluginResult<T> = std::result::Result<T, PluginError>;
@@ -258,6 +262,120 @@ impl AbiVersion {
     /// True if this version's major is in the host's accepted list.
     pub fn matches_major(&self, accepted_majors: &[u32]) -> bool {
         accepted_majors.contains(&self.major)
+    }
+}
+
+/// SemVer-style version (`major.minor.patch`). Distinct from
+/// [`AbiVersion`] which is the *binary* contract version (per
+/// ADR-0009, the major number is what the host accepts). Feature
+/// version follows SemVer and is used by [`VersionSpec`] for
+/// `binance:^1.0` / `binance:latest` style references in Pipelines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Version {
+    pub major: u32,
+    pub minor: u32,
+    pub patch: u32,
+}
+
+impl std::fmt::Display for Version {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}.{}", self.major, self.minor, self.patch)
+    }
+}
+
+impl Version {
+    /// Parse `"1"`, `"1.0"`, `"1.4.2"`, `"v2.0"`. Missing parts
+    /// default to `0`. A leading `v` is optional.
+    pub fn parse(s: &str) -> Result<Self, PluginError> {
+        let s = s.trim();
+        if s.is_empty() {
+            return Err(PluginError::InvalidVersion(s.to_string()));
+        }
+        let s = s.strip_prefix('v').unwrap_or(s);
+        let mut parts = s.split('.');
+        let parse_part = |part: &str| -> Result<u32, PluginError> {
+            if part.is_empty() {
+                Err(PluginError::InvalidVersion(s.to_string()))
+            } else {
+                part.parse::<u32>()
+                    .map_err(|_| PluginError::InvalidVersion(s.to_string()))
+            }
+        };
+        let major = parse_part(parts.next().unwrap_or("0"))?;
+        let minor = parts
+            .next()
+            .map(parse_part)
+            .transpose()?
+            .unwrap_or(0);
+        let patch = parts
+            .next()
+            .map(parse_part)
+            .transpose()?
+            .unwrap_or(0);
+        if parts.next().is_some() {
+            return Err(PluginError::InvalidVersion(s.to_string()));
+        }
+        Ok(Self { major, minor, patch })
+    }
+}
+
+/// SemVer range syntax for Plugin references in Pipelines
+/// (`binance:^1.0`, `binance:~1.2`, `binance:1.4.2`, `binance:latest`).
+///
+/// - [`VersionSpec::Exact`]: matches only the exact Version.
+/// - [`VersionSpec::Compatible`]: `^1.0` → `>=1.0.0, <2.0.0`.
+/// - [`VersionSpec::Patch`]: `~1.2` → `>=1.2.0, <1.3.0`.
+/// - [`VersionSpec::Latest`]: any version; the resolver picks the
+///   highest one loaded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VersionSpec {
+    Exact(Version),
+    Compatible(Version),
+    Patch(Version),
+    Latest,
+}
+
+impl std::fmt::Display for VersionSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            VersionSpec::Exact(v) => write!(f, "{v}"),
+            VersionSpec::Compatible(v) => write!(f, "^{v}"),
+            VersionSpec::Patch(v) => write!(f, "~{v}"),
+            VersionSpec::Latest => f.write_str("latest"),
+        }
+    }
+}
+
+impl VersionSpec {
+    /// Parse `"1.4.2"` (exact), `"^1.0"` (compatible), `"~1.2"`
+    /// (patch), `"latest"`. Other forms (compound ranges like
+    /// `>=1.0,<2.0`) are deferred to 1.x per the S21 spec scope.
+    pub fn parse(s: &str) -> Result<Self, PluginError> {
+        let s = s.trim();
+        if s == "latest" {
+            return Ok(VersionSpec::Latest);
+        }
+        if let Some(rest) = s.strip_prefix('^') {
+            return Ok(VersionSpec::Compatible(Version::parse(rest)?));
+        }
+        if let Some(rest) = s.strip_prefix('~') {
+            return Ok(VersionSpec::Patch(Version::parse(rest)?));
+        }
+        Ok(VersionSpec::Exact(Version::parse(s)?))
+    }
+
+    /// True if `v` satisfies this spec.
+    pub fn matches(&self, v: &Version) -> bool {
+        match self {
+            VersionSpec::Exact(target) => v == target,
+            VersionSpec::Compatible(min) => {
+                v >= min && v.major == min.major
+            }
+            VersionSpec::Patch(min) => {
+                v >= min && v.major == min.major && v.minor == min.minor
+            }
+            VersionSpec::Latest => true,
+        }
     }
 }
 
@@ -329,5 +447,94 @@ mod tests {
         assert!(!v1.matches_major(&[2]));
         assert!(v2.matches_major(&[1, 2]));
         assert!(!v2.matches_major(&[]));
+    }
+
+    // ---- Version / VersionSpec (S21) ----
+
+    #[test]
+    fn version_parses_basic_forms() {
+        assert_eq!(
+            Version::parse("1").unwrap(),
+            Version { major: 1, minor: 0, patch: 0 }
+        );
+        assert_eq!(
+            Version::parse("1.4").unwrap(),
+            Version { major: 1, minor: 4, patch: 0 }
+        );
+        assert_eq!(
+            Version::parse("1.4.2").unwrap(),
+            Version { major: 1, minor: 4, patch: 2 }
+        );
+        assert_eq!(
+            Version::parse("v2.0.0").unwrap(),
+            Version { major: 2, minor: 0, patch: 0 }
+        );
+    }
+
+    #[test]
+    fn version_rejects_garbage() {
+        assert!(matches!(Version::parse(""), Err(PluginError::InvalidVersion(_))));
+        assert!(matches!(Version::parse("abc"), Err(PluginError::InvalidVersion(_))));
+        assert!(matches!(Version::parse("1.2.3.4"), Err(PluginError::InvalidVersion(_))));
+    }
+
+    #[test]
+    fn version_ordering_is_lexicographic_semver() {
+        let v100 = Version::parse("1.0.0").unwrap();
+        let v110 = Version::parse("1.1.0").unwrap();
+        let v200 = Version::parse("2.0.0").unwrap();
+        let v101 = Version::parse("1.0.1").unwrap();
+        assert!(v100 < v101);
+        assert!(v101 < v110);
+        assert!(v110 < v200);
+    }
+
+    #[test]
+    fn version_spec_parses_all_four_forms() {
+        assert_eq!(
+            VersionSpec::parse("1.4.2").unwrap(),
+            VersionSpec::Exact(Version { major: 1, minor: 4, patch: 2 })
+        );
+        assert_eq!(
+            VersionSpec::parse("^1.0").unwrap(),
+            VersionSpec::Compatible(Version { major: 1, minor: 0, patch: 0 })
+        );
+        assert_eq!(
+            VersionSpec::parse("~1.2").unwrap(),
+            VersionSpec::Patch(Version { major: 1, minor: 2, patch: 0 })
+        );
+        assert_eq!(VersionSpec::parse("latest").unwrap(), VersionSpec::Latest);
+    }
+
+    #[test]
+    fn version_spec_matches_semver_semantics() {
+        let v142 = Version::parse("1.4.2").unwrap();
+        let v100 = Version::parse("1.0.0").unwrap();
+        let v110 = Version::parse("1.1.0").unwrap();
+        let v200 = Version::parse("2.0.0").unwrap();
+        let v120 = Version::parse("1.2.0").unwrap();
+        let v121 = Version::parse("1.2.1").unwrap();
+        let v130 = Version::parse("1.3.0").unwrap();
+
+        // Exact
+        assert!(VersionSpec::Exact(v142).matches(&v142));
+        assert!(!VersionSpec::Exact(v142).matches(&v100));
+
+        // Compatible: ^1.0 → 1.0.0 <= v < 2.0.0
+        assert!(VersionSpec::Compatible(v100).matches(&v100));
+        assert!(VersionSpec::Compatible(v100).matches(&v142));
+        assert!(VersionSpec::Compatible(v100).matches(&v110));
+        assert!(!VersionSpec::Compatible(v100).matches(&v200));
+
+        // Patch: ~1.2 → 1.2.0 <= v < 1.3.0
+        assert!(VersionSpec::Patch(v120).matches(&v120));
+        assert!(VersionSpec::Patch(v120).matches(&v121));
+        assert!(!VersionSpec::Patch(v120).matches(&v130));
+        assert!(!VersionSpec::Patch(v120).matches(&v110));
+        assert!(!VersionSpec::Patch(v120).matches(&v200));
+
+        // Latest: always true
+        assert!(VersionSpec::Latest.matches(&v100));
+        assert!(VersionSpec::Latest.matches(&v200));
     }
 }

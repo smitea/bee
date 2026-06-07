@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use bee_plugin_sdk::{
     compute_plugin_id, AbiVersion, AdapterDescriptor, HandlerDescriptor, Plugin, PluginError,
-    PluginHandle, PluginId, PluginManifest,
+    PluginHandle, PluginId, PluginManifest, Version, VersionSpec,
 };
 
 /// In-process Plugin Manager. Holds the set of loaded plugins keyed
@@ -53,6 +53,11 @@ pub struct PluginManager {
 struct RegisteredPlugin {
     manifest: PluginManifest,
     handle: Arc<PluginHandle>,
+    /// S21: refcount of Pipelines / Jobs that currently reference
+    /// this Plugin. When the refcount drops to 0, the Plugin is
+    /// auto-unloaded (removed from the manager). The Compiler/Registry
+    /// calls `retain` on submit and `release` on Job stop.
+    refcount: u32,
 }
 
 impl PluginManager {
@@ -124,6 +129,7 @@ impl PluginManager {
             RegisteredPlugin {
                 manifest,
                 handle: Arc::new(handle),
+                refcount: 0,
             }
         });
         Ok(id)
@@ -145,6 +151,7 @@ impl PluginManager {
         self.plugins.entry(id.clone()).or_insert(RegisteredPlugin {
             manifest,
             handle: Arc::new(handle),
+            refcount: 0,
         });
         Ok(id)
     }
@@ -200,6 +207,76 @@ impl PluginManager {
 
     pub fn is_empty(&self) -> bool {
         self.plugins.is_empty()
+    }
+
+    /// S21: resolve a Plugin reference (logical `name` + SemVer
+    /// `spec`) to a concrete [`PluginId`]. Filters loaded plugins by
+    /// name, parses each `manifest.feature_version` to a [`Version`],
+    /// and picks the **highest** version that satisfies the spec.
+    /// Returns `None` if no loaded plugin matches — the Pipeline
+    /// submit must then fail with a clear error (the Compiler is
+    /// responsible for surfacing it).
+    ///
+    /// Multiple `.so` files for the same logical Plugin (same `name`
+    /// in Manifest, different `version` and `sha256`) can be loaded
+    /// simultaneously; each gets a distinct [`PluginId`].
+    pub fn resolve(&self, name: &str, spec: &VersionSpec) -> Option<PluginId> {
+        let mut best: Option<(PluginId, Version)> = None;
+        for (id, p) in &self.plugins {
+            if p.manifest.name.0 != name {
+                continue;
+            }
+            let v = match Version::parse(&p.manifest.feature_version) {
+                Ok(v) => v,
+                Err(_) => continue, // unparseable → skip; the spec only matches parseable versions
+            };
+            if !spec.matches(&v) {
+                continue;
+            }
+            match &best {
+                Some((_, bv)) if *bv >= v => {}
+                _ => best = Some((id.clone(), v)),
+            }
+        }
+        best.map(|(id, _)| id)
+    }
+
+    /// S21: increment the refcount of a loaded Plugin. The Compiler
+    /// calls this when a Pipeline referencing the Plugin is
+    /// submitted. Returns `true` if the Plugin was found and the
+    /// refcount incremented; `false` if the Plugin is not loaded.
+    pub fn retain(&mut self, id: &PluginId) -> bool {
+        if let Some(p) = self.plugins.get_mut(id) {
+            p.refcount = p.refcount.saturating_add(1);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// S21: decrement the refcount of a loaded Plugin. When the
+    /// refcount reaches 0, the Plugin is auto-unloaded (removed
+    /// from the manager). Returns `true` if the Plugin was found
+    /// (whether it stayed loaded or was just removed); `false` if
+    /// the Plugin is not loaded.
+    pub fn release(&mut self, id: &PluginId) -> bool {
+        let should_remove = if let Some(p) = self.plugins.get_mut(id) {
+            p.refcount = p.refcount.saturating_sub(1);
+            p.refcount == 0
+        } else {
+            return false;
+        };
+        if should_remove {
+            self.plugins.remove(id);
+        }
+        true
+    }
+
+    /// S21: read the current refcount of a loaded Plugin. Returns
+    /// `None` if the Plugin is not loaded. Used by `bee plugin list`
+    /// to show the refcount next to each Plugin.
+    pub fn refcount_of(&self, id: &PluginId) -> Option<u32> {
+        self.plugins.get(id).map(|p| p.refcount)
     }
 }
 
@@ -571,5 +648,194 @@ mod tests {
         // have succeeded and we'd see Ok. Match the error to confirm.
         assert!(matches!(r, Err(PluginError::AbiMismatch { .. })));
         assert_eq!(mgr.len(), 0);
+    }
+
+    // ---- Multi-version coexistence + refcount (S21) ----
+
+    fn make_manifest_v(name: &str, feature: &str, abi: &str) -> PluginManifest {
+        PluginManifest {
+            name: PluginName(name.into()),
+            feature_version: feature.into(),
+            abi_version: abi.into(),
+            adapters: vec![],
+            handlers: vec![],
+        }
+    }
+
+    #[test]
+    fn resolve_picks_highest_matching_version() {
+        let mut mgr = PluginManager::new();
+        let id_142 = mgr
+            .register(b"binance-1.4.2", make_manifest_v("binance", "1.4.2", "v1"))
+            .unwrap();
+        let id_200 = mgr
+            .register(b"binance-2.0.0", make_manifest_v("binance", "2.0.0", "v1"))
+            .unwrap();
+        assert_eq!(mgr.len(), 2);
+        assert_ne!(id_142, id_200);
+
+        // binance:^1.0 → only 1.4.2 matches
+        let spec = VersionSpec::parse("^1.0").unwrap();
+        assert_eq!(mgr.resolve("binance", &spec), Some(id_142.clone()));
+
+        // binance:^2.0 → only 2.0.0 matches
+        let spec = VersionSpec::parse("^2.0").unwrap();
+        assert_eq!(mgr.resolve("binance", &spec), Some(id_200.clone()));
+
+        // binance:latest → highest, 2.0.0
+        let spec = VersionSpec::parse("latest").unwrap();
+        assert_eq!(mgr.resolve("binance", &spec), Some(id_200.clone()));
+
+        // binance:1.4.2 (exact) → 1.4.2
+        let spec = VersionSpec::parse("1.4.2").unwrap();
+        assert_eq!(mgr.resolve("binance", &spec), Some(id_142.clone()));
+    }
+
+    #[test]
+    fn resolve_with_no_matching_plugin_returns_none() {
+        let mut mgr = PluginManager::new();
+        mgr.register(b"binance-1.4.2", make_manifest_v("binance", "1.4.2", "v1"))
+            .unwrap();
+        // ^3.0 has no match — only 1.4.2 loaded.
+        let spec = VersionSpec::parse("^3.0").unwrap();
+        assert_eq!(mgr.resolve("binance", &spec), None);
+
+        // A name that doesn't exist.
+        assert_eq!(mgr.resolve("coingecko", &VersionSpec::Latest), None);
+    }
+
+    #[test]
+    fn resolve_picks_highest_among_multiple_compatible() {
+        // ^1.0 across [1.0.0, 1.4.2, 1.10.0, 1.9.9] → 1.10.0
+        let mut mgr = PluginManager::new();
+        let id_100 = mgr
+            .register(b"v-1.0.0", make_manifest_v("foo", "1.0.0", "v1"))
+            .unwrap();
+        let id_142 = mgr
+            .register(b"v-1.4.2", make_manifest_v("foo", "1.4.2", "v1"))
+            .unwrap();
+        let id_199 = mgr
+            .register(b"v-1.9.9", make_manifest_v("foo", "1.9.9", "v1"))
+            .unwrap();
+        let id_110 = mgr
+            .register(b"v-1.10.0", make_manifest_v("foo", "1.10.0", "v1"))
+            .unwrap();
+        let spec = VersionSpec::parse("^1.0").unwrap();
+        let resolved = mgr.resolve("foo", &spec).expect("match");
+        assert_eq!(
+            resolved, id_110,
+            "^1.0 across multiple versions must pick 1.10.0 (highest); got {resolved:?}, \
+             candidates: 1.0.0={id_100}, 1.4.2={id_142}, 1.9.9={id_199}, 1.10.0={id_110}"
+        );
+    }
+
+    #[test]
+    fn resolve_skips_plugins_with_unparseable_feature_version() {
+        // A plugin whose feature_version doesn't parse (e.g. "garbage")
+        // is simply skipped by the resolver. The user still has the
+        // other parseable versions to choose from.
+        let mut mgr = PluginManager::new();
+        let id_bad = mgr
+            .register(b"bad", make_manifest_v("foo", "garbage", "v1"))
+            .unwrap();
+        let id_good = mgr
+            .register(b"good", make_manifest_v("foo", "1.0.0", "v1"))
+            .unwrap();
+        let spec = VersionSpec::parse("^1.0").unwrap();
+        assert_eq!(mgr.resolve("foo", &spec), Some(id_good.clone()));
+        // The bad one is still loaded — the user might fix its
+        // feature_version and re-register.
+        assert!(mgr.lookup(&id_bad).is_some());
+    }
+
+    #[test]
+    fn resolve_filters_by_name() {
+        // A binance and a coingecko loaded; `binance:^1.0` must NOT
+        // return a coingecko even if its version matches.
+        let mut mgr = PluginManager::new();
+        let id_b = mgr
+            .register(b"binance", make_manifest_v("binance", "1.0.0", "v1"))
+            .unwrap();
+        let id_c = mgr
+            .register(b"coingecko", make_manifest_v("coingecko", "1.0.0", "v1"))
+            .unwrap();
+        let spec = VersionSpec::parse("^1.0").unwrap();
+        assert_eq!(mgr.resolve("binance", &spec), Some(id_b.clone()));
+        assert_eq!(mgr.resolve("coingecko", &spec), Some(id_c.clone()));
+    }
+
+    #[test]
+    fn retain_increments_refcount_release_decrements() {
+        let mut mgr = PluginManager::new();
+        let id = mgr
+            .register(b"p", make_manifest_v("p", "1.0.0", "v1"))
+            .unwrap();
+        assert_eq!(mgr.refcount_of(&id), Some(0));
+        assert!(mgr.retain(&id));
+        assert_eq!(mgr.refcount_of(&id), Some(1));
+        assert!(mgr.retain(&id));
+        assert_eq!(mgr.refcount_of(&id), Some(2));
+        assert!(mgr.release(&id));
+        assert_eq!(mgr.refcount_of(&id), Some(1));
+        assert!(mgr.lookup(&id).is_some(), "still loaded at refcount=1");
+        assert!(mgr.release(&id));
+        assert_eq!(mgr.refcount_of(&id), None, "auto-unloaded at refcount=0");
+        assert!(mgr.lookup(&id).is_none());
+    }
+
+    #[test]
+    fn release_saturates_at_zero_no_underflow() {
+        let mut mgr = PluginManager::new();
+        let id = mgr
+            .register(b"p", make_manifest_v("p", "1.0.0", "v1"))
+            .unwrap();
+        // No retains; just release. Should saturate at 0 and remove
+        // the plugin (not underflow to u32::MAX).
+        assert!(mgr.release(&id));
+        assert!(mgr.lookup(&id).is_none());
+        // Releasing an already-removed plugin returns false.
+        assert!(!mgr.release(&id));
+    }
+
+    #[test]
+    fn retain_returns_false_for_unknown_plugin() {
+        let mut mgr = PluginManager::new();
+        let bogus = bee_plugin_sdk::PluginId("0".repeat(bee_plugin_sdk::PluginId::HEX_LEN));
+        assert!(!mgr.retain(&bogus));
+    }
+
+    #[test]
+    fn two_versions_of_binance_run_independently_in_the_manager() {
+        // S21 acceptance: 2 versions of `binance` (1.4.2 and 2.0.0)
+        // both loaded; 2 Pipelines each referencing one version; both
+        // run independently. At the manager level this means: both
+        // are loaded with distinct PluginIds, retain/release work
+        // independently, and a release of one does not affect the
+        // other.
+        let mut mgr = PluginManager::new();
+        let id_142 = mgr
+            .register(b"binance-1.4.2", make_manifest_v("binance", "1.4.2", "v1"))
+            .unwrap();
+        let id_200 = mgr
+            .register(b"binance-2.0.0", make_manifest_v("binance", "2.0.0", "v1"))
+            .unwrap();
+
+        // Pipeline 1 references 1.4.2; Pipeline 2 references 2.0.0.
+        let spec_142 = VersionSpec::parse("1.4.2").unwrap();
+        let spec_200 = VersionSpec::parse("2.0.0").unwrap();
+        let resolved_1 = mgr.resolve("binance", &spec_142).unwrap();
+        let resolved_2 = mgr.resolve("binance", &spec_200).unwrap();
+        mgr.retain(&resolved_1);
+        mgr.retain(&resolved_2);
+        assert_eq!(mgr.refcount_of(&id_142), Some(1));
+        assert_eq!(mgr.refcount_of(&id_200), Some(1));
+
+        // Pipeline 2 stops — release 2.0.0. 1.4.2 must stay.
+        mgr.release(&resolved_2);
+        assert!(mgr.lookup(&id_200).is_none());
+        assert!(
+            mgr.lookup(&id_142).is_some(),
+            "Pipeline 1's plugin must stay loaded after Pipeline 2 stops"
+        );
     }
 }
