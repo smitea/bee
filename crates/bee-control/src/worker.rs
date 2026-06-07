@@ -12,10 +12,13 @@
 //! the swap is a transport-trait change, not a restructuring.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
-use bee_runtime::{Dag, DynHandler, DynPhase, Msg, Runtime, RuntimeError};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+
+use bee_runtime::metrics::{MetricsSnapshot, PhaseMetrics};
+use bee_runtime::{Dag, DynHandler, DynPhase, Msg, Runtime, RuntimeError};
 
 use crate::builtin_handlers::LogSink;
 
@@ -39,6 +42,9 @@ pub struct DeployedTask {
     pub input_tx: mpsc::Sender<i64>,
     pub output_rx: Option<mpsc::Receiver<i64>>,
     pub runtime_handle: JoinHandle<Result<Result<(), RuntimeError>, tokio::task::JoinError>>,
+    /// S24: per-Task metrics. Shared Arc with the runtime so the
+    /// handler loop can record without taking a lock.
+    pub metrics: Arc<PhaseMetrics>,
 }
 
 pub struct TaskWorker {
@@ -78,7 +84,12 @@ impl TaskWorker {
         let (input_tx, input_rx) = mpsc::channel::<Msg>(16);
         let (output_tx, output_rx) = mpsc::channel::<Msg>(16);
 
-        let handle = tokio::spawn(async move { Runtime::run(dag, input_rx, output_tx).await });
+        // S24: create the metrics Arc and share it with the runtime.
+        let metrics = Arc::new(PhaseMetrics::new());
+        let metrics_for_runtime = metrics.clone();
+        let handle = tokio::spawn(async move {
+            Runtime::run_with_metrics(dag, input_rx, output_tx, Some(metrics_for_runtime)).await
+        });
 
         self.deployed.insert(
             task_id,
@@ -87,9 +98,16 @@ impl TaskWorker {
                 input_tx: mpsc_to_i64(input_tx),
                 output_rx: Some(mpsc_from_i64(output_rx)),
                 runtime_handle: handle,
+                metrics,
             },
         );
         Ok(())
+    }
+
+    /// S24: snapshot the per-Task metrics. Returns `None` if the
+    /// task is not deployed. Used by `bee diagnostics <TaskId>`.
+    pub fn diagnostics(&self, task_id: u32) -> Option<MetricsSnapshot> {
+        self.deployed.get(&task_id).map(|t| t.metrics.snapshot())
     }
 
     pub fn feed(&self, task_id: u32, data: i64) -> Result<(), WorkerError> {

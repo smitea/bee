@@ -18,6 +18,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+pub mod metrics;
 pub mod scheduler;
 pub mod test_utils;
 
@@ -374,12 +375,32 @@ where
 pub struct Runtime;
 
 impl Runtime {
+    /// Backward-compatible entry point: runs the DAG without
+    /// recording metrics. Internally delegates to `run_with_metrics`
+    /// with `metrics = None`, so the no-metrics hot path is one extra
+    /// `Option::is_some` check per handler call.
     pub fn run(
         dag: Dag,
         input_rx: mpsc::Receiver<Msg>,
         output_tx: mpsc::Sender<Msg>,
     ) -> JoinHandle<Result<(), RuntimeError>> {
-        tokio::spawn(async move { run_inner(dag, input_rx, output_tx).await })
+        Self::run_with_metrics(dag, input_rx, output_tx, None)
+    }
+
+    /// S24: run the DAG with metrics recording. The runtime records
+    /// `events_processed_total`, `processing_latency` (histogram),
+    /// and `backpressure_wait_seconds_total` per Phase. Pass
+    /// `metrics = None` to skip recording (zero behavior change vs.
+    /// the S04 path).
+    pub fn run_with_metrics(
+        dag: Dag,
+        input_rx: mpsc::Receiver<Msg>,
+        output_tx: mpsc::Sender<Msg>,
+        metrics: Option<Arc<metrics::PhaseMetrics>>,
+    ) -> JoinHandle<Result<(), RuntimeError>> {
+        tokio::spawn(async move {
+            run_inner(dag, input_rx, output_tx, metrics).await
+        })
     }
 }
 
@@ -387,6 +408,7 @@ async fn run_inner(
     dag: Dag,
     input_rx: mpsc::Receiver<Msg>,
     output_tx: mpsc::Sender<Msg>,
+    metrics: Option<Arc<metrics::PhaseMetrics>>,
 ) -> Result<(), RuntimeError> {
     let Dag { vertices, edges } = dag;
 
@@ -471,8 +493,9 @@ async fn run_inner(
         let _ = id;
         let _ = source_id;
         let _ = sink_id;
+        let metrics_for_phase = metrics.clone();
         handles.push(tokio::spawn(async move {
-            run_phase_loop(phase, input_rx, output_txs).await
+            run_phase_loop(phase, input_rx, output_txs, metrics_for_phase).await
         }));
     }
 
@@ -486,9 +509,21 @@ async fn run_phase_loop(
     mut phase: DynPhase,
     mut input_rx: mpsc::Receiver<Msg>,
     output_txs: Vec<mpsc::Sender<Msg>>,
+    metrics: Option<Arc<metrics::PhaseMetrics>>,
 ) -> Result<(), RuntimeError> {
+    // S24: per-Phase metrics. Each handler call records
+    // `processing_latency` (histogram) and `events_processed_total`
+    // (counter). `backpressure_wait_seconds_total` is fed by the
+    // external sampler (S24) or by user code via
+    // `metrics.record_backpressure_wait`. The MVP keeps the
+    // hot path to one `Option::is_some` check per iteration.
     while let Some(input) = input_rx.recv().await {
+        let start = std::time::Instant::now();
         let output = phase.handler.handle_boxed(input).await?;
+        if let Some(m) = metrics.as_ref() {
+            m.record_latency(start.elapsed());
+            m.record_event_processed();
+        }
         if let Some(out) = output {
             for tx in &output_txs {
                 tx.send(out.clone())

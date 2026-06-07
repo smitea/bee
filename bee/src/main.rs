@@ -11,6 +11,10 @@
 //! - `run <sql_file> [csv_file]` — 跑 SQL pipeline: 读 SQL,注册 CSV 作为
 //!   源 `stream` 表,parse → analyze → physical plan → execute,打印结果。
 //!   `csv_file` 缺省时按 `<sql_file_basename>.csv` 约定查找 (S15)。
+//! - `diagnostics <task_id>` — 打印指定 Task 的 4 项 per-Phase 指标
+//!   (S24)。MVP 占位:bee 独立二进制未持 worker,直接回退到说明信息。
+//!   真实场景下 worker 在 Node 进程内,`diagnostics` 通过 admin RPC
+//!   查询对应 Node (S28 wiring)。
 //!
 //! CLI 解析手动实现以遵守"零运行时外部依赖"约束
 //! (仅 `tokio` + `bytes` + `bincode` 三件套)。
@@ -55,6 +59,13 @@ async fn main() -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("{}: run failed: {}", PKG_NAME, e);
+                ExitCode::from(1)
+            }
+        },
+        Some("diagnostics") => match run_diagnostics(args.get(1).map(String::as_str)) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("{}: diagnostics failed: {}", PKG_NAME, e);
                 ExitCode::from(1)
             }
         },
@@ -119,6 +130,45 @@ fn derive_csv_path(sql_path: &Path) -> Option<PathBuf> {
     Some(parent.join(format!("{stem}.csv")))
 }
 
+/// S24 `bee diagnostics <task_id>` — MVP placeholder.
+///
+/// The `bee` binary doesn't run a worker itself; the worker lives
+/// inside a Node process. Per the S24 acceptance criterion, the
+/// real wiring is via an admin RPC that the Node exposes to query
+/// its deployed Tasks' metrics (S28 wires this through the BRP
+/// data channel). For the MVP, the CLI prints a clear message and
+/// the `MetricsSnapshot` Display format the user can plug into a
+/// future Node-bound binary.
+fn run_diagnostics(task_id: Option<&str>) -> Result<(), String> {
+    let id: u32 = task_id
+        .ok_or_else(|| "diagnostics requires <task_id>".to_string())?
+        .parse()
+        .map_err(|e| format!("invalid task_id: {e}"))?;
+    println!("task {id}:");
+    println!("(diagnostics is available from the Node admin RPC; the");
+    println!(" `bee` CLI does not host a worker. The library API at");
+    println!(" bee_runtime::metrics::PhaseMetrics::snapshot prints the");
+    println!(" four required fields:");
+    println!(" - events_processed_total");
+    println!(" - processing_latency_p50/p99 (histogram with");
+    println!("   buckets 1ms / 10ms / 100ms / 1s / 10s)");
+    println!(" - cpu_seconds_total");
+    println!(" - backpressure_wait_seconds_total");
+    println!();
+    println!("Example Display output:");
+    let example = bee_runtime::metrics::MetricsSnapshot {
+        events_processed_total: 0,
+        latency_count: 0,
+        latency_avg: None,
+        latency_p50: None,
+        latency_p99: None,
+        cpu_seconds_total: std::time::Duration::ZERO,
+        backpressure_wait_seconds_total: std::time::Duration::ZERO,
+    };
+    print!("{example}");
+    Ok(())
+}
+
 fn print_help() {
     println!("{} {} — {}", PKG_NAME, PKG_VERSION, PKG_DESCRIPTION);
     println!();
@@ -136,4 +186,8 @@ fn print_help() {
     println!("                               as the `stream` source, parse → analyze → execute,");
     println!("                               and print the result table. csv_file defaults to");
     println!("                               <sql_file_basename>.csv (S15)");
+    println!("    diagnostics <task_id>      Print the four per-Phase metrics for a Task (S24).");
+    println!("                               MVP placeholder — the bee CLI does not host a");
+    println!("                               worker; in production the Node admin RPC exposes");
+    println!("                               this view (S28 wiring).");
 }
