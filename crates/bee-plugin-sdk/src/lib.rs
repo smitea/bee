@@ -181,9 +181,85 @@ pub enum PluginError {
     Register(String),
     #[error("not found: {0}")]
     NotFound(String),
+    /// S20: plugin's declared `abi_version` is not in the host's
+    /// supported major-version set. The `.so`/`.dylib`/`.dll` is NOT
+    /// deleted — it stays on disk for inspection.
+    #[error(
+        "plugin load rejected: hash={hash} claimed_abi={claimed} \
+         expected_majors={expected:?} (see {migration_link})"
+    )]
+    AbiMismatch {
+        hash: String,
+        claimed: String,
+        expected: Vec<u32>,
+        migration_link: String,
+    },
+    /// S20: `abi_version` string in the plugin's [`PluginManifest`]
+    /// could not be parsed (e.g. "garbage" or "").
+    #[error("invalid abi_version '{0}' (expected form like '1.0' or 'v1')")]
+    InvalidAbiVersion(String),
 }
 
 pub type PluginResult<T> = std::result::Result<T, PluginError>;
+
+/// Link to the ABI migration guide, included in the
+/// `PluginError::AbiMismatch` message. The MVP placeholder is a
+/// stable URL that the user can find via the docs site search; a
+/// real Bee release wires this to a versioned docs page.
+pub const MIGRATION_DOC_LINK: &str =
+    "https://github.com/bee/bee/blob/main/docs/adr/0009-plugin-multiversion-hash-abi.md";
+
+/// Parsed form of a plugin's `abi_version` string. MVP: `(major, minor)`
+/// parsed from `"1.0"`, `"v1"`, `"v1.5"`, etc. The host's expected
+/// range is a list of accepted major versions (e.g. `[1]` for
+/// `"1.x"`, `[1, 2]` for `"1.x"` or `"2.x"`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AbiVersion {
+    pub major: u32,
+    pub minor: u32,
+}
+
+impl std::fmt::Display for AbiVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}", self.major, self.minor)
+    }
+}
+
+impl AbiVersion {
+    /// Parse `"1.0"`, `"v1"`, `"v1.5"`, etc. The leading `v` is
+    /// optional. A missing minor defaults to `0`.
+    pub fn parse(s: &str) -> Result<Self, PluginError> {
+        let s = s.trim();
+        if s.is_empty() {
+            return Err(PluginError::InvalidAbiVersion(s.to_string()));
+        }
+        let s = s.strip_prefix('v').unwrap_or(s);
+        let mut parts = s.split('.');
+        let major_str = parts.next().unwrap_or("");
+        let major: u32 = major_str.parse().map_err(|_| {
+            PluginError::InvalidAbiVersion(s.to_string())
+        })?;
+        let minor: u32 = parts
+            .next()
+            .map(|p| {
+                p.parse()
+                    .map_err(|_| PluginError::InvalidAbiVersion(s.to_string()))
+            })
+            .transpose()?
+            .unwrap_or(0);
+        // Anything after the minor (e.g. "1.0.3") is rejected for
+        // MVP — abi_version is intentionally simple.
+        if parts.next().is_some() {
+            return Err(PluginError::InvalidAbiVersion(s.to_string()));
+        }
+        Ok(Self { major, minor })
+    }
+
+    /// True if this version's major is in the host's accepted list.
+    pub fn matches_major(&self, accepted_majors: &[u32]) -> bool {
+        accepted_majors.contains(&self.major)
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -225,5 +301,33 @@ mod tests {
         // (Smoke test: the size is non-zero, the field offsets are
         // predictable for the C side.)
         assert!(std::mem::size_of::<BeeHostV1>() > 0);
+    }
+
+    // ---- AbiVersion (S20) ----
+
+    #[test]
+    fn abi_version_parses_basic_forms() {
+        assert_eq!(AbiVersion::parse("1.0").unwrap(), AbiVersion { major: 1, minor: 0 });
+        assert_eq!(AbiVersion::parse("1.5").unwrap(), AbiVersion { major: 1, minor: 5 });
+        assert_eq!(AbiVersion::parse("v1").unwrap(), AbiVersion { major: 1, minor: 0 });
+        assert_eq!(AbiVersion::parse("v2.3").unwrap(), AbiVersion { major: 2, minor: 3 });
+        assert_eq!(AbiVersion::parse("10").unwrap(), AbiVersion { major: 10, minor: 0 });
+    }
+
+    #[test]
+    fn abi_version_rejects_garbage() {
+        assert!(matches!(AbiVersion::parse(""), Err(PluginError::InvalidAbiVersion(_))));
+        assert!(matches!(AbiVersion::parse("garbage"), Err(PluginError::InvalidAbiVersion(_))));
+        assert!(matches!(AbiVersion::parse("1.0.3"), Err(PluginError::InvalidAbiVersion(_))));
+    }
+
+    #[test]
+    fn abi_version_matches_major_list() {
+        let v1 = AbiVersion::parse("1.5").unwrap();
+        let v2 = AbiVersion::parse("2.0").unwrap();
+        assert!(v1.matches_major(&[1]));
+        assert!(!v1.matches_major(&[2]));
+        assert!(v2.matches_major(&[1, 2]));
+        assert!(!v2.matches_major(&[]));
     }
 }
