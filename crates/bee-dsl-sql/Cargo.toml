@@ -8,3 +8,9 @@ description = "Bee SQL DSL: DataFusion-based SQL parser / planner / DAG 编译�
 
 [lints]
 workspace = true
+
+[dependencies]
+datafusion = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
