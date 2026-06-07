@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
 
+use crate::control_plane::ControlPlaneStateMachine;
 use crate::kv::{KVStateMachine, Op, TxnError};
 
 use super::transport::InMemoryTransport;
@@ -86,6 +87,7 @@ pub struct Node {
     transport: InMemoryTransport,
     state: Arc<Mutex<NodeState>>,
     kv: Arc<Mutex<KVStateMachine>>,
+    cp: Arc<Mutex<ControlPlaneStateMachine>>,
     config: NodeConfig,
 }
 
@@ -95,6 +97,7 @@ impl Node {
         peer_ids: Vec<NodeId>,
         transport: InMemoryTransport,
         kv: Arc<Mutex<KVStateMachine>>,
+        cp: Arc<Mutex<ControlPlaneStateMachine>>,
         config: NodeConfig,
     ) -> Self {
         Self {
@@ -103,6 +106,7 @@ impl Node {
             transport,
             state: Arc::new(Mutex::new(NodeState::new())),
             kv,
+            cp,
             config,
         }
     }
@@ -113,6 +117,10 @@ impl Node {
 
     pub fn kv(&self) -> Arc<Mutex<KVStateMachine>> {
         self.kv.clone()
+    }
+
+    pub fn cp(&self) -> Arc<Mutex<ControlPlaneStateMachine>> {
+        self.cp.clone()
     }
 
     pub fn self_id(&self) -> NodeId {
@@ -236,8 +244,16 @@ impl Node {
             state.applied_index = up_to;
         }
         let mut kv = self.kv.lock().await;
+        let mut cp = self.cp.lock().await;
         for entry in to_apply {
-            let _ = kv.apply_op(&entry.op);
+            match &entry.op {
+                Op::Put { .. } | Op::Del { .. } | Op::Cas { .. } | Op::Txn { .. } => {
+                    let _ = kv.apply_op(&entry.op);
+                }
+                Op::RegisterJob { .. } | Op::RegisterTask { .. } | Op::UpdateTaskStatus { .. } => {
+                    let _ = cp.apply_op(&entry.op);
+                }
+            }
         }
     }
 

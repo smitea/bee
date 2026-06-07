@@ -33,6 +33,7 @@ pub enum TxnError {
         actual: Option<Vec<u8>>,
     },
     NestedTxn,
+    WrongSm,
 }
 
 impl std::fmt::Display for TxnError {
@@ -40,6 +41,7 @@ impl std::fmt::Display for TxnError {
         match self {
             TxnError::Conflict { key, .. } => write!(f, "conflict at key {key}"),
             TxnError::NestedTxn => write!(f, "nested transactions are not supported"),
+            TxnError::WrongSm => write!(f, "op belongs on a different state machine"),
         }
     }
 }
@@ -52,6 +54,27 @@ pub enum Op {
     Del { key: String },
     Cas { key: String, expected: Option<Vec<u8>>, new: Vec<u8> },
     Txn { ops: Vec<Op> },
+    RegisterJob { job_id: u32, dag_hash: String, owner_node: u32 },
+    RegisterTask {
+        task_id: u32,
+        job_id: u32,
+        phase_id: u32,
+        owner_node: u32,
+        status: TaskStatus,
+    },
+    UpdateTaskStatus { task_id: u32, new_status: TaskStatus },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskStatus {
+    Pending,
+    Scheduled,
+    Running,
+    Orphaned,
+    Migrating,
+    Revoked,
+    Completed,
+    Failed,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -109,6 +132,8 @@ impl KVStateMachine {
     }
 
     /// Apply a single op. Convenience for the Raft apply loop.
+    /// Returns `Err(TxnError::WrongSm)` for non-KV ops (which belong on
+    /// the ControlPlane SM).
     pub fn apply_op(&mut self, op: &Op) -> Result<(), TxnError> {
         match op {
             Op::Put { key, value } => {
@@ -123,15 +148,23 @@ impl KVStateMachine {
                 self.cas_checked(key, expected.as_deref(), new.clone())
             }
             Op::Txn { ops } => self.txn(ops.clone()),
+            Op::RegisterJob { .. }
+            | Op::RegisterTask { .. }
+            | Op::UpdateTaskStatus { .. } => Err(TxnError::WrongSm),
         }
     }
 
     /// Apply a list of ops atomically. Either all ops are applied, or the
-    /// state is unchanged. Nested transactions return NestedTxn.
+    /// state is unchanged. Nested transactions return NestedTxn. Txn can
+    /// only contain KV ops; mixed-KV/ControlPlane txns are rejected.
     pub fn txn(&mut self, ops: Vec<Op>) -> Result<(), TxnError> {
         for op in &ops {
-            if let Op::Txn { .. } = op {
-                return Err(TxnError::NestedTxn);
+            match op {
+                Op::Txn { .. } => return Err(TxnError::NestedTxn),
+                Op::RegisterJob { .. }
+                | Op::RegisterTask { .. }
+                | Op::UpdateTaskStatus { .. } => return Err(TxnError::WrongSm),
+                _ => {}
             }
         }
 
@@ -163,6 +196,9 @@ impl KVStateMachine {
                     self.put(key, new);
                 }
                 Op::Txn { .. } => unreachable!("nested txn checked above"),
+                Op::RegisterJob { .. }
+                | Op::RegisterTask { .. }
+                | Op::UpdateTaskStatus { .. } => unreachable!("non-KV op checked above"),
             }
         }
         Ok(())

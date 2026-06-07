@@ -5,6 +5,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::task::JoinHandle;
 
+use crate::control_plane::ControlPlaneStateMachine;
 use crate::kv::{KVStateMachine, Op, TxnError};
 
 use super::node::{Node, NodeConfig, NodeState};
@@ -32,6 +33,7 @@ pub struct ClusterNodeHandle {
     pub id: NodeId,
     pub state: Arc<Mutex<NodeState>>,
     pub kv: Arc<Mutex<KVStateMachine>>,
+    pub cp: Arc<Mutex<ControlPlaneStateMachine>>,
 }
 
 struct ClusterNodeSlot {
@@ -81,17 +83,18 @@ impl Cluster {
             let (_, cmd_rx) = cmd_inboxes.remove(0);
             let transport = InMemoryTransport::new(id, router.clone(), rpc_rx, cmd_rx);
             let kv = Arc::new(Mutex::new(KVStateMachine::new()));
+            let cp = Arc::new(Mutex::new(ControlPlaneStateMachine::new()));
             let node_config = NodeConfig {
                 base_election_timeout: config.base_election_timeout,
                 heartbeat_interval: config.heartbeat_interval,
                 node_offset_ms: (i as u64) * 100,
             };
-            let node = Node::new(id, peer_ids, transport, kv.clone(), node_config);
+            let node = Node::new(id, peer_ids, transport, kv.clone(), cp.clone(), node_config);
             let state = node.state();
             let (_, ctx) = cmd_txs.remove(0);
             let task = tokio::spawn(node.run());
             slots.push(ClusterNodeSlot {
-                handle: ClusterNodeHandle { id, state, kv },
+                handle: ClusterNodeHandle { id, state, kv, cp },
                 cmd_tx: ctx,
                 task: Some(task),
                 alive: true,
@@ -171,6 +174,35 @@ impl Cluster {
                 }
                 let kv = slot.handle.kv.lock().await;
                 if kv.get(key).as_deref() != Some(expected) {
+                    all_match = false;
+                    break;
+                }
+            }
+            if all_match {
+                return true;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    pub async fn wait_for_cp_converge(
+        &self,
+        expected_jobs: usize,
+        expected_tasks: usize,
+        timeout: Duration,
+    ) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let mut all_match = true;
+            for slot in &self.slots {
+                if !slot.alive {
+                    continue;
+                }
+                let cp = slot.handle.cp.lock().await;
+                if cp.job_count() != expected_jobs || cp.task_count() != expected_tasks {
                     all_match = false;
                     break;
                 }
