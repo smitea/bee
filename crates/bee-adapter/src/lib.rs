@@ -168,6 +168,63 @@ pub async fn collect_binance(
     Ok(events)
 }
 
+// ---- DatasourceSignature (S17) ----
+//
+// Per ADR-0003: the signature is the identity of a Datasource in the
+// data plane. Two `binance.subscribe('BTC/USDT', '5m')` calls produce
+// the same signature; one with `'1m'` or a different adapter produces
+// a different signature. The KV key is `state/producer/{sig} -> JobId`.
+
+/// Identity of a Datasource in the data plane: a sha256 hex string of
+/// `sha256(adapter_id || "|" || canonical_config)`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DatasourceSignature(pub String);
+
+impl std::fmt::Display for DatasourceSignature {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Compute a [`DatasourceSignature`] from an `adapter_id` and a
+/// canonicalized config string. The caller is responsible for producing
+/// a canonical config — for the binance built-in that's
+/// `canonical_binance_subscribe_args`; for user-defined Adapters it's
+/// whatever JSON (or other) serialization the Adapter author picks.
+pub fn compute_datasource_signature(
+    adapter_id: &str,
+    canonical_config: &str,
+) -> DatasourceSignature {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(adapter_id.as_bytes());
+    hasher.update(b"|");
+    hasher.update(canonical_config.as_bytes());
+    let digest = hasher.finalize();
+    DatasourceSignature(hex::encode(digest))
+}
+
+/// Extract the canonical args portion of a `binance.subscribe(...)`
+/// SQL call (e.g. `'BTC/USDT','5m'`). Returns `None` if the SQL does
+/// not match the binance call form. The output is the *raw* substring
+/// between `(` and `)` (with surrounding whitespace trimmed); S17
+/// does not require a stricter canonicalization — the same SQL
+/// produces the same signature.
+pub fn canonical_binance_subscribe_args(sql: &str) -> Option<String> {
+    let needle = "binance.subscribe(";
+    let start = sql.find(needle)? + needle.len();
+    let rest = sql.get(start..)?;
+    let end = rest.find(')')?;
+    Some(rest[..end].trim().to_string())
+}
+
+/// Convenience: compute the signature for a `binance.subscribe(...)`
+/// SQL string in one call.
+pub fn compute_binance_signature(sql: &str) -> Option<DatasourceSignature> {
+    let args = canonical_binance_subscribe_args(sql)?;
+    Some(compute_datasource_signature("binance", &args))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -209,5 +266,30 @@ mod tests {
         };
         let adapter = FakeBinanceAdapter::open(cfg).await.unwrap();
         adapter.close().await.unwrap();
+    }
+
+    // ---- DatasourceSignature (S17) ----
+
+    #[test]
+    fn datasource_signature_is_deterministic() {
+        let a = compute_datasource_signature("binance", "'BTC/USDT','5m'");
+        let b = compute_datasource_signature("binance", "'BTC/USDT','5m'");
+        assert_eq!(a, b);
+        assert_eq!(a.0.len(), 64); // sha256 hex
+    }
+
+    #[test]
+    fn datasource_signature_differs_per_input() {
+        let a = compute_datasource_signature("binance", "'BTC/USDT','5m'");
+        let b = compute_datasource_signature("binance", "'BTC/USDT','1m'");
+        let c = compute_datasource_signature("coingecko", "'BTC/USDT','5m'");
+        assert_ne!(a, b, "config change should change the signature");
+        assert_ne!(a, c, "adapter change should change the signature");
+    }
+
+    #[test]
+    fn canonical_binance_args_extracted_from_sql() {
+        let s = canonical_binance_subscribe_args("SELECT * FROM binance.subscribe('BTC/USDT','5m')");
+        assert_eq!(s, Some("'BTC/USDT','5m'".to_string()));
     }
 }

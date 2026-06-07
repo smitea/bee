@@ -40,6 +40,10 @@ pub struct ControlPlaneStateMachine {
     /// the `Op::Heartbeat` apply path; the S11 orchestrator uses this
     /// to detect missing nodes and mark their tasks as `Orphaned`.
     last_heartbeat: HashMap<u32, u64>,
+    /// S17 Producer/Subscriber registry: `DatasourceSignature -> JobId`.
+    /// The first writer wins — subsequent deploys of the same signature
+    /// become Subscribers pointing at the existing Producer.
+    datasource_producers: HashMap<String, u32>,
 }
 
 impl ControlPlaneStateMachine {
@@ -125,6 +129,17 @@ impl ControlPlaneStateMachine {
                 task.owner_node = *thief_node;
                 Ok(())
             }
+            Op::RegisterDatasourceProducer { signature, job_id } => {
+                // Idempotent: first writer wins. Subsequent deploys
+                // with the same signature become Subscribers pointing
+                // at the existing producer (ADR-0003).
+                if let std::collections::hash_map::Entry::Vacant(e) =
+                    self.datasource_producers.entry(signature.clone())
+                {
+                    e.insert(*job_id);
+                }
+                Ok(())
+            }
             Op::Put { .. }
             | Op::Del { .. }
             | Op::Cas { .. }
@@ -136,6 +151,21 @@ impl ControlPlaneStateMachine {
         let mut v: Vec<JobRecord> = self.jobs.values().cloned().collect();
         v.sort_by_key(|j| j.job_id);
         v
+    }
+
+    /// S17: look up the JobId of the Producer for a given
+    /// `DatasourceSignature`. Returns `None` if no Producer has been
+    /// registered yet — the deployer treats that case as "this deploy
+    /// is the Producer".
+    pub fn lookup_datasource_producer(&self, signature: &str) -> Option<u32> {
+        self.datasource_producers.get(signature).copied()
+    }
+
+    /// S17: number of registered Producers. Used by tests and the
+    /// (future) `bee jobs list` admin surface to show the
+    /// Producer/Subscriber breakdown.
+    pub fn datasource_producer_count(&self) -> usize {
+        self.datasource_producers.len()
     }
 
     pub fn list_tasks(&self) -> Vec<TaskRecord> {

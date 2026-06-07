@@ -69,6 +69,12 @@ pub enum Op {
     /// `Orphaned`, transition to `Migrating` and set `owner_node` to the
     /// thief. Otherwise, the op is a no-op (someone else won).
     StealTask { thief_node: u32, task_id: u32 },
+    /// S17 Producer/Subscriber detection: register `(signature -> job_id)`
+    /// in the ControlPlane SM. Idempotent — if a Producer already exists
+    /// for `signature`, the existing entry is preserved (first writer
+    /// wins). Subsequent deploys of the same Datasource become
+    /// Subscribers pointing at the existing Producer.
+    RegisterDatasourceProducer { signature: String, job_id: u32 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -158,7 +164,8 @@ impl KVStateMachine {
             | Op::RegisterTask { .. }
             | Op::UpdateTaskStatus { .. }
             | Op::Heartbeat { .. }
-            | Op::StealTask { .. } => Err(TxnError::WrongSm),
+            | Op::StealTask { .. }
+            | Op::RegisterDatasourceProducer { .. } => Err(TxnError::WrongSm),
         }
     }
 
@@ -173,7 +180,8 @@ impl KVStateMachine {
                 | Op::RegisterTask { .. }
                 | Op::UpdateTaskStatus { .. }
                 | Op::Heartbeat { .. }
-                | Op::StealTask { .. } => return Err(TxnError::WrongSm),
+                | Op::StealTask { .. }
+                | Op::RegisterDatasourceProducer { .. } => return Err(TxnError::WrongSm),
                 _ => {}
             }
         }
@@ -210,7 +218,8 @@ impl KVStateMachine {
                 | Op::RegisterTask { .. }
                 | Op::UpdateTaskStatus { .. }
                 | Op::Heartbeat { .. }
-                | Op::StealTask { .. } => unreachable!("non-KV op checked above"),
+                | Op::StealTask { .. }
+                | Op::RegisterDatasourceProducer { .. } => unreachable!("non-KV op checked above"),
             }
         }
         Ok(())
