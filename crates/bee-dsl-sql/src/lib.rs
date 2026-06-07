@@ -10,6 +10,7 @@
 mod compile;
 mod handlers;
 mod physical;
+pub mod preprocess;
 
 use datafusion::error::Result as DfResult;
 use datafusion::prelude::SessionContext;
@@ -21,6 +22,9 @@ pub use handlers::{
 pub use physical::{
     compile_to_physical_plan, execute_plan, format_batches, run_pipeline,
     run_pipeline_with_config, DataFusionPhase, RunConfig, RunMode,
+};
+pub use preprocess::{
+    check_strict_mode, parse_use_directives, preprocess, UseDirective,
 };
 
 /// 解析一条 SQL 语句,返回 DataFusion 的 Statement AST 列表。

@@ -12,6 +12,7 @@ pub mod cluster_status;
 pub mod control_plane;
 pub mod deployer;
 pub mod diagnostics_view;
+pub mod datasource;
 pub mod heartbeat;
 pub mod jobs_view;
 pub mod kv;

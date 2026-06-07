@@ -9,6 +9,8 @@ description = "Bee 控制面: Raft 客户端 + 调度器 + Work-Stealing 仲裁 
 [dependencies]
 tokio = { workspace = true }
 bee-runtime = { workspace = true }
+bee-plugin-sdk = { workspace = true }
+thiserror = "2"
 
 [lints]
 workspace = true
