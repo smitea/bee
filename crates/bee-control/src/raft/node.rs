@@ -250,7 +250,10 @@ impl Node {
                 Op::Put { .. } | Op::Del { .. } | Op::Cas { .. } | Op::Txn { .. } => {
                     let _ = kv.apply_op(&entry.op);
                 }
-                Op::RegisterJob { .. } | Op::RegisterTask { .. } | Op::UpdateTaskStatus { .. } => {
+                Op::RegisterJob { .. }
+                | Op::RegisterTask { .. }
+                | Op::UpdateTaskStatus { .. }
+                | Op::Heartbeat { .. } => {
                     let _ = cp.apply_op(&entry.op);
                 }
             }

@@ -63,6 +63,11 @@ pub enum Op {
         status: TaskStatus,
     },
     UpdateTaskStatus { task_id: u32, new_status: TaskStatus },
+    /// S11 heartbeat: a Node advertises liveness to the Raft Leader. Replicated
+    /// through the ControlPlane SM so the Leader's `last_heartbeat` is part of
+    /// the Raft-replicated state. Per ADR-0007 the heartbeat path is
+    /// logically separate from the BRP data channel.
+    Heartbeat { node_id: u32, timestamp_ms: u64 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,7 +155,8 @@ impl KVStateMachine {
             Op::Txn { ops } => self.txn(ops.clone()),
             Op::RegisterJob { .. }
             | Op::RegisterTask { .. }
-            | Op::UpdateTaskStatus { .. } => Err(TxnError::WrongSm),
+            | Op::UpdateTaskStatus { .. }
+            | Op::Heartbeat { .. } => Err(TxnError::WrongSm),
         }
     }
 
@@ -163,7 +169,8 @@ impl KVStateMachine {
                 Op::Txn { .. } => return Err(TxnError::NestedTxn),
                 Op::RegisterJob { .. }
                 | Op::RegisterTask { .. }
-                | Op::UpdateTaskStatus { .. } => return Err(TxnError::WrongSm),
+                | Op::UpdateTaskStatus { .. }
+                | Op::Heartbeat { .. } => return Err(TxnError::WrongSm),
                 _ => {}
             }
         }
@@ -198,7 +205,8 @@ impl KVStateMachine {
                 Op::Txn { .. } => unreachable!("nested txn checked above"),
                 Op::RegisterJob { .. }
                 | Op::RegisterTask { .. }
-                | Op::UpdateTaskStatus { .. } => unreachable!("non-KV op checked above"),
+                | Op::UpdateTaskStatus { .. }
+                | Op::Heartbeat { .. } => unreachable!("non-KV op checked above"),
             }
         }
         Ok(())

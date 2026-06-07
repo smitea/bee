@@ -36,6 +36,10 @@ pub struct TaskRecord {
 pub struct ControlPlaneStateMachine {
     jobs: HashMap<u32, JobRecord>,
     tasks: HashMap<u32, TaskRecord>,
+    /// Per-node last heartbeat timestamp (ms since unix epoch). Updated by
+    /// the `Op::Heartbeat` apply path; the S11 orchestrator uses this
+    /// to detect missing nodes and mark their tasks as `Orphaned`.
+    last_heartbeat: HashMap<u32, u64>,
 }
 
 impl ControlPlaneStateMachine {
@@ -87,6 +91,13 @@ impl ControlPlaneStateMachine {
                     })
                 }
             }
+            Op::Heartbeat {
+                node_id,
+                timestamp_ms,
+            } => {
+                self.last_heartbeat.insert(*node_id, *timestamp_ms);
+                Ok(())
+            }
             Op::Put { .. }
             | Op::Del { .. }
             | Op::Cas { .. }
@@ -120,5 +131,34 @@ impl ControlPlaneStateMachine {
 
     pub fn task_count(&self) -> usize {
         self.tasks.len()
+    }
+
+    /// `node_id` is stale if its last heartbeat was more than
+    /// `threshold_ms` ago (or if it has never reported in).
+    pub fn stale_nodes(&self, now_ms: u64, threshold_ms: u64) -> Vec<u32> {
+        self.last_heartbeat
+            .iter()
+            .filter_map(|(&node_id, &last_ms)| {
+                if now_ms.saturating_sub(last_ms) > threshold_ms {
+                    Some(node_id)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    pub fn last_heartbeat(&self, node_id: u32) -> Option<u64> {
+        self.last_heartbeat.get(&node_id).copied()
+    }
+
+    /// Tasks owned by `node_id` (used by orphan detection to find what
+    /// to mark as `Orphaned`).
+    pub fn tasks_owned_by(&self, node_id: u32) -> Vec<TaskRecord> {
+        self.tasks
+            .values()
+            .filter(|t| t.owner_node == node_id)
+            .cloned()
+            .collect()
     }
 }

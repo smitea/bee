@@ -1,9 +1,9 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::{mpsc, oneshot, Mutex};
-use tokio::task::JoinHandle;
+use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 
 use crate::control_plane::ControlPlaneStateMachine;
 use crate::kv::{KVStateMachine, Op, TxnError};
@@ -29,6 +29,7 @@ impl Default for ClusterConfig {
     }
 }
 
+#[derive(Clone)]
 pub struct ClusterNodeHandle {
     pub id: NodeId,
     pub state: Arc<Mutex<NodeState>>,
@@ -36,13 +37,15 @@ pub struct ClusterNodeHandle {
     pub cp: Arc<Mutex<ControlPlaneStateMachine>>,
 }
 
+#[derive(Clone)]
 struct ClusterNodeSlot {
     handle: ClusterNodeHandle,
     cmd_tx: mpsc::Sender<NodeCommand>,
-    task: Option<JoinHandle<()>>,
-    alive: bool,
+    task_done: Arc<Notify>,
+    alive: Arc<AtomicBool>,
 }
 
+#[derive(Clone)]
 pub struct Cluster {
     slots: Vec<ClusterNodeSlot>,
 }
@@ -92,12 +95,17 @@ impl Cluster {
             let node = Node::new(id, peer_ids, transport, kv.clone(), cp.clone(), node_config);
             let state = node.state();
             let (_, ctx) = cmd_txs.remove(0);
-            let task = tokio::spawn(node.run());
+            let task_done = Arc::new(Notify::new());
+            let task_done_inner = task_done.clone();
+            tokio::spawn(async move {
+                let _ = node.run().await;
+                task_done_inner.notify_one();
+            });
             slots.push(ClusterNodeSlot {
                 handle: ClusterNodeHandle { id, state, kv, cp },
                 cmd_tx: ctx,
-                task: Some(task),
-                alive: true,
+                task_done,
+                alive: Arc::new(AtomicBool::new(true)),
             });
         }
 
@@ -111,16 +119,22 @@ impl Cluster {
             .map(|s| &s.handle)
     }
 
-    /// Iterator over all (id, handle) pairs (alive and dead). Used by
-    /// out-of-cluster consumers (e.g., S09 Deployer reading the ControlPlane
-    /// for `jobs inspect`).
     pub fn nodes(&self) -> impl Iterator<Item = (NodeId, &ClusterNodeHandle)> {
         self.slots.iter().map(|s| (s.handle.id, &s.handle))
     }
 
+    /// Whether the node's run-loop is still alive. False after `shutdown_node`.
+    pub fn is_alive(&self, id: NodeId) -> bool {
+        self.slots
+            .iter()
+            .find(|s| s.handle.id == id)
+            .map(|s| s.alive.load(Ordering::SeqCst))
+            .unwrap_or(false)
+    }
+
     pub async fn leader(&self) -> Option<NodeId> {
         for slot in &self.slots {
-            if !slot.alive {
+            if !slot.alive.load(Ordering::SeqCst) {
                 continue;
             }
             let state = slot.handle.state.lock().await;
@@ -134,7 +148,7 @@ impl Cluster {
     pub async fn metrics(&self) -> Vec<NodeMetrics> {
         let mut out = Vec::new();
         for slot in &self.slots {
-            if !slot.alive {
+            if !slot.alive.load(Ordering::SeqCst) {
                 continue;
             }
             let state = slot.handle.state.lock().await;
@@ -150,10 +164,7 @@ impl Cluster {
         out
     }
 
-    pub async fn wait_for_leader(
-        &self,
-        timeout: Duration,
-    ) -> Option<NodeId> {
+    pub async fn wait_for_leader(&self, timeout: Duration) -> Option<NodeId> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             if let Some(l) = self.leader().await {
@@ -176,7 +187,7 @@ impl Cluster {
         loop {
             let mut all_match = true;
             for slot in &self.slots {
-                if !slot.alive {
+                if !slot.alive.load(Ordering::SeqCst) {
                     continue;
                 }
                 let kv = slot.handle.kv.lock().await;
@@ -205,7 +216,7 @@ impl Cluster {
         loop {
             let mut all_match = true;
             for slot in &self.slots {
-                if !slot.alive {
+                if !slot.alive.load(Ordering::SeqCst) {
                     continue;
                 }
                 let cp = slot.handle.cp.lock().await;
@@ -224,11 +235,7 @@ impl Cluster {
         }
     }
 
-    pub async fn submit(
-        &self,
-        target: NodeId,
-        op: Op,
-    ) -> Result<(), TxnError> {
+    pub async fn submit(&self, target: NodeId, op: Op) -> Result<(), TxnError> {
         let slot = self.slots.iter().find(|s| s.handle.id == target).ok_or_else(|| {
             TxnError::Conflict {
                 key: format!("unknown_node_{target}"),
@@ -236,7 +243,7 @@ impl Cluster {
                 actual: None,
             }
         })?;
-        if !slot.alive {
+        if !slot.alive.load(Ordering::SeqCst) {
             return Err(TxnError::Conflict {
                 key: format!("node_{target}_not_running"),
                 expected: None,
@@ -259,13 +266,19 @@ impl Cluster {
         })?
     }
 
-    pub async fn shutdown_node(&mut self, id: NodeId) {
-        if let Some(slot) = self.slots.iter_mut().find(|s| s.handle.id == id) {
-            slot.alive = false;
-            let _ = slot.cmd_tx.send(NodeCommand::Shutdown).await;
-            if let Some(task) = slot.task.take() {
-                let _ = task.await;
-            }
-        }
+    pub async fn shutdown_node(&self, id: NodeId) {
+        let (alive, cmd_tx, task_done) = {
+            let Some(slot) = self.slots.iter().find(|s| s.handle.id == id) else {
+                return;
+            };
+            (
+                slot.alive.clone(),
+                slot.cmd_tx.clone(),
+                slot.task_done.clone(),
+            )
+        };
+        alive.store(false, Ordering::SeqCst);
+        let _ = cmd_tx.send(NodeCommand::Shutdown).await;
+        task_done.notified().await;
     }
 }
