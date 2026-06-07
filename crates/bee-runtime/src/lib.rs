@@ -5,22 +5,33 @@
 //!
 //! ## 阶段路线
 //! - S03: 1-Phase DAG + [`Handler`] trait + [`PassthroughHandler`] 夹具
-//! - S04 (当前): [`Runtime`] 拉起 2-Phase DAG,Phase 间用 `tokio::sync::mpsc` 直连;
-//!   [`MapHandler`] / [`FilterHandler`] 内置处理器
-//! - S05: 多 Phase DAG + 拓扑序 + 分叉
+//! - S04: [`Runtime`] 拉起 2-Phase DAG,Phase 间用 `tokio::sync::mpsc` 直连
+//! - S05 (当前): 多 Phase DAG + 拓扑序 + 分叉 (fan-out / fan-in) + cycle detection
 //! - S10: 接入端到端 Pipeline 执行
 
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 pub type PhaseId = u32;
 
-pub type Msg = Box<dyn Any + Send>;
+#[derive(Clone)]
+pub struct Msg(Arc<Box<dyn Any + Send + Sync>>);
+
+impl Msg {
+    pub fn new<T: Any + Send + Sync>(v: T) -> Self {
+        Self(Arc::new(Box::new(v)))
+    }
+
+    pub fn downcast_ref<T: Any>(&self) -> Option<&T> {
+        (**self.0).downcast_ref::<T>()
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AdapterRef(pub u32);
@@ -54,14 +65,14 @@ impl std::error::Error for RuntimeError {}
 
 pub trait Handler: Send + 'static {
     type Input: Send + 'static;
-    type Output: Send + 'static;
+    type Output: Send + Sync + 'static;
 
     fn handle(
         &mut self,
         input: Self::Input,
-    ) -> impl std::future::Future<Output = Result<Option<Self::Output>, RuntimeError>> + Send;
+    ) -> impl Future<Output = Result<Option<Self::Output>, RuntimeError>> + Send;
 
-    fn finish(self) -> impl std::future::Future<Output = Result<(), RuntimeError>> + Send
+    fn finish(self) -> impl Future<Output = Result<(), RuntimeError>> + Send
     where
         Self: Sized;
 }
@@ -113,7 +124,11 @@ pub trait DynHandler: Send + 'static {
     ) -> Pin<Box<dyn Future<Output = Result<(), RuntimeError>> + Send + 'a>>;
 }
 
-impl<H: Handler> DynHandler for H {
+impl<H> DynHandler for H
+where
+    H: Handler,
+    H::Input: Copy + 'static,
+{
     fn handle_boxed<'a>(
         &'a mut self,
         input: Msg,
@@ -121,18 +136,19 @@ impl<H: Handler> DynHandler for H {
         Box<dyn Future<Output = Result<Option<Msg>, RuntimeError>> + Send + 'a>,
     > {
         Box::pin(async move {
-            let input_typed: H::Input = *input
-                .downcast::<H::Input>()
-                .map_err(|_| RuntimeError::TypeMismatch { phase: 0 })?;
-            let output_opt = Handler::handle(self, input_typed).await?;
-            Ok(output_opt.map(|o| Box::new(o) as Msg))
+            let arc: Arc<Box<dyn Any + Send + Sync>> = input.0;
+            let typed: H::Input = *(**arc)
+                .downcast_ref::<H::Input>()
+                .ok_or(RuntimeError::TypeMismatch { phase: 0 })?;
+            let output_opt = Handler::handle(self, typed).await?;
+            Ok(output_opt.map(|o| Msg::new(o)))
         })
     }
 
     fn finish_boxed<'a>(
         self: Box<Self>,
     ) -> Pin<Box<dyn Future<Output = Result<(), RuntimeError>> + Send + 'a>> {
-        Box::pin(async move { (*self).finish().await })
+        Box::pin(async move { Handler::finish(*self).await })
     }
 }
 
@@ -144,7 +160,11 @@ pub struct DynPhase {
 }
 
 impl DynPhase {
-    pub fn new<H: Handler>(id: PhaseId, name: impl Into<String>, handler: H) -> Self {
+    pub fn new<H: Handler>(id: PhaseId, name: impl Into<String>, handler: H) -> Self
+    where
+        H: 'static,
+        H::Input: Copy + 'static,
+    {
         Self {
             id,
             name: name.into(),
@@ -177,9 +197,24 @@ impl Dag {
         self
     }
 
-    pub fn add_edge(&mut self, from: PhaseId, to: PhaseId) -> &mut Self {
+    pub fn add_edge(&mut self, from: PhaseId, to: PhaseId) -> Result<&mut Self, RuntimeError> {
+        if from == to {
+            return Err(RuntimeError::Topology(format!(
+                "self-loop on phase {from} is a cycle"
+            )));
+        }
+        if !self.vertex_ids().contains(&from) || !self.vertex_ids().contains(&to) {
+            return Err(RuntimeError::Topology(format!(
+                "edge {from} -> {to} references unknown phase"
+            )));
+        }
+        if self.is_reachable(to, from) {
+            return Err(RuntimeError::Topology(format!(
+                "edge {from} -> {to} would create a cycle"
+            )));
+        }
         self.edges.push((from, to));
-        self
+        Ok(self)
     }
 
     pub fn vertices(&self) -> &[DynPhase] {
@@ -188,6 +223,36 @@ impl Dag {
 
     pub fn edges(&self) -> &[(PhaseId, PhaseId)] {
         &self.edges
+    }
+
+    pub fn vertex_ids(&self) -> HashSet<PhaseId> {
+        self.vertices.iter().map(|p| p.id).collect()
+    }
+
+    fn is_reachable(&self, start: PhaseId, target: PhaseId) -> bool {
+        let adj: BTreeMap<PhaseId, Vec<PhaseId>> =
+            self.edges
+                .iter()
+                .fold(BTreeMap::new(), |mut m, &(f, t)| {
+                    m.entry(f).or_default().push(t);
+                    m
+                });
+        let mut visited = HashSet::new();
+        let mut stack = vec![start];
+        while let Some(node) = stack.pop() {
+            if node == target {
+                return true;
+            }
+            if !visited.insert(node) {
+                continue;
+            }
+            if let Some(neighbors) = adj.get(&node) {
+                for &n in neighbors {
+                    stack.push(n);
+                }
+            }
+        }
+        false
     }
 }
 
@@ -206,11 +271,11 @@ impl Handler for PassthroughHandler {
     fn handle(
         &mut self,
         input: Vec<u8>,
-    ) -> impl std::future::Future<Output = Result<Option<Vec<u8>>, RuntimeError>> + Send {
+    ) -> impl Future<Output = Result<Option<Vec<u8>>, RuntimeError>> + Send {
         async move { Ok(Some(input)) }
     }
 
-    fn finish(self) -> impl std::future::Future<Output = Result<(), RuntimeError>> + Send {
+    fn finish(self) -> impl Future<Output = Result<(), RuntimeError>> + Send {
         async move { Ok(()) }
     }
 }
@@ -232,7 +297,7 @@ impl<F, T> MapHandler<F, T> {
 impl<F, T> Handler for MapHandler<F, T>
 where
     F: Fn(T) -> T + Send + Sync + 'static,
-    T: Send + 'static,
+    T: Send + Sync + 'static,
 {
     type Input = T;
     type Output = T;
@@ -240,12 +305,12 @@ where
     fn handle(
         &mut self,
         input: T,
-    ) -> impl std::future::Future<Output = Result<Option<T>, RuntimeError>> + Send {
+    ) -> impl Future<Output = Result<Option<T>, RuntimeError>> + Send {
         let f = &self.f;
         async move { Ok(Some(f(input))) }
     }
 
-    fn finish(self) -> impl std::future::Future<Output = Result<(), RuntimeError>> + Send {
+    fn finish(self) -> impl Future<Output = Result<(), RuntimeError>> + Send {
         async move { Ok(()) }
     }
 }
@@ -267,7 +332,7 @@ impl<F, T> FilterHandler<F, T> {
 impl<F, T> Handler for FilterHandler<F, T>
 where
     F: Fn(&T) -> bool + Send + Sync + 'static,
-    T: Send + 'static,
+    T: Send + Sync + 'static,
 {
     type Input = T;
     type Output = T;
@@ -275,7 +340,7 @@ where
     fn handle(
         &mut self,
         input: T,
-    ) -> impl std::future::Future<Output = Result<Option<T>, RuntimeError>> + Send {
+    ) -> impl Future<Output = Result<Option<T>, RuntimeError>> + Send {
         let f = &self.f;
         async move {
             if f(&input) {
@@ -286,7 +351,7 @@ where
         }
     }
 
-    fn finish(self) -> impl std::future::Future<Output = Result<(), RuntimeError>> + Send {
+    fn finish(self) -> impl Future<Output = Result<(), RuntimeError>> + Send {
         async move { Ok(()) }
     }
 }
@@ -311,7 +376,7 @@ async fn run_inner(
     let Dag { vertices, edges } = dag;
 
     if vertices.is_empty() {
-        return Err(RuntimeError::Topology("dag has no vertices".to_string()));
+        return Err(RuntimeError::Topology("empty dag".to_string()));
     }
 
     let mut phases: HashMap<PhaseId, DynPhase> =
@@ -319,17 +384,17 @@ async fn run_inner(
 
     let mut incoming: HashMap<PhaseId, Vec<PhaseId>> = HashMap::new();
     let mut outgoing: HashMap<PhaseId, Vec<PhaseId>> = HashMap::new();
-    for (from, to) in &edges {
-        incoming.entry(*to).or_default().push(*from);
-        outgoing.entry(*from).or_default().push(*to);
+    for &(from, to) in &edges {
+        incoming.entry(to).or_default().push(from);
+        outgoing.entry(from).or_default().push(to);
     }
 
-    let mut source_ids: Vec<PhaseId> = phases
+    let source_ids: Vec<PhaseId> = phases
         .keys()
         .filter(|id| !incoming.contains_key(id))
         .copied()
         .collect();
-    let mut sink_ids: Vec<PhaseId> = phases
+    let sink_ids: Vec<PhaseId> = phases
         .keys()
         .filter(|id| !outgoing.contains_key(id))
         .copied()
@@ -337,73 +402,126 @@ async fn run_inner(
 
     if source_ids.len() != 1 {
         return Err(RuntimeError::Topology(format!(
-            "S04 runtime requires exactly 1 source, found {}",
+            "runtime requires exactly 1 source, found {}",
             source_ids.len()
         )));
     }
     if sink_ids.len() != 1 {
         return Err(RuntimeError::Topology(format!(
-            "S04 runtime requires exactly 1 sink, found {}",
+            "runtime requires exactly 1 sink, found {}",
             sink_ids.len()
         )));
     }
-    let source_id = source_ids.remove(0);
-    let sink_id = sink_ids.remove(0);
+    let source_id = source_ids[0];
+    let sink_id = sink_ids[0];
 
-    let source_phase = phases
-        .remove(&source_id)
-        .ok_or(RuntimeError::Topology(format!("source phase {source_id} missing")))?;
-    let sink_phase = if source_id == sink_id {
-        None
-    } else {
-        Some(
-            phases
-                .remove(&sink_id)
-                .ok_or(RuntimeError::Topology(format!("sink phase {sink_id} missing")))?,
-        )
-    };
+    let topo_order = topological_sort(&phases.keys().copied().collect::<Vec<_>>(), &edges)?;
 
-    if !phases.is_empty() {
-        return Err(RuntimeError::Topology(
-            "S04 runtime supports only 1 or 2 phases".to_string(),
-        ));
+    let mut phase_inputs: HashMap<PhaseId, mpsc::Receiver<Msg>> = HashMap::new();
+    let mut phase_input_senders: HashMap<PhaseId, mpsc::Sender<Msg>> = HashMap::new();
+    let mut phase_outputs: HashMap<PhaseId, Vec<mpsc::Sender<Msg>>> = HashMap::new();
+
+    for &id in phases.keys() {
+        phase_outputs.insert(id, Vec::new());
     }
 
-    if let Some(sink_phase) = sink_phase {
-        let (inter_tx, inter_rx) = mpsc::channel::<Msg>(16);
-        let source_task = tokio::spawn(async move {
-            run_phase_loop(source_phase, input_rx, inter_tx).await
-        });
-        let sink_task = tokio::spawn(async move {
-            run_phase_loop(sink_phase, inter_rx, output_tx).await
-        });
-        source_task.await.map_err(|_| RuntimeError::Join)??;
-        sink_task.await.map_err(|_| RuntimeError::Join)??;
-    } else {
-        let task = tokio::spawn(async move {
-            run_phase_loop(source_phase, input_rx, output_tx).await
-        });
-        task.await.map_err(|_| RuntimeError::Join)??;
+    for &(from, to) in &edges {
+        let tx = if let Some(existing) = phase_input_senders.get(&to) {
+            existing.clone()
+        } else {
+            let (tx, rx) = mpsc::channel::<Msg>(16);
+            phase_input_senders.insert(to, tx.clone());
+            phase_inputs.insert(to, rx);
+            tx
+        };
+        phase_outputs.get_mut(&from).unwrap().push(tx);
     }
 
+    drop(phase_input_senders);
+
+    phase_inputs.insert(source_id, input_rx);
+    phase_outputs.insert(sink_id, vec![output_tx]);
+
+    let mut handles: Vec<JoinHandle<Result<(), RuntimeError>>> = Vec::new();
+
+    for id in topo_order {
+        let phase = phases
+            .remove(&id)
+            .ok_or(RuntimeError::Topology(format!("phase {id} missing")))?;
+        let input_rx = phase_inputs.remove(&id).ok_or(RuntimeError::Topology(format!(
+            "phase {id} has no input channel"
+        )))?;
+        let output_txs = phase_outputs.remove(&id).unwrap_or_default();
+
+        let _ = id;
+        let _ = source_id;
+        let _ = sink_id;
+        handles.push(tokio::spawn(async move {
+            run_phase_loop(phase, input_rx, output_txs).await
+        }));
+    }
+
+    for h in handles {
+        h.await.map_err(|_| RuntimeError::Join)??;
+    }
     Ok(())
 }
 
 async fn run_phase_loop(
     mut phase: DynPhase,
     mut input_rx: mpsc::Receiver<Msg>,
-    output_tx: mpsc::Sender<Msg>,
+    output_txs: Vec<mpsc::Sender<Msg>>,
 ) -> Result<(), RuntimeError> {
     while let Some(input) = input_rx.recv().await {
         let output = phase.handler.handle_boxed(input).await?;
         if let Some(out) = output {
-            output_tx
-                .send(out)
-                .await
-                .map_err(|_| RuntimeError::ChannelSend)?;
+            for tx in &output_txs {
+                tx.send(out.clone())
+                    .await
+                    .map_err(|_| RuntimeError::ChannelSend)?;
+            }
         }
     }
     let DynPhase { handler, .. } = phase;
     handler.finish_boxed().await?;
     Ok(())
+}
+
+fn topological_sort(
+    vertices: &[PhaseId],
+    edges: &[(PhaseId, PhaseId)],
+) -> Result<Vec<PhaseId>, RuntimeError> {
+    let mut in_degree: HashMap<PhaseId, usize> =
+        vertices.iter().map(|&id| (id, 0)).collect();
+    let mut out: BTreeMap<PhaseId, Vec<PhaseId>> = BTreeMap::new();
+    for &(from, to) in edges {
+        *in_degree.entry(to).or_insert(0) += 1;
+        out.entry(from).or_default().push(to);
+    }
+
+    let mut queue: Vec<PhaseId> = in_degree
+        .iter()
+        .filter(|(_, &d)| d == 0)
+        .map(|(id, _)| *id)
+        .collect();
+    let mut sorted = Vec::new();
+    while let Some(id) = queue.pop() {
+        sorted.push(id);
+        if let Some(neighbors) = out.get(&id) {
+            for &n in neighbors {
+                if let Some(d) = in_degree.get_mut(&n) {
+                    *d -= 1;
+                    if *d == 0 {
+                        queue.push(n);
+                    }
+                }
+            }
+        }
+    }
+    if sorted.len() != vertices.len() {
+        return Err(RuntimeError::Topology(
+            "cycle detected in dag (topological sort failed)".to_string(),
+        ));
+    }
+    Ok(sorted)
 }
