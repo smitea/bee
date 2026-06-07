@@ -18,6 +18,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+pub mod scheduler;
 pub mod test_utils;
 
 pub type PhaseId = u32;
