@@ -7,12 +7,18 @@
 //! S07 起接 Raft 多节点 (in-process 3 节点 + 选举 + 日志复制);
 //! S10 起实现 Scheduler;S11 起实现 StealArbiter。
 
+pub mod builtin_handlers;
 pub mod control_plane;
+pub mod deployer;
 pub mod kv;
 pub mod raft;
+pub mod worker;
 
+pub use builtin_handlers::{LogSink, StartedHandler, TerminalHandler};
 pub use control_plane::{ControlPlaneStateMachine, JobRecord, TaskRecord};
+pub use deployer::{Deployer, DeployerConfig, Edge, HandlerKind, Pipeline, TaskSpec};
 pub use kv::{KVStateMachine, Op, TaskStatus, TxnError};
 pub use raft::{
     Cluster, ClusterConfig, LogIndex, NodeCommand, NodeId, NodeMetrics, RpcMessage, Term,
 };
+pub use worker::TaskWorker;

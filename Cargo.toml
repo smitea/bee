@@ -24,6 +24,7 @@ tokio = { version = "1", default-features = false, features = ["net", "io-util",
 bytes = "1"
 bee-codec = { path = "crates/bee-codec" }
 bee-transport = { path = "crates/bee-transport" }
+bee-runtime = { path = "crates/bee-runtime" }
 bee-control = { path = "crates/bee-control" }
 
 [workspace.lints.rust]

@@ -111,6 +111,13 @@ impl Cluster {
             .map(|s| &s.handle)
     }
 
+    /// Iterator over all (id, handle) pairs (alive and dead). Used by
+    /// out-of-cluster consumers (e.g., S09 Deployer reading the ControlPlane
+    /// for `jobs inspect`).
+    pub fn nodes(&self) -> impl Iterator<Item = (NodeId, &ClusterNodeHandle)> {
+        self.slots.iter().map(|s| (s.handle.id, &s.handle))
+    }
+
     pub async fn leader(&self) -> Option<NodeId> {
         for slot in &self.slots {
             if !slot.alive {
