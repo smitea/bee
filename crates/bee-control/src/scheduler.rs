@@ -68,11 +68,18 @@ impl Scheduler for FirstFitDecreasingScheduler {
         }
 
         let mut indexed: Vec<usize> = (0..tasks.len()).collect();
+        // Sort descending by max(cpu, mem). Using `Reverse` keeps the
+        // stable order for ties (original task-id order), so a pipeline
+        // with three equal-size tasks places them on nodes 1, 2, 3 in
+        // that order. Without `Reverse`, the post-`sort_by_key().reverse()`
+        // would invert the relative order of equal-keyed tasks and put
+        // task 1 on the last node, not the first.
         indexed.sort_by_key(|&i| {
-            let t = &tasks[i];
-            std::cmp::max(t.cpu_millicores, t.mem_mb)
+            std::cmp::Reverse(std::cmp::max(
+                tasks[i].cpu_millicores,
+                tasks[i].mem_mb,
+            ))
         });
-        indexed.reverse();
 
         let mut remaining: Vec<(u32, u32)> = nodes
             .iter()

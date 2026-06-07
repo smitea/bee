@@ -63,11 +63,12 @@ pub enum Op {
         status: TaskStatus,
     },
     UpdateTaskStatus { task_id: u32, new_status: TaskStatus },
-    /// S11 heartbeat: a Node advertises liveness to the Raft Leader. Replicated
-    /// through the ControlPlane SM so the Leader's `last_heartbeat` is part of
-    /// the Raft-replicated state. Per ADR-0007 the heartbeat path is
-    /// logically separate from the BRP data channel.
     Heartbeat { node_id: u32, timestamp_ms: u64 },
+    /// S12 Work-Stealing: a free Node requests ownership of an `Orphaned`
+    /// Task. Atomic check-and-set on the Leader: if the task is still
+    /// `Orphaned`, transition to `Migrating` and set `owner_node` to the
+    /// thief. Otherwise, the op is a no-op (someone else won).
+    StealTask { thief_node: u32, task_id: u32 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,7 +157,8 @@ impl KVStateMachine {
             Op::RegisterJob { .. }
             | Op::RegisterTask { .. }
             | Op::UpdateTaskStatus { .. }
-            | Op::Heartbeat { .. } => Err(TxnError::WrongSm),
+            | Op::Heartbeat { .. }
+            | Op::StealTask { .. } => Err(TxnError::WrongSm),
         }
     }
 
@@ -170,7 +172,8 @@ impl KVStateMachine {
                 Op::RegisterJob { .. }
                 | Op::RegisterTask { .. }
                 | Op::UpdateTaskStatus { .. }
-                | Op::Heartbeat { .. } => return Err(TxnError::WrongSm),
+                | Op::Heartbeat { .. }
+                | Op::StealTask { .. } => return Err(TxnError::WrongSm),
                 _ => {}
             }
         }
@@ -206,7 +209,8 @@ impl KVStateMachine {
                 Op::RegisterJob { .. }
                 | Op::RegisterTask { .. }
                 | Op::UpdateTaskStatus { .. }
-                | Op::Heartbeat { .. } => unreachable!("non-KV op checked above"),
+                | Op::Heartbeat { .. }
+                | Op::StealTask { .. } => unreachable!("non-KV op checked above"),
             }
         }
         Ok(())

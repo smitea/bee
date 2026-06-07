@@ -253,7 +253,8 @@ impl Node {
                 Op::RegisterJob { .. }
                 | Op::RegisterTask { .. }
                 | Op::UpdateTaskStatus { .. }
-                | Op::Heartbeat { .. } => {
+                | Op::Heartbeat { .. }
+                | Op::StealTask { .. } => {
                     let _ = cp.apply_op(&entry.op);
                 }
             }

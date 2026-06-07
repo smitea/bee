@@ -98,6 +98,33 @@ impl ControlPlaneStateMachine {
                 self.last_heartbeat.insert(*node_id, *timestamp_ms);
                 Ok(())
             }
+            Op::StealTask {
+                thief_node,
+                task_id,
+            } => {
+                // Atomic check-and-set: only the first StealTask for an
+                // Orphaned task succeeds. Subsequent ones find the task
+                // already in `Migrating` and return Conflict (no-op
+                // at the Raft log level; the thief reads the CP to learn
+                // the outcome).
+                let Some(task) = self.tasks.get_mut(task_id) else {
+                    return Err(TxnError::Conflict {
+                        key: format!("task_{task_id}_not_found"),
+                        expected: None,
+                        actual: None,
+                    });
+                };
+                if task.status != TaskStatus::Orphaned {
+                    return Err(TxnError::Conflict {
+                        key: format!("task_{task_id}_not_orphaned"),
+                        expected: Some(format!("{:?}", TaskStatus::Orphaned).into_bytes()),
+                        actual: Some(format!("{:?}", task.status).into_bytes()),
+                    });
+                }
+                task.status = TaskStatus::Migrating;
+                task.owner_node = *thief_node;
+                Ok(())
+            }
             Op::Put { .. }
             | Op::Del { .. }
             | Op::Cas { .. }
