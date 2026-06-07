@@ -13,6 +13,7 @@ pub mod deployer;
 pub mod heartbeat;
 pub mod kv;
 pub mod raft;
+pub mod rebalancer;
 pub mod scheduler;
 pub mod worker;
 

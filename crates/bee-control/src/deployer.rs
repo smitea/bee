@@ -246,12 +246,13 @@ impl Deployer {
             self.cluster
                 .submit(
                     leader,
-                Op::RegisterTask {
+                    Op::RegisterTask {
                         task_id: task.task_id,
                         job_id,
                         phase_id: task.phase_id,
                         owner_node: worker_id,
                         status: TaskStatus::Scheduled,
+                        started_at_ms: 0, // MVP: Deployer doesn't track wall-clock; Rebalancer tests inject it
                     },
                 )
                 .await

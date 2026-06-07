@@ -49,6 +49,10 @@ pub struct TaskRecord {
     pub phase_id: u32,
     pub owner_node: u32,
     pub status: TaskStatus,
+    /// S25: wall-clock millis when the Task was assigned to its
+    /// current owner. The Rebalancer uses this to gate
+    /// rebalance on the `min_task_age_secs` threshold.
+    pub started_at_ms: u64,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -100,6 +104,7 @@ impl ControlPlaneStateMachine {
                 phase_id,
                 owner_node,
                 status,
+                started_at_ms,
             } => {
                 self.tasks.insert(
                     *task_id,
@@ -109,6 +114,7 @@ impl ControlPlaneStateMachine {
                         phase_id: *phase_id,
                         owner_node: *owner_node,
                         status: *status,
+                        started_at_ms: *started_at_ms,
                     },
                 );
                 Ok(())

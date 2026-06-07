@@ -72,11 +72,12 @@ async fn register_task_and_update_status_replicate_linearly() {
         .submit(
             leader,
             Op::RegisterTask {
-                task_id: 100,
+                task_id: 2,
                 job_id: 1,
-                phase_id: 0,
-                owner_node: 1,
+                phase_id: 1,
+                owner_node: 2,
                 status: TaskStatus::Pending,
+                started_at_ms: 0,
             },
         )
         .await
@@ -88,7 +89,7 @@ async fn register_task_and_update_status_replicate_linearly() {
         .submit(
             leader,
             Op::UpdateTaskStatus {
-                task_id: 100,
+                task_id: 2,
                 new_status: TaskStatus::Running,
             },
         )
@@ -103,14 +104,14 @@ async fn register_task_and_update_status_replicate_linearly() {
             .await
             .list_tasks()
             .into_iter()
-            .find(|t| t.task_id == 100);
+            .find(|t| t.task_id == 2);
         if let Some(t) = task {
             if t.status == TaskStatus::Running {
                 break;
             }
         }
         if tokio::time::Instant::now() >= deadline {
-            panic!("task 100 did not reach Running on node 2 within 2s");
+            panic!("task 2 did not reach Running on node 2 within 2s");
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
@@ -156,6 +157,7 @@ async fn kv_and_control_plane_sms_coexist_without_interference() {
                 phase_id: 0,
                 owner_node: 1,
                 status: TaskStatus::Running,
+                started_at_ms: 0,
             },
         )
         .await

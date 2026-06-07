@@ -61,6 +61,11 @@ pub enum Op {
         phase_id: u32,
         owner_node: u32,
         status: TaskStatus,
+        /// S25: wall-clock millis when the Task was assigned to its
+        /// current owner. The Rebalancer uses this to gate
+        /// rebalance on the `min_task_age_secs` threshold — a Task
+        /// that just landed is not eligible to be migrated.
+        started_at_ms: u64,
     },
     UpdateTaskStatus { task_id: u32, new_status: TaskStatus },
     Heartbeat { node_id: u32, timestamp_ms: u64 },
