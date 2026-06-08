@@ -78,18 +78,19 @@ Once **S10 (Scheduler bin-packing)** is done, the work forks into 7 paths that c
 | **E. Adaptive scheduling** | S22 → S23 → S24 → S25 | MLFQ + 4 alternative policies + cross-Node rebalancing |
 | **F. Observability** | S27 → S28 | CLI panel (jobs / inspect / diagnostics / cluster status) |
 | **G. Datasource management (ADR-0010)** | S29 → S30, S31 | `use` syntax + Datasource Registry + secret store + health / pause |
-| **H. Quant trading spike** | S33 | End-to-end demo with separate mock plugin crates (HITL: seed-user demo) |
+| **H. Quant trading spike (prod)** | S34 → S35 → S36 → S37 ∥ S38 ∥ S39 → S40 → S33 | 6 production-grade plugin crates (real WS/HTTP/DB/ML) wired end-to-end; S33 is the HITL milestone after S40 delivers |
 
 ## Key milestones
 
 - **S07**: 3-node Raft cluster; control plane SM visible
 - **S10**: first **end-to-end demoable** — 3-node Bee running a hardcoded multi-Phase Pipeline
 - **S12**: **Failover complete loop** — kill a Node, see Task go Orphaned, auto-Work-Stealing recovers
-- **S17**: **Quant scenario A complete** — binance mock + multiple Pipelines sharing 1 Producer
+- **S17**: **Cross-Pipeline Producer sharing proven (with mock binance)** — multiple Pipelines share 1 Producer
 - **S25**: **0.7 roadmap core** — runtime adaptive scheduling
 - **S28**: **0.x → 1.0 production-ready** (CLI observability + scheduling + diagnostic)
 - **S29–S31**: **Datasource management** — `use` syntax + secret store + pause/resume (admin governance)
-- **S33**: **Quant trading spike complete** — end-to-end demo with separate mock plugins, validated against seed user (HITL)
+- **S33**: **Quant trading spike complete (HITL)** — end-to-end production deploy with 6 real external systems (Binance WS, NewsAPI, InfluxDB v2, MongoDB, ta-indicators, FinBERT ONNX); validated against seed user
+- **S41**: **Performance showcase complete** — Fibonacci + prime sieve + multi-stream analytics demos run in < 5 min, with measured performance table filled in (1 / 3 / 5 Nodes)
 
 ---
 
@@ -857,38 +858,391 @@ Datasource-level observability and lifecycle:
 
 ---
 
-## Phase 0.5 / 0.6 — Quant trading spike (HITL)
+## Phase 0.5 / 0.6 — Quant trading spike: production-grade plugins (HITL)
 
----
+> **Why this section is re-scoped**: the original S33 used mock plugin crates for end-to-end validation. Per user direction, Bee's plugin story for the quant spike must be **production-grade**: real Binance WebSocket, real NewsAPI, real InfluxDB v2, real MongoDB, real `yata`/`ta-lib` indicators, real `tract` ONNX FinBERT — no mocks. The Stream identity scope and backfill semantics are also refined (see S34 / ADR-0011).
 
-### S33 · Quant trading spike: end-to-end BTC 5min decision pipeline with **separate** mock plugin crates
+### S33 · Quant trading HITL milestone: production deployment with real external systems
 
-- **Type**: **HITL** (first end-to-end demo to seed user is a design-review milestone)
-- **Blocked by**: S00, S15, S16, S17, S19, S20, S21, S29, S30
-- **ADRs**: all 10 (this story is the end-to-end validator for the whole architecture)
-- **HITL review milestone**: when the demo script runs cleanly, schedule a 30-minute walkthrough with the first seed user. They sign off (or note gaps) before S33 is marked done.
+- **Type**: **HITL** (umbrella milestone — marked done only after S40 is delivered AND the seed user signs off)
+- **Blocked by**: S40
+- **ADRs**: 0001, 0003, 0009, 0010, 0011
+- **HITL review milestone**: when the production pipeline has been running real money signals for ≥ 1 trading day without manual intervention, schedule a 60-minute walkthrough with the first seed user. They sign off (or note gaps) before S33 is marked done.
 
-> **Why this story exists**: All previous stories are layered — each proves one mechanism in isolation. S33 is the **spike** that proves the mechanisms compose. It validates that the architecture doc's mermaid diagrams aren't fiction. It produces the canonical "5-minute demo" that a seed user can run.
->
-> **Why separate plugin crates**: Each plugin (binance / google_news / influxdb / mongodb / UDFs) ships in its **own `cdylib` crate**, not bundled together. This is the core principle of Bee (ADR-0005: no business code in core) AND the user's explicit requirement to maximize reusability.
+> **Why this story exists**: S33 is the **end-to-end production validation** of the architecture. All previous stories (S00–S32) prove mechanisms in isolation. S33 proves they compose under real-world load, real credentials, real network, real third-party rate limits. It produces the "first production deployment" that anchors the 1.0 narrative.
 
 **Deliverables**
 
-#### 1. Four (or more) independent mock plugin crates
+- All 6 production plugin stories (S34–S39) done; all 6 plugins load cleanly in the production cluster
+- S40 production pipeline runs end-to-end with real money signals for ≥ 1 trading day without manual intervention
+- Seed user review notes captured; any gaps filed as new stories or ADR amendments
 
-Each lives under `plugins/` as its own workspace member; each is a `cdylib`; each depends only on `bee-plugin-sdk` + `bincode` (no HTTP / WS / DB clients — all mock locally).
+---
 
-| Crate | Role | Behavior |
-| --- | --- | --- |
-| `bee-plugin-binance-mock` | Input Adapter (`binance_subscribe`) | Generates synthetic K-line events on a configurable schedule (default 1 Hz); price follows a sine wave so `MACD` / `EMA` are observable; `config` accepts `{"symbol", "interval"}` |
-| `bee-plugin-google-news-mock` | Input Adapter (`google_news_search`) | Generates synthetic news article events with timestamps; query string from `config`; emits 1 event per minute by default |
-| `bee-plugin-influxdb-mock` | Output Adapter (`influxdb_emit`) | Writes to a local append-only log file (`/tmp/bee_demo_influxdb.log`) in line-protocol-ish text; `config` accepts `{"database", "measurement"}` |
-| `bee-plugin-mongodb-mock` | Output Adapter (`mongodb_emit`) | Writes to a local JSON-lines file (`/tmp/bee_demo_mongodb.jsonl`); `config` accepts `{"database", "collection"}` |
-| `bee-plugin-ta-lib-mock` (optional) | Handler UDFs (`MACD`, `EMA`, `KRONOS`, `decision_tree`, `sentiment_analyzer`) | Pure-compute UDFs over a tiny in-crate time-series state; deterministic outputs |
+### S34 · `bee-plugin-binance`: production-grade Binance adapter (real WS + REST + backfill)
 
-Each plugin's `Cargo.toml` declares its own deps; no cross-plugin imports. Each has its own `Plugin Manifest` (with independent `name` / `version` / `abi_version`).
+- **Type**: AFK
+- **Blocked by**: S00, S05, S29
+- **ADRs**: 0005, 0009, 0010, **0011** (Stream identity + backfill semantics — to be created)
 
-#### 2. The canonical SQL Pipeline: `examples/quant_btc_strategy.sql`
+**Crate**: `plugins/bee-plugin-binance/` (new workspace member; `crate-type = ["cdylib"]`)
+
+**Why this is its own crate**: per Bee's principle (ADR-0005) and the user's explicit requirement, every external-system adapter ships as an independent `cdylib` — no cross-plugin imports, no business code in core, max reusability for any user that needs Binance data.
+
+**Datasource config (connection-level only — ADR-0010)**
+
+```jsonc
+{
+  "ws_url":             "wss://stream.binance.com:9443",  // default; admin may override
+  "rest_url":           "https://api.binance.com",         // default
+  "api_key":            "<from bee secret store; optional for public market data>",
+  "api_secret":         "<from bee secret store; optional>",
+  "rate_limit_per_sec": 10,                                // per-IP Binance limit
+  "tenant":             0                                   // uint16; 0 = global (ADR-0010)
+}
+```
+
+**Per-call args (in SQL — never in Datasource config)**
+
+- `symbol` (e.g. `'BTC/USDT'`)
+- `interval` (e.g. `'5min'`, `'1h'`)
+- `from` (optional ISO-8601 timestamp; if in the past, the plugin backfills before subscribing to live data — see "Backfill semantics" below)
+
+**Adapter contract (real `tokio-tungstenite` WS + `reqwest` REST)**
+
+| Method | Direction | Backed by | Behavior |
+| --- | --- | --- | --- |
+| `subscribe(symbol, interval, from?)` | Input | WS `/ws/<symbol>@kline_<interval>` | See backfill semantics below. Emits `KlineEvent { open_time, open, high, low, close, volume, close_time, ... }`. |
+| `download_history(symbol, interval, from, to)` | Input (also exposed as a public method) | REST `GET /api/v3/klines?symbol=...&interval=...&startTime=...&endTime=...` | Returns historical K-lines as a batch; paginates internally (Binance returns ≤ 1000 per page). Emits them on the same Stream signature as `subscribe`. |
+| `unsubscribe(symbol, interval)` | Input | WS unsubscribe message | Stops the subscription; Producer state retains the high-water mark. |
+
+**Stream identity (refines ADR-0003 / 0010; see ADR-0011)**
+
+- `StreamSignature = sha256("binance" || "subscribe" || symbol || interval)` — does **not** include `from`
+- The `from` argument is a **per-Subscriber** concern, not a Stream identity
+- Multiple Subscribers can each ask for different backfill ranges and still share the same Producer/Stream
+- This is the same model as Kafka: a topic is identified by `(source, format)`, not by `from` offsets
+
+**Backfill semantics (the key new behavior)**
+
+When `subscribe(symbol, interval, from)` is called by a Subscriber, the plugin:
+
+1. Reads the Producer's high-water mark `H` from KV (`state/producer/<stream_id>/hwm`)
+2. If `from < H`: call `download_history(symbol, interval, from, H)` and emit the resulting K-lines in time order, tagged with the offset
+3. If `from >= H` or `from` is null: skip backfill; go straight to WS subscription
+4. Subscribe to WS `/ws/<symbol>@kline_<interval>` and emit new K-lines as they arrive
+5. The Subscriber's Task State stores the last-consumed offset; on restart, the Subscriber rejoins the Stream and asks for backfill from its own offset (independent of the Producer's HWM)
+
+**Credentials handling**
+
+- For MVP, the plugin reads `api_key` / `api_secret` from the Datasource config (which references the Bee secret store)
+- 1.x: replace with Vault / AWS Secrets Manager (out of scope)
+- The plugin does **not** fall back to env vars — config is the single source of truth
+
+**Acceptance criteria**
+
+- [ ] `plugins/bee-plugin-binance/` is an independent workspace member; `Cargo.toml` declares `crate-type = ["cdylib"]`
+- [ ] Crate depends only on `bee-plugin-sdk`, `tokio`, `tokio-tungstenite`, `reqwest`, `serde`, `bincode` (no Bee core deps)
+- [ ] `bee plugin load plugins/bee-plugin-binance/target/release/libbee_plugin_binance.so` succeeds; `bee plugin list` shows it with a stable `PluginId = sha256(binary)`
+- [ ] Loading two different versions side-by-side works (ADR-0009 multi-version)
+- [ ] `bee datasource create binance --config @binance.example.json` (where `binance.example.json` contains only connection-level config) registers cleanly
+- [ ] Strict-mode `use binance;` SQL: `SELECT * FROM binance.subscribe('BTC/USDT', '5min')` compiles (no warnings)
+- [ ] Same SQL with `from => '2024-01-01'` also compiles
+- [ ] Plugin connects to real `wss://stream.binance.com:9443` and emits live K-lines within 5 seconds of pipeline start
+- [ ] `download_history('BTC/USDT', '5min', '2024-01-01', '2024-01-02')` returns the expected K-line batch via REST (verified against Binance docs)
+- [ ] **Backfill-on-subscribe**: when `from` is in the past, the plugin emits historical K-lines first, then seamlessly transitions to live WS events — verified by a single ordered stream at the Subscriber
+- [ ] Two Subscribers with different `from` values share the same Producer (Stream signature matches), but each receives their own backfill range
+- [ ] Restarting a Subscriber mid-stream resumes from its last offset (not from the Producer's HWM)
+- [ ] Rate limiter respects `rate_limit_per_sec` (10/s default); no Binance 429s in a 10-minute live test
+- [ ] No credentials, URLs, or other config in source code; all from the Datasource config
+- [ ] README in the plugin crate documents: required Datasource config, per-call args, Stream identity, backfill behavior, rate-limit semantics
+
+---
+
+### S35 · `bee-plugin-google-news`: production-grade NewsAPI adapter (real HTTP)
+
+- **Type**: AFK
+- **Blocked by**: S00, S05, S29
+- **ADRs**: 0005, 0009, 0010
+
+**Crate**: `plugins/bee-plugin-google-news/` (independent `cdylib`)
+
+**Datasource config (connection-level only)**
+
+```jsonc
+{
+  "api_key":            "<from bee secret store; required>",
+  "base_url":           "https://newsapi.org/v2",  // default
+  "rate_limit_per_sec": 5,                         // NewsAPI free tier: 100/day; pro depends on plan
+  "language":           "en",                      // default
+  "tenant":             0
+}
+```
+
+**Per-call args (in SQL — never in Datasource config)**
+
+- `query` (e.g. `'Bitcoin'` or `'AAPL OR "Apple Inc"'`)
+- `from` / `to` (ISO-8601; required for non-headlines endpoints)
+- `sort_by` (`'publishedAt'` | `'relevancy'` | `'popularity'`)
+- `page_size` (default 100, max 100)
+
+**Adapter contract (real `reqwest`)**
+
+| Method | Direction | Backed by | Behavior |
+| --- | --- | --- | --- |
+| `search(query, from?, to?, sort_by?, page_size?)` | Input | REST `GET /everything?q=...&from=...&to=...&sortBy=...&pageSize=...` | Polls at a configurable cadence (default 60s); emits `ArticleEvent { published_at, source, author, title, description, url, content }`. |
+| `top_headlines(query?, country?, category?)` | Input | REST `GET /top-headlines?q=...&country=...&category=...` | Same polling semantics; emits the same `ArticleEvent` shape. |
+
+**Stream identity**
+
+- `StreamSignature = sha256("google_news" || method || query)` — does **not** include `from`/`to`/`sort_by` (those are per-Subscriber)
+- Multiple Subscribers with different time windows share the same Producer
+
+**Acceptance criteria**
+
+- [ ] Independent `cdylib` crate, only depends on `bee-plugin-sdk`, `tokio`, `reqwest`, `serde`, `bincode`
+- [ ] Loads cleanly; `bee plugin list` shows it
+- [ ] `bee datasource create google_news --config @google_news.example.json` registers cleanly
+- [ ] `SELECT * FROM google_news.search('Bitcoin', from => '2024-06-01', sort_by => 'publishedAt')` compiles
+- [ ] Plugin hits real `https://newsapi.org/v2/everything` and emits parsed articles within 10 seconds
+- [ ] Rate limiter respects `rate_limit_per_sec`; no 429s in a 10-minute test
+- [ ] Stream sharing: two Subscribers with different `from` share the same Producer
+- [ ] Plugin README documents: required Datasource config, per-call args, Stream identity, polling cadence, rate-limit semantics
+
+---
+
+### S36 · `bee-plugin-influxdb`: production-grade InfluxDB v2 Output Adapter (real line protocol)
+
+- **Type**: AFK
+- **Blocked by**: S00, S05, S29
+- **ADRs**: 0005, 0009, 0010
+
+**Crate**: `plugins/bee-plugin-influxdb/` (independent `cdylib`)
+
+**Datasource config (connection-level only)**
+
+```jsonc
+{
+  "url":        "http://localhost:8086",    // admin-supplied
+  "token":      "<from bee secret store; required>",
+  "org":        "<InfluxDB org; required>",
+  "bucket":     "<default bucket; can be overridden per-call>",
+  "timeout_ms": 5000,
+  "tenant":     0
+}
+```
+
+**Per-call args (in SQL — used in `EMIT INTO influxdb.write(...)`)**
+
+- `measurement` (e.g. `'klines'`, `'sentiment'`)
+- `bucket` (optional override of Datasource default)
+- `tag_cols` (array of column names to use as InfluxDB tags)
+- `field_cols` (array of column names to use as InfluxDB fields; default = all non-tag numeric columns)
+- `timestamp_col` (default `ts`)
+
+**Adapter contract (real InfluxDB v2 client over HTTP line protocol)**
+
+| Method | Direction | Backed by | Behavior |
+| --- | --- | --- | --- |
+| `write(measurement, tag_cols, field_cols?, bucket?, timestamp_col?)` | Output | `POST /api/v2/write?org=...&bucket=...` (line protocol) | Batches events; flushes on size threshold (default 500 lines) or time threshold (default 1s). Emits `WriteResult { bytes_written, lines_written, status }` back to Bee for observability. |
+| `query(flux_query, bucket?)` | Input | `POST /api/v2/query?org=...` (Flux) | Polls at a configurable cadence; emits the result rows. Used for the "load back historical InfluxDB data" loop in the backfill / backtest story. |
+
+**Stream identity**
+
+- For `write`: Output adapters don't produce Streams; the signature is `(influxdb, write)` — connection-level only
+- For `query`: `StreamSignature = sha256("influxdb" || "query" || bucket || hash(flux_query))` — different queries are different Producers
+
+**Acceptance criteria**
+
+- [ ] Independent `cdylib` crate, only depends on `bee-plugin-sdk`, `tokio`, `reqwest`, `serde`, `bincode`
+- [ ] Real InfluxDB v2 line protocol: emitted bytes parse cleanly with `influx-cli` (or `curl /api/v2/query`)
+- [ ] `bee datasource create influxdb --config @influxdb.example.json` registers cleanly
+- [ ] `EMIT INTO influxdb.write('klines', tag_cols => ARRAY['symbol'], field_cols => ARRAY['price','volume'])` from SQL compiles and runs
+- [ ] Batching behavior: 1000-row burst flushes in ≤ 2 batches (verify in test); no events lost
+- [ ] Bucket override: per-call `bucket => 'archive'` writes to the right bucket
+- [ ] Rate limiter respects token-bucket config; no 429s under normal load
+- [ ] Token never logged; never in error messages
+- [ ] Plugin README documents: required Datasource config, per-call args, line-protocol mapping, batching, rate-limit semantics
+
+---
+
+### S37 · `bee-plugin-mongodb`: production-grade MongoDB adapter (real driver; per-call collection)
+
+- **Type**: AFK
+- **Blocked by**: S00, S05, S29
+- **ADRs**: 0005, 0009, 0010
+
+**Crate**: `plugins/bee-plugin-mongodb/` (independent `cdylib`)
+
+**Datasource config (connection-level only — ADR-0010; note: NO `collection` field)**
+
+```jsonc
+{
+  "uri":       "mongodb://localhost:27017",     // admin-supplied
+  "database":  "trading",                        // default DB; collection is per-call
+  "username":  "<from bee secret store; optional>",
+  "password":  "<from bee secret store; optional>",
+  "app_name":  "bee",                            // appears in MongoDB logs
+  "tls":       false,
+  "tenant":    0
+}
+```
+
+**Per-call args (in SQL — `collection` is per-call, NOT in Datasource config)**
+
+- `collection` (e.g. `'trades'`, `'order_decision'`, `'news_articles'`) — **per-call, by design (ADR-0010)**
+- For `insert` / `insert_many`: `document` (a struct/row)
+- For `find`: `filter` (MongoDB filter doc)
+- For `update`: `filter`, `update` (MongoDB update doc)
+- For `aggregate`: `pipeline` (array of stages)
+
+**Adapter contract (real `mongodb` crate driver)**
+
+| Method | Direction | Backed by | Behavior |
+| --- | --- | --- | --- |
+| `insert(collection, document)` | Output | `coll.insert_one(doc)` | Inserts a single document; emits `InsertResult { inserted_id, collection }` back to Bee. |
+| `insert_many(collection, documents)` | Output | `coll.insert_many(docs)` | Batched insert; emits batched result. |
+| `find(collection, filter)` | Input | `coll.find(filter)` | Polls / change-streams the collection; emits `DocumentEvent` per matching doc. |
+| `update(collection, filter, update)` | Output | `coll.update_one(filter, update)` | Returns `UpdateResult { matched_count, modified_count, collection }`. |
+| `aggregate(collection, pipeline)` | Input | `coll.aggregate(pipeline)` | Emits result rows. |
+
+**Why `collection` is per-call (not in Datasource config)**
+
+- A single MongoDB cluster holds many collections; the same Datasource `mongodb` should be reusable across all of them
+- Different `use mongodb;` calls with different `collection` args are different Streams (StreamSignature includes collection)
+- This matches the ADR-0010 principle: **Datasource config = connection-level only; per-call args in SQL**
+
+**Stream identity**
+
+- For `find`/`aggregate`: `StreamSignature = sha256("mongodb" || method || database || collection || hash(filter_or_pipeline))` — different filters/pipelines are different Producers
+- For `insert`/`update`: Output adapters don't produce Streams; the signature is `(mongodb, write, database, collection)` — connection-level + collection
+
+**Acceptance criteria**
+
+- [ ] Independent `cdylib` crate, only depends on `bee-plugin-sdk`, `tokio`, `mongodb` (the official Rust driver), `bson`, `serde`, `bincode`
+- [ ] Connects to a real MongoDB instance (test: `docker run mongo:7`)
+- [ ] `bee datasource create mongodb --config @mongodb.example.json` (no `collection` in the config) registers cleanly
+- [ ] Strict-mode SQL: `EMIT INTO mongodb.insert('trades', row)` — `collection` is a per-call string arg, **not** a Datasource field
+- [ ] `EMIT INTO mongodb.insert('order_decision', row)` — same Datasource `mongodb`, different collection, different Stream
+- [ ] Same `mongodb` Datasource reused across 5+ Pipelines with different collections, all sharing the same MongoDB connection (Bee-level pooling)
+- [ ] Documents round-trip: `insert` then `find` returns the inserted doc
+- [ ] Credentials never logged; never in error messages
+- [ ] Plugin README documents: required Datasource config (no `collection` field), per-call args, Stream identity, pooling behavior, change-stream caveats
+
+---
+
+### S38 · `bee-plugin-ta-indicators`: production-grade technical-analysis Handlers (real `yata` / `ta-lib`)
+
+- **Type**: AFK
+- **Blocked by**: S00, S05, S15
+- **ADRs**: 0005, 0009, 0010
+
+**Crate**: `plugins/bee-plugin-ta-indicators/` (independent `cdylib`)
+
+> **Note**: this is a **Handler** plugin (pure compute), not an Adapter. No Datasource config; the plugin registers a set of SQL UDFs and is loaded by Bee at startup.
+
+**Plugin config (plugin-level, not Datasource)**
+
+```jsonc
+{
+  "indicator_backend": "yata"   // "yata" (pure Rust) | "ta-lib" (C FFI; optional)
+}
+```
+
+**Handler contract (real indicator math, not stubs)**
+
+| Function | Signature | Backed by | Use case |
+| --- | --- | --- | --- |
+| `MACD(price_col, fast, slow, signal, ts_col)` | SQL UDF | `yata::MACDIndicator` (pure Rust) or `ta-lib` (C) | Trend-following crossover |
+| `EMA(price_col, period, ts_col)` | SQL UDF | `yata::EMAIndicator` | Smoothing |
+| `RSI(price_col, period, ts_col)` | SQL UDF | `yata::RSIIndicator` | Overbought/oversold |
+| `BBANDS(price_col, period, std_dev, ts_col)` | SQL UDF | `yata::BollingerBands` | Volatility |
+| `ATR(high_col, low_col, close_col, period, ts_col)` | SQL UDF | `yata::ATRIndicator` | Stop-loss sizing |
+| `VWAP(price_col, volume_col, ts_col)` | SQL UDF | Custom (running sum) | Intraday fair value |
+
+**State management**
+
+- All indicators are **streaming-friendly**: they accept `(price, ts)` tuples and emit one output per input (no array-bulk mode required for MVP)
+- Per-stream state (rolling buffers) is stored in Bee's KV Cluster under `state/handler/<stream_id>/<indicator_name>/`
+- On restart, the state is restored from the last checkpoint; indicators resume mid-stream
+
+**Acceptance criteria**
+
+- [ ] Independent `cdylib` crate, only depends on `bee-plugin-sdk`, `yata`, `serde`, `bincode` (and optionally `ta-lib-sys` if backend = `ta-lib`)
+- [ ] `bee plugin load` succeeds; UDFs appear in `bee dsl functions` list
+- [ ] `MACD(close, 12, 26, 9, ts)` on a real 5-min BTC stream produces the expected values (validated against `pandas-ta` reference output in tests)
+- [ ] `EMA(close, 26, ts)` matches `pandas.Series.ewm(span=26).mean()` to 6 decimal places
+- [ ] State is restored correctly across Pipeline restarts (verify by computing the same indicator on a replayed stream)
+- [ ] `yata` and `ta-lib` backends produce identical output (within float epsilon) for `MACD` / `EMA` / `RSI`
+- [ ] Plugin README documents: registered UDF signatures, state storage location, backend choice rationale, performance characteristics
+
+---
+
+### S39 · `bee-plugin-onnx-ml`: production-grade ONNX ML model Handlers (real `tract` runtime + FinBERT)
+
+- **Type**: AFK
+- **Blocked by**: S00, S05, S15
+- **ADRs**: 0005, 0009, 0010
+
+**Crate**: `plugins/bee-plugin-onnx-ml/` (independent `cdylib`)
+
+> **Note**: this is a **Handler** plugin. No Datasource config; the plugin registers SQL UDFs that wrap ONNX models loaded from disk.
+
+**Plugin config (plugin-level, not Datasource)**
+
+```jsonc
+{
+  "sentiment_model_path": "./models/finbert-quant.onnx",   // ProsusAI FinBERT, fine-tuned for financial sentiment
+  "decision_model_path":  "./models/btc-direction-1h.onnx", // Real model, user-supplied (e.g., a gradient-boosted tree exported to ONNX)
+  "max_batch_size":       32,
+  "device":               "cpu"   // "cpu" | "gpu" (1.x); MVP is CPU-only
+}
+```
+
+**Handler contract (real `tract` ONNX runtime)**
+
+| Function | Signature | Model | Use case |
+| --- | --- | --- | --- |
+| `sentiment_score(text_col)` | SQL UDF | FinBERT (ProsusAI, ONNX) | Returns a float in `[-1, 1]`: negative = bearish, positive = bullish |
+| `sentiment_class(text_col)` | SQL UDF | FinBERT (ProsusAI, ONNX) | Returns one of `{"positive", "neutral", "negative"}` |
+| `price_direction(features_struct)` | SQL UDF | User-supplied ONNX model | Returns one of `{"up", "down", "flat"}` for the next bar |
+| `model_score(model_name, features_struct)` | SQL UDF | Generic | Returns the model's raw output (float or class index) |
+
+**Model loading**
+
+- Models are loaded **once at plugin init**; their session lives in plugin-managed memory
+- The model file path is part of plugin config (not Datasource config) because the model is a binary artifact, not a connection
+- `tract` is pure Rust — no C++ runtime, no `libtorch` dependency
+
+**Batching**
+
+- `sentiment_score` accepts one text per call, but the plugin batches up to `max_batch_size` calls into a single `tract` inference to amortize overhead
+- This is transparent to the SQL user
+
+**Acceptance criteria**
+
+- [ ] Independent `cdylib` crate, only depends on `bee-plugin-sdk`, `tract-onnx`, `ndarray`, `tokenizers` (for FinBERT's WordPiece), `serde`, `bincode`
+- [ ] `bee plugin load` succeeds; UDFs appear in `bee dsl functions` list
+- [ ] `sentiment_score("Bitcoin surges past $100k as institutional demand grows")` returns a positive float in `[0.5, 1.0]` (verified against FinBERT reference output)
+- [ ] `sentiment_score("BTC plunges 20% amid regulatory crackdown")` returns a negative float in `[-1.0, -0.5]`
+- [ ] Batching: a 100-row burst of `sentiment_score` calls completes in ≤ 10 model invocations (verifiable via debug log)
+- [ ] Decision model: `price_direction(struct_pack(ema26, rsi14, macd, sentiment))` returns the right class for a held-out test set (user provides the test)
+- [ ] No model weights bundled in the plugin crate; models are loaded from `plugin_config.model_path` at runtime
+- [ ] Plugin README documents: registered UDF signatures, model file format (ONNX), batching behavior, expected model input/output schemas, performance characteristics (CPU inference latency)
+
+---
+
+### S40 · Production end-to-end deploy: `examples/quant_btc_strategy.sql` + demo script
+
+- **Type**: AFK
+- **Blocked by**: S34, S35, S36, S37, S38, S39, S17, S20
+- **ADRs**: 0001, 0003, 0005, 0006, 0009, 0010, 0011
+
+**What this delivers**: the running S33 milestone. Six production plugins loaded, two SQL pipelines deployed, Producer sharing verified, failover verified, real money signals flowing.
+
+**Deliverables**
+
+#### 1. The canonical SQL Pipeline: `examples/quant_btc_strategy.sql`
 
 ```sql
 use binance;
@@ -898,132 +1252,458 @@ use mongodb;
 
 CREATE VIEW v_btc_metrics AS
 SELECT
-    *,
-    MACD(price, 26, 12, 9, timestamp)  AS macd,
-    EMA(price, 26, timestamp)          AS ema26
+    open_time                                                       AS ts,
+    symbol,
+    close,
+    volume,
+    MACD(close, 12, 26, 9, open_time)                               AS macd,
+    EMA(close, 26, open_time)                                       AS ema26,
+    RSI(close, 14, open_time)                                       AS rsi14
 FROM binance.subscribe('BTC/USDT', '5min');
 
 CREATE VIEW v_btc_sentiment AS
 SELECT
-    *,
-    sentiment_analyzer(article) AS sentiment_score
-FROM google_news.search('Bitcoin');
+    published_at                                                    AS ts,
+    sentiment_score(description)                                    AS sentiment,
+    title,
+    url
+FROM google_news.search('Bitcoin', sort_by => 'publishedAt');
 
 CREATE VIEW v_decision_input AS
-SELECT p.*, s.sentiment_score
+SELECT
+    p.ts,
+    p.close,
+    p.macd,
+    p.rsi14,
+    s.sentiment
 FROM v_btc_metrics      p
 ASOF JOIN v_btc_sentiment s
-  ON p.timestamp >= s.timestamp;
+  ON p.ts >= s.ts;
 
 CREATE VIEW v_final_decision AS
 SELECT
-    decision_tree(di.*) AS order_decision,
-    di.*
-FROM v_decision_input di;
+    ts,
+    price_direction(
+        struct_pack(
+            ema26      AS ema26,
+            rsi14      AS rsi14,
+            macd       AS macd,
+            sentiment  AS sentiment
+        )
+    )                                                       AS direction,
+    close,
+    sentiment
+FROM v_decision_input;
 
-EMIT INTO influxdb.emit('bitcoin.trade')
-SELECT
-    MAP_CONSTRUCT('symbol', symbol, 'is_bullish', macd.is_bullish) AS tags,
-    MAP_CONSTRUCT('price', price)                                AS fields
-FROM v_final_decision;
+EMIT INTO influxdb.write(
+    'klines',
+    tag_cols   => ARRAY['symbol'],
+    field_cols => ARRAY['close', 'volume', 'macd', 'rsi14']
+)
+SELECT ts, symbol, close, volume, macd, rsi14 FROM v_btc_metrics;
 
-EMIT INTO mongodb.emit('order_decision')
-SELECT order_decision.*, price, timestamp
+EMIT INTO mongodb.insert('trades',
+    struct_pack(direction, close, sentiment, ts)
+)
+SELECT direction, close, sentiment, ts
 FROM v_final_decision
-WHERE order_decision IS NOT NULL;
+WHERE direction IS NOT NULL;
 ```
+
+#### 2. The backfill variant: `examples/quant_btc_strategy_backfill.sql`
+
+Same `use` declarations and the same downstream views, but the binance call is:
+
+```sql
+FROM binance.subscribe('BTC/USDT', '5min', from => '2024-06-01');
+```
+
+This triggers the S34 backfill path: the Producer first emits historical K-lines from 2024-06-01 to the high-water mark, then continues with live WS. Used for the "warm up the state" step at deploy time.
 
 #### 3. The second strategy, `examples/quant_btc_strategy_v2.sql`
 
-Same `use` declarations (proving Provider / Stream separation per ADR-0010); different filter + decision logic; should **share the Producer** with strategy 1.
+Same `use` declarations, different filter / decision logic. Demonstrates that the same `binance` Datasource (and the same `binance.subscribe('BTC/USDT','5min')` Stream) is shared between two strategies — only one `binance` Producer in the cluster.
 
-#### 4. One-click demo script: `scripts/demo-quant.sh`
+#### 4. One-click demo script: `scripts/demo-quant-prod.sh`
 
-Idempotent end-to-end runner:
+Idempotent end-to-end runner. **Requires the user to supply real credentials** via env vars or a `.env` file (NOT checked into the repo):
 
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
 
-# 1. Build all mock plugins
-for plugin in plugins/bee-plugin-{binance,google-news,influxdb,mongodb,ta-lib}-mock; do
+# 0. User must supply credentials (see scripts/.env.example)
+[ -f scripts/.env ] || { echo "Missing scripts/.env — see scripts/.env.example"; exit 1; }
+. scripts/.env
+
+# 1. Build all 6 production plugins
+for plugin in plugins/bee-plugin-{binance,google-news,influxdb,mongodb,ta-indicators,onnx-ml}; do
   (cd "$plugin" && cargo build --release)
 done
 
 # 2. Drop all plugins into the plugin dir
-mkdir -p /tmp/bee_demo_plugins
-cp plugins/bee-plugin-*/target/release/libbee_plugin_*.so /tmp/bee_demo_plugins/
+mkdir -p /tmp/bee_prod_plugins
+cp plugins/bee-plugin-*/target/release/libbee_plugin_*.{so,dylib} /tmp/bee_prod_plugins/
 
-# 3. Start 3-node cluster (or use existing)
-# (delegated to scripts/start-cluster.sh or similar)
+# 3. Start 3-node cluster (delegated to scripts/start-cluster.sh)
+scripts/start-cluster.sh
 
-# 4. Register the 4 Datasources (Providers)
+# 4. Register the 4 Datasources (Providers) — connection-level config only
 bee datasource create binance \
   --adapter binance_subscribe \
-  --plugin-version ^1.0 \
-  --config '{"symbol":"BTC/USDT","interval":"5min"}'
+  --plugin-id "$(sha256sum plugins/bee-plugin-binance/target/release/libbee_plugin_binance.so | cut -d' ' -f1)" \
+  --config "$(jq -n --arg k "$BINANCE_API_KEY" '{ws_url:"wss://stream.binance.com:9443",rest_url:"https://api.binance.com",api_key:$k,rate_limit_per_sec:10}')"
 
 bee datasource create google_news \
   --adapter google_news_search \
-  --plugin-version ^1.0 \
-  --config '{"query":"Bitcoin"}'
+  --plugin-id "$(sha256sum plugins/bee-plugin-google-news/target/release/libbee_plugin_google_news.so | cut -d' ' -f1)" \
+  --config "$(jq -n --arg k "$NEWSAPI_KEY" '{base_url:"https://newsapi.org/v2",api_key:$k,rate_limit_per_sec:5,language:"en"}')"
 
 bee datasource create influxdb \
-  --adapter influxdb_emit \
-  --plugin-version ^1.0 \
-  --config '{"database":"bitcoin","measurement":"trade"}'
+  --adapter influxdb_write \
+  --plugin-id "$(sha256sum plugins/bee-plugin-influxdb/target/release/libbee_plugin_influxdb.so | cut -d' ' -f1)" \
+  --config "$(jq -n --arg t "$INFLUXDB_TOKEN" --arg o "$INFLUXDB_ORG" '{url:"http://localhost:8086",token:$t,org:$o,bucket:"trading",timeout_ms:5000}')"
 
 bee datasource create mongodb \
-  --adapter mongodb_emit \
-  --plugin-version ^1.0 \
-  --config '{"database":"trading","collection":"order_decision"}'
+  --adapter mongodb_insert \
+  --plugin-id "$(sha256sum plugins/bee-plugin-mongodb/target/release/libbee_plugin_mongodb.so | cut -d' ' -f1)" \
+  --config "$(jq -n --arg u "$MONGODB_URI" '{uri:$u,database:"trading",app_name:"bee",tls:false}')"
 
-# 5. Deploy both strategies
+# 5. Deploy the warmup + main pipeline
+bee deploy examples/quant_btc_strategy_backfill.sql  # warm up from 2024-06-01
 bee deploy examples/quant_btc_strategy.sql
-bee deploy examples/quant_btc_strategy_v2.sql
+bee deploy examples/quant_btc_strategy_v2.sql         # shares binance Producer
 
-# 6. Verify outputs in mock sinks
-sleep 30  # let some events accumulate
-echo "==== influxdb sink ===="
-cat /tmp/bee_demo_influxdb.log
-echo "==== mongodb sink ===="
-cat /tmp/bee_demo_mongodb.jsonl
+# 6. Wait for the live signals to flow
+sleep 60
 
-# 7. Verify Producer sharing
-ASSERT_MSG="Expected: only 1 active binance_subscribe Producer across 2 Jobs"
+# 7. Verify outputs hit the real sinks
+echo "==== InfluxDB query ===="
+curl -sG "http://localhost:8086/api/v2/query?org=${INFLUXDB_ORG}" \
+  --header "Authorization: Token ${INFLUXDB_TOKEN}" \
+  --data-urlencode "bucket=trading" \
+  --data-urlencode 'q=from(bucket:"trading") |> range(start:-5m) |> filter(fn: (r) => r._measurement == "klines") |> limit(n: 5)'
+
+echo "==== MongoDB query ===="
+mongosh --quiet "mongodb://localhost:27017/trading" \
+  --eval 'db.trades.find().sort({ts:-1}).limit(3).toArray()'
+
+# 8. Verify Producer sharing
 N_PRODUCERS=$(bee jobs list --filter 'producer' | wc -l)
-test "$N_PRODUCERS" -eq 1 && echo "✓ Producer sharing OK" || (echo "✗ $ASSERT_MSG"; exit 1)
+test "$N_PRODUCERS" -eq 1 && echo "✓ Producer sharing OK" || (echo "✗ Expected 1 binance Producer"; exit 1)
+
+# 9. Verify failover: kill the Node hosting the binance Producer; both strategies continue
+scripts/kill-node.sh node-1
+sleep 30
+N_RUNNING=$(bee jobs list --filter 'status=running' | wc -l)
+test "$N_RUNNING" -eq 2 && echo "✓ Failover OK" || (echo "✗ Expected both strategies to recover"; exit 1)
 ```
 
-#### 5. README.md and product-design.md updates
+#### 5. `scripts/.env.example`
 
-- README.md "Quickstart" section now reads: "See [`scripts/demo-quant.sh`](scripts/demo-quant.sh) for a 5-minute end-to-end walkthrough."
-- product-design.md §4.1 "Scenario A" now references `examples/quant_btc_strategy.sql` as the canonical canonical example.
+Documents the required user-supplied env vars:
+
+```
+# scripts/.env — copy to scripts/.env and fill in real values; never commit
+BINANCE_API_KEY=...           # optional for public market data
+NEWSAPI_KEY=...               # required; from https://newsapi.org
+INFLUXDB_URL=http://localhost:8086
+INFLUXDB_TOKEN=...            # required
+INFLUXDB_ORG=...              # required
+MONGODB_URI=mongodb://localhost:27017
+```
+
+#### 6. README.md and product-design.md updates
+
+- README.md "Quickstart" section now reads: "See [`scripts/demo-quant-prod.sh`](scripts/demo-quant-prod.sh) for a production-grade end-to-end walkthrough. You'll need to supply credentials in `scripts/.env` first."
+- product-design.md §4.1 "Scenario A" now references `examples/quant_btc_strategy.sql` as the canonical example, with the 6 prod plugins.
 
 **Acceptance criteria**
 
-- [ ] All 4 (+ 1 optional) mock plugin crates build independently via `cargo build --release`
-- [ ] Each plugin's `.so` is a separate file; one plugin's failure does not block the others
-- [ ] `bee plugin list` shows all 5 plugins with distinct `PluginId` (sha256 hashes) and their declared `abi_version`
-- [ ] All 4 Datasource registrations via `bee datasource create` succeed with the right `--adapter` names
-- [ ] `bee compile examples/quant_btc_strategy.sql` passes (0 errors, 0 warnings) — strict-mode `use` enforcement validated
-- [ ] `bee deploy examples/quant_btc_strategy.sql` deploys a Job that produces events to both mock sinks
-- [ ] `bee deploy examples/quant_btc_strategy_v2.sql` deploys a second Job; `bee jobs list` shows **both Jobs reference the same `binance` Datasource but have separate Streams**; the `binance_subscribe` Producer count is exactly 1 (StreamSignature sharing)
-- [ ] Killing the Node that hosts the `binance` Producer triggers Work-Stealing; both strategies continue
-- [ ] After all 10 ADRs' "Consequences" sections, run the demo and **explicitly check** each one:
+- [ ] All 6 production plugin crates build independently via `cargo build --release`
+- [ ] Each plugin's `.so`/`.dylib` is a separate file; one plugin's failure does not block the others
+- [ ] `bee plugin list` shows all 6 plugins with distinct `PluginId` (sha256 hashes) and their declared `abi_version`
+- [ ] All 4 Datasource registrations via `bee datasource create` succeed; the configs contain **only** connection-level fields (no `symbol`, no `interval`, no `collection`, no `measurement`, no `query`)
+- [ ] `bee compile examples/quant_btc_strategy.sql` passes (0 errors, 0 warnings) — strict-mode `use` enforcement validated; `symbol`/`interval`/`measurement`/`collection` are per-call args
+- [ ] `bee compile examples/quant_btc_strategy_backfill.sql` passes; the `from => '2024-06-01'` arg is accepted
+- [ ] `bee deploy examples/quant_btc_strategy.sql` deploys a Job that produces events to the real InfluxDB and real MongoDB
+- [ ] `bee deploy examples/quant_btc_strategy_v2.sql` deploys a second Job; `bee jobs list` shows **both Jobs reference the same `binance` Datasource but have separate Streams**; the `binance` Producer count is exactly 1 (StreamSignature sharing)
+- [ ] The backfill variant (`quant_btc_strategy_backfill.sql`) actually emits historical K-lines from 2024-06-01 to the HWM, then seamlessly transitions to live WS (verified by ordered timestamps at the Subscriber)
+- [ ] Killing the Node that hosts the `binance` Producer triggers Work-Stealing; both strategies continue within 1 Orphaned period (≤ 30s)
+- [ ] After all ADRs' "Consequences" sections, run the demo and **explicitly check** each one:
   - [ ] ADR-0001: data still flows P2P; control still goes through Raft
   - [ ] ADR-0002: Datasource Phase appears in DAG with `adapter` field
   - [ ] ADR-0003: shared Stream serves both strategies
-  - [ ] ADR-0004: Task state / checkpoints visible in KV (`bee kv get state/...`)
+  - [ ] ADR-0004: Task state / checkpoints visible in KV (`bee kv get state/...`); backfill state is visible too
   - [ ] ADR-0005: plugins are `cdylib`; ABI check passes
   - [ ] ADR-0006: SQL extensions (`ASOF JOIN`, `EMIT INTO`, UDFs) work
   - [ ] ADR-0007: cluster runs in simplified all-in-one topology
   - [ ] ADR-0008: scheduler policy observable (`bee cluster status`)
   - [ ] ADR-0009: dropping a new version of a plugin (e.g., `binance v2`) loads alongside v1; `bee plugin list` shows both
-  - [ ] ADR-0010: `use` syntax enforced; per-call args go in SQL; Provider / Stream separation works
-- [ ] README.md Quickstart links to `scripts/demo-quant.sh`
-- [ ] product-design.md §4.1 references `examples/quant_btc_strategy.sql`
-- [ ] **HITL review done**: first seed user walkthrough; feedback captured; gaps recorded as new stories or ADR amendments
+  - [ ] ADR-0010: `use` syntax enforced; per-call args go in SQL; Provider / Stream separation works; `collection` is per-call for mongodb
+  - [ ] ADR-0011: Stream identity scope; backfill-on-subscribe; per-Subscriber offsets
+- [ ] README.md Quickstart links to `scripts/demo-quant-prod.sh`
+- [ ] product-design.md §4.1 references `examples/quant_btc_strategy.sql` and the 6 prod plugins
+- [ ] **S33 HITL review done**: first seed user walkthrough; feedback captured; gaps recorded as new stories or ADR amendments
+
+---
+
+## Phase 0.6 — Performance showcase demo (AFK)
+
+> **Why this story exists**: the quant spike (S33) proves correctness and end-to-end flow under real external systems, but it does not isolate **performance**. S41 is the integration-test demo that **measures** Bee's throughput, latency, and scaling under controlled workloads, using classic CS problems (Fibonacci, prime sieve, multi-stream analytics) that are easy to verify and easy to reason about. This is also the demo a new evaluator can run in 5 minutes to see "what does Bee actually do, fast?" — independent of any third-party service.
+>
+> **Why Fibonacci**: it is the canonical streaming-state problem — every step depends on the previous N (here N=2) values, which is exactly what Bee's stateful Handler UDF + KV-stored state is designed for. It exercises the runtime path that the quant strategy also uses, in the smallest possible surface area.
+>
+> **Why a prime sieve**: it is the canonical distributed-scheduling problem — each sieve pass is a self-contained filter that can run in parallel on different Nodes. It exercises cross-Node data channels, Work-Stealing, and the runtime scheduler's ability to keep all sieve passes busy.
+>
+> **Why a multi-stream aggregation**: it exercises the SQL runtime (`ASOF JOIN`, `WINDOW TUMBLING`, multi-sink `EMIT INTO`) on a realistic data shape (clicks / views / purchases per user). It is the demo that most closely mirrors a real Bee user workload.
+
+### S41 · Performance showcase: Fibonacci + prime sieve + multi-stream analytics (5-minute demo)
+
+- **Type**: AFK
+- **Blocked by**: S00, S05, S15, S17
+- **ADRs**: 0006, 0008, 0010
+
+**What this delivers**
+
+- 3 demo SQL pipelines under `examples/performance/`, each independently runnable
+- 1 stateful Handler plugin (`bee-plugin-perf-fib`) — the only domain-specific code in the demo, and it is intentionally minimal (≈ 30 lines of real logic)
+- 1 one-click demo script (`scripts/demo-perf.sh`) that runs all 3 demos on a configurable cluster size (1 / 3 / 5 Nodes) and prints a measured performance table
+- 1 README (`examples/performance/README.md`) explaining the math, the Bee design choices, and how to read the numbers
+- A new "Performance Demos" section in `README.md` and a new "§4.4 Performance showcase" in `product-design.md` so evaluators can find it without reading stories.md
+
+**Why each demo**
+
+| Demo | What it shows | Why it matters |
+| --- | --- | --- |
+| **Fibonacci** | Stateful Handler UDF + KV-stored sliding state | Smallest possible streaming-compute surface; correctness is trivially checkable (compare to known sequence); same code path the quant strategy uses |
+| **Prime sieve** | Distributed cross-Node pipelines + parallel scheduling + Work-Stealing | Each sieve pass is a self-contained Phase that the runtime can place on a different Node; tests cross-Node data channels and recovery |
+| **Multi-stream analytics** | `ASOF JOIN` + `WINDOW TUMBLING` + multi-sink `EMIT INTO` | The "real Bee user" shape; closest to a production workload |
+
+**Files**
+
+#### Crate: `plugins/bee-plugin-perf-fib/` (the only domain-specific code)
+
+- `plugins/bee-plugin-perf-fib/Cargo.toml` — `crate-type = ["cdylib"]`; deps: `bee-plugin-sdk`, `tokio`, `serde`, `bincode` (no HTTP / DB / ML)
+- `plugins/bee-plugin-perf-fib/src/lib.rs` — exports two SQL UDFs:
+  - `fib_step(n: u64) -> i128` — stateful; reads its own previous two emitted values from KV (`state/handler/<stream_id>/fib_step/`), computes `prev2 + prev1`, stores the new pair, emits the new value
+  - `fib_seed() -> i128` — returns `0` (n=0) or `1` (n=1) based on the call's `n` argument
+- `plugins/bee-plugin-perf-fib/tests/state.rs` — unit tests for state round-trip
+- `plugins/bee-plugin-perf-fib/README.md` — documents the UDFs and the KV key layout
+
+#### SQL pipelines (no business code, only Bee SQL)
+
+- `examples/performance/fibonacci.sql` — streaming fib via `fib_step`
+- `examples/performance/prime_sieve.sql` — distributed Eratosthenes via multiple parallel Phases
+- `examples/performance/multi_stream_analytics.sql` — clicks / views / purchases → 1-min tumbling window aggregation
+
+#### Demo script
+
+- `scripts/demo-perf.sh` — builds the plugin, starts an N-node cluster (1 / 3 / 5, configurable via `BEE_NODES`), deploys all 3 pipelines, measures wall-clock time, prints a table
+
+#### Docs
+
+- `examples/performance/README.md` — the math, the Bee design, how to read the numbers
+- `README.md` — new "Performance Demos" section linking to the script
+- `docs/product-design.md` — new "§4.4 Performance showcase" with the 3 scenarios
+
+#### Built-in test fixtures (small addition to Bee core, not a plugin)
+
+For these demos to be self-contained (no external services), Bee core needs a small built-in test-fixture generator. Add to `bee-dsl-sql` (or wherever SQL table functions live):
+
+- `generate_series(start: i64, end: i64) -> Stream<i64>` — emits one event per integer in `[start, end]`
+- `generate_events(schema: StructType, count: u64, seed: u64) -> Stream<StructType>` — emits `count` deterministic pseudo-random events
+
+These are **test-only** features; they live in a `#[cfg(feature = "test-fixtures")]` module so they are not in the production binary.
+
+---
+
+#### Demo 1: `examples/performance/fibonacci.sql`
+
+```sql
+use perf_fib;
+
+CREATE SOURCE naturals AS
+SELECT n FROM generate_series(1, 1000000);
+
+CREATE VIEW fib_stream AS
+SELECT
+    n,
+    fib_step(n) AS fib_value
+FROM naturals;
+
+-- Sanity check: emit the first 20 fib values to the console sink
+EMIT INTO console
+SELECT n, fib_value FROM fib_stream WHERE n <= 20;
+
+-- For perf measurement: do NOT emit; just count how many we computed
+-- (perf is measured by wall-clock of the run, not by sink output)
+```
+
+**Why this design**: `fib_step` reads its own previous 2 emitted values from KV (per ADR-0004), so Bee's state-management path is exercised end-to-end. The first 20 values are emitted to the console so a human reviewer can sanity-check correctness against the known sequence `0, 1, 1, 2, 3, 5, 8, 13, 21, 34, ...`. The full 1M run measures throughput.
+
+#### Demo 2: `examples/performance/prime_sieve.sql`
+
+```sql
+-- Phase 1: emit all integers in [2, 10^8]
+CREATE SOURCE naturals AS
+SELECT n FROM generate_series(2, 100000000);
+
+-- Phase 2..k: one Phase per discovered prime; each Phase filters out multiples of that prime
+-- The runtime scheduler should place these Phases on different Nodes (cross-Node data channels)
+-- to maximize throughput.
+
+CREATE VIEW sieved_2 AS
+SELECT n FROM naturals WHERE n = 2 OR n % 2 != 0;
+
+CREATE VIEW sieved_3 AS
+SELECT n FROM sieved_2 WHERE n = 3 OR n % 3 != 0;
+
+CREATE VIEW sieved_5 AS
+SELECT n FROM sieved_3 WHERE n = 5 OR n % 5 != 0;
+
+-- ... (continues for primes 7, 11, 13, ... up to sqrt(10^8) ≈ 10^4)
+-- For demo brevity, the file ships with the first 20 primes; a perf run can extend it
+-- to 100 or 1000 primes via a generator script
+
+-- Output: count of primes discovered
+CREATE VIEW prime_count AS
+SELECT count(*) AS n_primes FROM sieved_5;  -- adjust to deepest sieve
+
+EMIT INTO console SELECT * FROM prime_count;
+```
+
+**Why this design**: each `sieved_p` is a separate Phase. The runtime scheduler (ADR-0008) is responsible for placing them on different Nodes to maximize throughput. Cross-Node data channels (ADR-0001) carry the intermediate result. Killing one Node mid-run should trigger Work-Stealing and the sieve should continue (test of ADR-0001 §Failover).
+
+**Expected count** (sanity check): there are 5,761,455 primes below 10^8. The console output must match this number — a hard correctness check.
+
+#### Demo 3: `examples/performance/multi_stream_analytics.sql`
+
+```sql
+-- 3 source streams of test events
+CREATE SOURCE clicks AS
+SELECT user_id, ts, page FROM generate_events(
+    struct_pack(user_id INT, ts TIMESTAMP, page STRING),
+    100000, seed => 42
+);
+
+CREATE SOURCE views AS
+SELECT user_id, ts, duration_ms INT FROM generate_events(
+    struct_pack(user_id INT, ts TIMESTAMP, duration_ms INT),
+    50000, seed => 43
+);
+
+CREATE SOURCE purchases AS
+SELECT user_id, ts, amount DECIMAL FROM generate_events(
+    struct_pack(user_id INT, ts TIMESTAMP, amount DECIMAL),
+    10000, seed => 44
+);
+
+-- 1-min tumbling window aggregation joined across the 3 streams
+CREATE VIEW per_minute AS
+SELECT
+    window_start(c.ts, INTERVAL '1' MINUTE)  AS minute,
+    count(DISTINCT c.user_id)                AS unique_clickers,
+    count(DISTINCT p.user_id)                AS unique_buyers,
+    sum(p.amount)                            AS revenue
+FROM clicks c
+LEFT ASOF JOIN views     v ON c.user_id = v.user_id AND c.ts >= v.ts
+LEFT ASOF JOIN purchases p ON c.user_id = p.user_id AND c.ts >= p.ts
+WINDOW TUMBLING (c.ts, INTERVAL '1' MINUTE)
+GROUP BY minute;
+
+EMIT INTO console
+SELECT * FROM per_minute ORDER BY minute LIMIT 60;  -- first hour
+```
+
+**Why this design**: 3 input streams, `ASOF JOIN` to align by `user_id` and time, `WINDOW TUMBLING` for the 1-min buckets, `EMIT INTO` to a console sink. This is the most realistic of the 3 demos and the closest to what a Bee user would actually deploy.
+
+---
+
+**Performance script: `scripts/demo-perf.sh`**
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Configurable: number of Bee Nodes
+BEE_NODES="${BEE_NODES:-3}"
+
+# 0. Build the perf plugin
+(cd plugins/bee-plugin-perf-fib && cargo build --release)
+
+# 1. Start an N-node cluster
+scripts/start-cluster.sh --nodes "$BEE_NODES"
+
+# 2. Load the plugin on all Nodes
+scripts/load-plugin.sh plugins/bee-plugin-perf-fib/target/release/libbee_plugin_perf_fib.so
+
+# 3. Demo 1: Fibonacci
+echo "==== Fibonacci (1M values) ===="
+T0=$(date +%s%N)
+bee deploy examples/performance/fibonacci.sql
+bee jobs wait --job fib --until done
+T1=$(date +%s%N)
+echo "fib throughput: $(( (1000000 * 1_000_000_000) / (T1 - T0) )) events/sec"
+
+# 4. Demo 2: prime sieve
+echo "==== Prime sieve (≤ 10^8) ===="
+T0=$(date +%s%N)
+bee deploy examples/performance/prime_sieve.sql
+bee jobs wait --job prime_sieve --until done
+T1=$(date +%s%N)
+echo "sieve wall-clock: $(( (T1 - T0) / 1_000_000 )) ms"
+
+# Verify correctness
+N=$(bee jobs log --job prime_sieve --last 1 | jq -r .n_primes)
+test "$N" -eq 5761455 && echo "✓ prime count correct" || (echo "✗ expected 5761455 got $N"; exit 1)
+
+# 5. Demo 3: multi-stream analytics
+echo "==== Multi-stream analytics (160K events) ===="
+T0=$(date +%s%N)
+bee deploy examples/performance/multi_stream_analytics.sql
+bee jobs wait --job analytics --until done
+T1=$(date +%s%N)
+echo "analytics throughput: $(( (160000 * 1_000_000_000) / (T1 - T0) )) events/sec"
+
+# 6. Print measured table
+cat <<EOF
+
+==== Measured performance (cluster: $BEE_NODES Nodes) ====
+| Demo                      | Wall-clock   | Throughput             |
+|---------------------------|--------------|------------------------|
+| Fibonacci (1M values)     | TBD ms       | TBD K events/sec       |
+| Prime sieve (≤ 10^8)      | TBD ms       | TBD M ints screened/s  |
+| Multi-stream analytics    | TBD ms       | TBD K events/sec       |
+EOF
+```
+
+**Performance numbers**
+
+The script **measures** and prints the numbers — it does **not** claim a target. Targets are filled in after the first run, validated on subsequent runs, and recorded in the README and product-design. Initial targets to validate:
+
+| Demo | 1 Node | 3 Nodes | 5 Nodes |
+| --- | --- | --- | --- |
+| Fibonacci (1M values) | TBD ms | TBD ms | TBD ms |
+| Prime sieve (≤ 10^8, 20 primes) | TBD ms | TBD ms | TBD ms |
+| Multi-stream analytics (160K events) | TBD ms | TBD ms | TBD ms |
+
+Targets get filled in (and may be revised) once a baseline cluster exists.
+
+**Acceptance criteria**
+
+- [ ] `plugins/bee-plugin-perf-fib/` is an independent workspace member; `Cargo.toml` declares `crate-type = ["cdylib"]`
+- [ ] `fib_step` is correct against the first 20 known Fibonacci values (unit test)
+- [ ] `fib_step` state round-trip: compute 100 values, restart the plugin mid-run, verify state is restored and the 101st value is correct
+- [ ] `generate_series` and `generate_events` are gated behind `#[cfg(feature = "test-fixtures")]` and not in the production binary
+- [ ] `examples/performance/fibonacci.sql` compiles and emits the first 20 fib values to the console in the correct order
+- [ ] `examples/performance/prime_sieve.sql` compiles and the console emits `n_primes = 5761455` (hard correctness check for ≤ 10^8)
+- [ ] `examples/performance/multi_stream_analytics.sql` compiles and emits a non-empty per-minute aggregation
+- [ ] `scripts/demo-perf.sh` runs all 3 demos on a 3-node cluster and prints a measured performance table
+- [ ] Killing one Node mid-sieve does not lose any prime (Work-Stealing works correctly)
+- [ ] README.md "Performance Demos" section links to `scripts/demo-perf.sh` and `examples/performance/README.md`
+- [ ] `docs/product-design.md` §4.4 "Performance showcase" describes the 3 demos and links to the script
+- [ ] Performance table is filled in with measured numbers (not "TBD") by the time the story is done — even rough baselines count, but the script must print them every run
 
 ---
 

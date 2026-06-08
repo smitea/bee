@@ -24,16 +24,17 @@
 | [docs/product-design.md](docs/product-design.md) | Product vision / users / scenarios / business model | Product / early users / partners |
 | [**docs/architecture.md**](docs/architecture.md) | **System architecture (OSS format)**: Why / Goals / Principles / Subsystems / Operations / Security / Performance | Evaluators / operators / contributors |
 | [**docs/internals.md**](docs/internals.md) | **Implementation details**: BRP wire format / 8-crate boundary / Plugin SDK contract / KV internal layout | Implementers / advanced contributors |
-| [docs/stories.md](docs/stories.md) | **32 implementation stories + S33 quant spike** (vertical slice breakdown) | Implementers |
+| [docs/stories.md](docs/stories.md) | **42 implementation stories + S33/S41 spikes** (vertical slice breakdown) | Implementers |
 | [docs/adr/](docs/adr/) | Irreversible architecture decision records (ADR) | Implementers |
 
 ## Quickstart (after implementation)
 
 > Once the first AFK stories land, the canonical "5-minute end-to-end demo" lives at:
 >
-> - `scripts/demo-quant.sh` — starts a 3-node cluster, loads 4+ mock plugins, registers Datasources, deploys two quant strategies, verifies Producer sharing, asserts all 10 ADRs' Consequences
+> - `scripts/demo-quant-prod.sh` — starts a 3-node cluster, loads 6 production plugins (Binance WS, NewsAPI, InfluxDB v2, MongoDB, ta-indicators, FinBERT ONNX), registers Datasources, deploys two quant strategies + a backfill variant, verifies Producer sharing, asserts all 11 ADRs' Consequences
 > - `examples/quant_btc_strategy.sql` — the canonical quant pipeline (BTC K-line + news sentiment + decision tree + InfluxDB/MongoDB sinks)
-> - `plugins/bee-plugin-{binance,google-news,influxdb,mongodb,ta-lib}-mock/` — four independent `cdylib` mock plugins (one per Datasource; no business code in Bee core)
+> - `plugins/bee-plugin-{binance,google-news,influxdb,mongodb,ta-indicators,onnx-ml}/` — six independent `cdylib` production plugins (no business code in Bee core; each is reusable by any user that needs that data source)
+> - **`scripts/demo-perf.sh`** — the **5-minute performance showcase**: Fibonacci streaming + distributed prime sieve + multi-stream analytics, with a measured performance table across 1 / 3 / 5 Nodes. This is the demo a new evaluator can run to see "what does Bee actually do, fast?" — independent of any third-party service. See [examples/performance/README.md](examples/performance/README.md) and [docs/product-design.md §4.4](docs/product-design.md#44-performance-showcase)
 
 ## Design Goals
 
@@ -74,8 +75,13 @@ Bee compiles user-authored SQL / Lua Pipelines into Phase DAGs; the Control Plan
         ├── 0007-simplified-raft-topology-mvp.md
         ├── 0008-optimizer-scheduler-adaptive.md
         ├── 0009-plugin-multiversion-hash-abi.md
-        └── 0010-datasource-managed-entity.md
+        ├── 0010-datasource-managed-entity.md
+        └── 0011-stream-identity-and-backfill.md
 ```
+
+> Examples live under `examples/`:
+> - `examples/quant_btc_strategy.sql` — the canonical quant pipeline (S40)
+> - `examples/performance/` — the Fibonacci + prime sieve + multi-stream analytics demos (S41)
 
 > Source directories (`Cargo.toml`, `crates/`, …) will be created in roadmap stage 0.1.
 
@@ -86,7 +92,7 @@ Bee compiles user-authored SQL / Lua Pipelines into Phase DAGs; the Control Plan
 - [ ] **0.1 – 0.2** Single-node works: `bee run pipeline.sql` shows the stream. Demo to seed users.
 - [ ] **0.3 – 0.4** Small cluster: 3-node Failover demo. **First external paying user**.
 - [ ] **0.5** Rate-limit sharing + cross-Pipeline: scenario A (quant) goes to production, **first quant strategy in production**.
-- [ ] **0.6 – 0.7** Plugin system (Rust plugins) + scheduling optimizer. **3 external Adapters in the community**.
+- [ ] **0.6 – 0.7** Plugin system (Rust plugins) + scheduling optimizer. **3 external Adapters in the community** + performance showcase demo (S41).
 - [ ] **0.8** SQL performance tuning: ms-level micro-batch / UDF profiling / Hint syntax. **Quant scenario tunable**.
 - [ ] **0.9 – 1.0** Production-ready: observability panel + Schema evolution. **Public 1.0 announcement**.
 - [ ] **1.x** Enterprise features + Lua runtime + docs site + training.

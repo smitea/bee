@@ -114,7 +114,7 @@ Pipeline Author ──writes SQL/Lua──▶ Bee Cluster
 
 > **Important**: `binance` / `google_news` / `influxdb` / `mongodb` / `decision_tree` / `ASOF JOIN` are all **third-party plugins or SQL extensions**, **not in Bee core**. Bee core provides: DSL framework, `use` compiler, Adapter / Handler trait, Registry, Stream sharing, cross-Pipeline edges, Failover. The concrete ticker/news/UDF implementations are provided by the community or user teams in independent Plugin crates, compiled as `cdylib` and loaded by Bee.
 
-> **Canonical example**: see [`examples/quant_btc_strategy.sql`](../../examples/quant_btc_strategy.sql) for the full SQL, and [`scripts/demo-quant.sh`](../../scripts/demo-quant.sh) for a one-click end-to-end run. The four `binance` / `google_news` / `influxdb` / `mongodb` Datasources each come from an **independent mock Plugin crate** under `plugins/` — no business code in Bee core, maximum reusability.
+> **Canonical example**: see [`examples/quant_btc_strategy.sql`](../../examples/quant_btc_strategy.sql) for the full SQL, and [`scripts/demo-quant-prod.sh`](../../scripts/demo-quant-prod.sh) for a one-click end-to-end run against real external systems. The four `binance` / `google_news` / `influxdb` / `mongodb` Datasources each come from an **independent production-grade Plugin crate** under `plugins/` (real Binance WS, real NewsAPI, real InfluxDB v2, real MongoDB) — no business code in Bee core, maximum reusability. The two Handler plugins (`ta-indicators` with `yata`/`ta-lib`, `onnx-ml` with `tract` + FinBERT) ship similarly. The full deployment story is S33–S40 in [`docs/stories.md`](./stories.md).
 
 **User's workload**: write a SQL snippet; Bee handles the rest automatically (including: Datasource registration, Stream sharing, Binance credential management, rate-limit avoidance).
 
@@ -140,6 +140,55 @@ Pipeline Author ──writes SQL/Lua──▶ Bee Cluster
 - 4 downstream Pipelines each subscribe and compute different metrics.
 - Any downstream Pipeline going down doesn't affect the others.
 - Upstream rate limit / quota is managed centrally on the Producer side.
+
+### Scenario D: Performance showcase (the 5-minute evaluator demo)
+
+**User story**: As a new evaluator (engineer, PM, or seed user), I want to run Bee on my laptop, see three classic CS problems solved end-to-end, and get a measurable performance table across 1 / 3 / 5 Nodes — in under 5 minutes, with no third-party services required.
+
+**How Bee supports it**:
+
+- A built-in (test-fixture) `generate_series` and `generate_events` produce deterministic streams — no external system required
+- Three demo SQL pipelines showcase three different Bee capabilities
+- One stateful Handler plugin (`bee-plugin-perf-fib`) provides the only domain-specific code in the entire demo (≈ 30 lines of real logic)
+- One script (`scripts/demo-perf.sh`) builds, starts a cluster, runs all three, prints a measured performance table
+
+**The three demos**
+
+| Demo | What it shows | Why it matters |
+| --- | --- | --- |
+| **Fibonacci (1M values)** | Stateful Handler UDF + KV-stored sliding state | Smallest possible streaming-compute surface; correctness is trivially checkable (compare to known sequence `0, 1, 1, 2, 3, 5, 8, 13, 21, 34, …`); same code path the quant strategy uses |
+| **Prime sieve (≤ 10^8)** | Distributed cross-Node pipelines + parallel scheduling + Work-Stealing | Each sieve pass is a self-contained Phase that the runtime can place on a different Node; tests cross-Node data channels and recovery. Hard correctness check: there are exactly **5,761,455** primes below 10^8 |
+| **Multi-stream analytics (160K events)** | `ASOF JOIN` + `WINDOW TUMBLING` + multi-sink `EMIT INTO` | The "real Bee user" shape; closest to a production workload (clicks / views / purchases per user) |
+
+**How to run it**
+
+```bash
+# 1-node baseline
+BEE_NODES=1 scripts/demo-perf.sh
+
+# 3-node cluster
+BEE_NODES=3 scripts/demo-perf.sh
+
+# 5-node cluster
+BEE_NODES=5 scripts/demo-perf.sh
+```
+
+**Sample output** (numbers filled in once measured, not claimed up-front):
+
+```
+==== Measured performance (cluster: 3 Nodes) ====
+| Demo                      | Wall-clock   | Throughput             |
+|---------------------------|--------------|------------------------|
+| Fibonacci (1M values)     |   420 ms     |   2.4 M events/sec     |
+| Prime sieve (≤ 10^8)      |  3.8 s       |  26.3 M ints/screened  |
+| Multi-stream analytics    |  180 ms      |  888 K events/sec      |
+```
+
+The script **measures and prints** the numbers; the user reads off the row that matches their cluster size. Targets are validated on first run and refined on subsequent runs.
+
+**Why this is in the product design (not just internal docs)**: it is the canonical "what does Bee do?" answer for an outsider. The Fibonacci demo is the smallest possible test of Bee's state-management path. The prime sieve is the smallest possible test of Bee's distributed-scheduling path. The multi-stream analytics is the smallest possible test of Bee's SQL runtime. Together they cover the three pillars (state / scheduling / SQL) of the system in 5 minutes and zero external dependencies.
+
+See [`scripts/demo-perf.sh`](../../scripts/demo-perf.sh) and [`examples/performance/README.md`](../../examples/performance/README.md). Implementation tracked as **S41** in [`docs/stories.md`](./stories.md).
 
 ---
 
@@ -351,7 +400,7 @@ Aligned with [docs/architecture.md §12.1](./architecture.md#121-roadmap) and [d
 | --- | --- |
 | **0.1 – 0.2** | **Single-node works**: `bee run pipeline.sql` locally shows the stream. Demo to seed users. |
 | **0.3 – 0.4** | **Small cluster**: 3-node Failover demo. **First external paying user**. |
-| **0.5** | **Rate-limit sharing + cross-Pipeline**: scenario A (quant) goes to production, **first quant strategy in production**. |
+| **0.5** | **Rate-limit sharing + cross-Pipeline**: scenario A (quant) goes to production, **first quant strategy in production** (S33–S40 milestone). |
 | **0.6 – 0.7** | **Plugin system**: third parties can write Adapters; **3 external Adapters in the community**. |
 | **0.8 – 1.0** | **Production-ready**: observability panel + Schema evolution; **public 1.0 announcement**. |
 | **1.x** | Enterprise features + docs site + training. |

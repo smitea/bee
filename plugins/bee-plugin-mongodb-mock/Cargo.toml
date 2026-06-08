@@ -1,0 +1,20 @@
+[package]
+name = "bee-plugin-mongodb-mock"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Bee mock plugin: mongodb_emit Output Adapter (JSONL file sink)"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+bee-plugin-sdk = { path = "../../crates/bee-plugin-sdk" }
+bee-adapter = { path = "../../crates/bee-adapter" }
+tokio = { workspace = true, features = ["fs"] }
+serde_json = "1"
+thiserror = "2"
+
+[lints]
+workspace = true
