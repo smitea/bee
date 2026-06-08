@@ -1,28 +1,31 @@
-//! `bee-plugin-mongodb-mock` — S33 mock plugin.
+//! `bee-plugin-mongodb` — production-grade reference implementation.
 //!
 //! Implements the `mongodb_emit` Output Adapter. Writes each emitted
 //! Event as a single JSON object on its own line (JSONL) to a local
 //! file — default `/tmp/bee_demo_mongodb.jsonl`. The file is opened
 //! in append mode so multiple emitters and restarts accumulate rows
-//! in chronological order.
+//! in chronological order. Plugin scaffold is production-grade
+//! (cdylib + FFI vtable); the actual sink is a jsonl-file
+//! placeholder that will be replaced by the real MongoDB driver in
+//! S37.
 //!
 //! ## Architecture
 //!
-//! - [`MongodbMockFactory`]: produces the
+//! - [`MongodbFactory`]: produces the
 //!   [`bee_plugin_sdk::PluginManifest`] + [`bee_plugin_sdk::PluginHandle`]
 //!   for the host.
-//! - [`MongodbMockOutput`]: the actual [`bee_adapter::OutputAdapter`]
+//! - [`MongodbOutput`]: the actual [`bee_adapter::OutputAdapter`]
 //!   implementation. Wraps a `tokio::fs::File` in a
 //!   `tokio::io::BufWriter` for batched writes and flushes on close.
 //! - `cdylib_plugin!(Factory)` invocation at the bottom generates
 //!   the FFI entry symbols.
 //!
-//! The mock writes **structured** records (not raw payloads):
-//! every line is a JSON object with the destination
-//! (`_database`, `_collection`), the event envelope
-//! (`timestamp`, `sequence`), and the decoded payload string. That
-//! matches what a downstream `order_decision` consumer would expect
-//! when replaying the demo file.
+//! The placeholder writes **structured** records (not raw
+//! payloads): every line is a JSON object with the destination
+//! (`_database`, `_collection`), the event envelope (`timestamp`,
+//! `sequence`), and the decoded payload string. That matches what
+//! a downstream `order_decision` consumer would expect when
+//! replaying the demo file.
 
 use std::path::PathBuf;
 
@@ -36,9 +39,9 @@ use tokio::io::{AsyncWriteExt, BufWriter};
 /// Default sink path used when the config's `path` field is `None`.
 pub const DEFAULT_PATH: &str = "/tmp/bee_demo_mongodb.jsonl";
 
-/// Configuration for the mock mongodb output.
+/// Configuration for the mongodb output.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct MongodbMockConfig {
+pub struct MongodbConfig {
     /// Target database name. Embedded in every emitted line as
     /// `_database` for downstream routing.
     pub database: String,
@@ -49,7 +52,7 @@ pub struct MongodbMockConfig {
     pub path: Option<PathBuf>,
 }
 
-impl Default for MongodbMockConfig {
+impl Default for MongodbConfig {
     fn default() -> Self {
         Self {
             database: "trading".into(),
@@ -59,7 +62,7 @@ impl Default for MongodbMockConfig {
     }
 }
 
-impl MongodbMockConfig {
+impl MongodbConfig {
     /// Resolve the configured path or fall back to [`DEFAULT_PATH`].
     pub fn resolved_path(&self) -> PathBuf {
         self.path
@@ -68,15 +71,15 @@ impl MongodbMockConfig {
     }
 }
 
-/// Mock `mongodb_emit` Output Adapter. Appends one JSON object per
+/// `mongodb_emit` Output Adapter. Appends one JSON object per
 /// event to a local file.
-pub struct MongodbMockOutput {
-    config: MongodbMockConfig,
+pub struct MongodbOutput {
+    config: MongodbConfig,
     writer: BufWriter<tokio::fs::File>,
 }
 
-impl OutputAdapter for MongodbMockOutput {
-    type Config = MongodbMockConfig;
+impl OutputAdapter for MongodbOutput {
+    type Config = MongodbConfig;
 
     async fn open(config: Self::Config) -> AdapterResult<Self> {
         let path = config.resolved_path();
@@ -123,11 +126,11 @@ impl OutputAdapter for MongodbMockOutput {
     }
 }
 
-/// Factory for the mongodb mock plugin. Holds no state; both
-/// methods are pure.
-pub struct MongodbMockFactory;
+/// Factory for the mongodb plugin. Holds no state; both methods
+/// are pure.
+pub struct MongodbFactory;
 
-impl Factory for MongodbMockFactory {
+impl Factory for MongodbFactory {
     fn manifest() -> PluginManifest {
         PluginManifest {
             name: PluginName("mongodb".into()),
@@ -162,10 +165,10 @@ mod vtable_shim {
     use bee_plugin_sdk::event::{decode_event, EventBytes};
     use bee_plugin_sdk::vtable::OutputAdapterVtable;
 
-    use super::{MongodbMockConfig, MongodbMockOutput};
+    use super::{MongodbConfig, MongodbOutput};
 
     pub struct Ctx {
-        pub adapter: Mutex<MongodbMockOutput>,
+        pub adapter: Mutex<MongodbOutput>,
     }
 
     fn block_on<F: std::future::Future>(f: F) -> F::Output {
@@ -182,11 +185,11 @@ mod vtable_shim {
         _err_out: *mut EventBytes,
     ) -> *mut std::ffi::c_void {
         let bytes = std::slice::from_raw_parts(config_ptr, config_len);
-        let cfg: MongodbMockConfig = match bincode::deserialize(bytes) {
+        let cfg: MongodbConfig = match bincode::deserialize(bytes) {
             Ok(c) => c,
             Err(_) => return std::ptr::null_mut(),
         };
-        let adapter = match block_on(MongodbMockOutput::open(cfg)) {
+        let adapter = match block_on(MongodbOutput::open(cfg)) {
             Ok(a) => a,
             Err(_) => return std::ptr::null_mut(),
         };
@@ -236,7 +239,7 @@ mod vtable_shim {
     };
 }
 
-bee_plugin_sdk::cdylib_plugin!(MongodbMockFactory);
+bee_plugin_sdk::cdylib_plugin!(MongodbFactory);
 
 #[cfg(test)]
 mod tests {
@@ -267,11 +270,11 @@ mod tests {
     async fn emit_writes_jsonl_per_event() {
         let path = test_path("emit_writes_jsonl_per_event");
         clean(&path).await;
-        let cfg = MongodbMockConfig {
+        let cfg = MongodbConfig {
             path: Some(path.clone()),
             ..Default::default()
         };
-        let mut out = MongodbMockOutput::open(cfg).await.unwrap();
+        let mut out = MongodbOutput::open(cfg).await.unwrap();
         for i in 0..3 {
             out.emit(make_event(i, format!("row-{i}").as_bytes()))
                 .await
@@ -298,11 +301,11 @@ mod tests {
     async fn payload_is_preserved_as_string() {
         let path = test_path("payload_is_preserved_as_string");
         clean(&path).await;
-        let cfg = MongodbMockConfig {
+        let cfg = MongodbConfig {
             path: Some(path.clone()),
             ..Default::default()
         };
-        let mut out = MongodbMockOutput::open(cfg).await.unwrap();
+        let mut out = MongodbOutput::open(cfg).await.unwrap();
         out.emit(make_event(0, b"hello world payload"))
             .await
             .unwrap();
@@ -316,14 +319,14 @@ mod tests {
 
     #[test]
     fn default_path_is_tmp_bee_demo() {
-        let cfg = MongodbMockConfig::default();
+        let cfg = MongodbConfig::default();
         assert_eq!(cfg.resolved_path(), PathBuf::from(DEFAULT_PATH));
         assert_eq!(DEFAULT_PATH, "/tmp/bee_demo_mongodb.jsonl");
     }
 
     #[test]
     fn factory_manifest_declares_emit_adapter() {
-        let m = MongodbMockFactory::manifest();
+        let m = MongodbFactory::manifest();
         assert_eq!(m.name.0, "mongodb");
         assert_eq!(m.feature_version, "1.0.0");
         assert_eq!(m.abi_version, "v1");
@@ -334,7 +337,7 @@ mod tests {
 
     #[test]
     fn factory_init_returns_handle_with_manifest() {
-        let h = MongodbMockFactory::init().unwrap();
+        let h = MongodbFactory::init().unwrap();
         assert_eq!(h.manifest.name.0, "mongodb");
         assert_eq!(h.manifest.adapters.len(), 1);
         assert_eq!(h.manifest.adapters[0].name, "emit");
@@ -345,11 +348,11 @@ mod tests {
     fn vtable_open_emit_close_writes_jsonl() {
         let path = test_path("vtable_open_emit_close_writes_jsonl");
         let _ = std::fs::remove_file(&path);
-        let cfg = MongodbMockConfig {
+        let cfg = MongodbConfig {
             path: Some(path.clone()),
             ..Default::default()
         };
-        let handle = MongodbMockFactory::init().expect("init");
+        let handle = MongodbFactory::init().expect("init");
         let vtable = *handle
             .output_adapters
             .get("emit")
@@ -387,7 +390,7 @@ mod tests {
 
     #[test]
     fn vtable_open_with_garbage_config_returns_null() {
-        let handle = MongodbMockFactory::init().expect("init");
+        let handle = MongodbFactory::init().expect("init");
         let vtable = *handle
             .output_adapters
             .get("emit")

@@ -13,11 +13,11 @@ members = [
     "crates/bee-plugin-sdk",
     "crates/bee-kv-test",
     "bee",
-    "plugins/bee-plugin-binance-mock",
-    "plugins/bee-plugin-google-news-mock",
-    "plugins/bee-plugin-influxdb-mock",
-    "plugins/bee-plugin-mongodb-mock",
-    "plugins/bee-plugin-ta-lib-mock",
+    "plugins/quant/bee-plugin-binance",
+    "plugins/quant/bee-plugin-google-news",
+    "plugins/quant/bee-plugin-influxdb",
+    "plugins/quant/bee-plugin-mongodb",
+    "plugins/quant/bee-plugin-ta-lib",
 ]
 
 [workspace.package]

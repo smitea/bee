@@ -11,7 +11,7 @@
 **Reference docs:**
 - Design: `docs/superpowers/specs/2026-06-07-s17-stream-signature-design.md` (§1–§7)
 - Story acceptance: `docs/stories.md` §S17 (lines 483–503)
-- ADR-0011: `docs/adr/0011-stream-identity-and-backfill.md` (uncommitted, in working tree)
+- ADR-0011: `docs/best-practices/quant/adr/0011-stream-identity-and-backfill.md` (uncommitted, in working tree)
 
 **Pre-flight (read these before starting):**
 - `CONTEXT.md` — domain vocabulary (StreamSignature, Producer, Subscriber, Datasource)

@@ -1,17 +1,17 @@
 [package]
-name = "bee-plugin-influxdb-mock"
+name = "bee-plugin-influxdb"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "Bee mock plugin: influxdb_emit Output Adapter (log file sink)"
+description = "Bee 量化交易参考实现:实时时序 OutputAdapter。Plugin 结构是 production-grade;实际 sink 是日志文件占位。"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-bee-plugin-sdk = { path = "../../crates/bee-plugin-sdk" }
-bee-adapter = { path = "../../crates/bee-adapter" }
+bee-plugin-sdk = { path = "../../../crates/bee-plugin-sdk" }
+bee-adapter = { path = "../../../crates/bee-adapter" }
 tokio = { workspace = true, features = ["fs"] }
 thiserror = "2"
 bincode = "1"

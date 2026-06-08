@@ -16,7 +16,7 @@ This directory contains the architectural decisions made during the v2 design of
 | [0008](./0008-optimizer-scheduler-adaptive.md) | Optimizer and Scheduler responsibilities; runtime adaptive optimization with MLFQ default | Accepted | Runtime |
 | [0009](./0009-plugin-multiversion-hash-abi.md) | Plugin multi-version coexistence; hash-based identity; strict ABI compatibility | Accepted | Plugins |
 | [0010](./0010-datasource-managed-entity.md) | Datasource as a managed entity with `use` syntax and tenant namespace | Accepted | Management |
-| [0011](./0011-stream-identity-and-backfill.md) | Stream identity scope & backfill-on-subscribe semantics | Accepted | Sharing |
+| [0011](../best-practices/quant/adr/0011-stream-identity-and-backfill.md) | Stream identity scope & backfill-on-subscribe semantics | Accepted | Sharing |
 
 ## Conventions
 

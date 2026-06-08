@@ -35,15 +35,15 @@ fn workspace_target_dir() -> PathBuf {
 fn dylib_name() -> &'static str {
     #[cfg(target_os = "macos")]
     {
-        "libbee_plugin_binance_mock.dylib"
+        "libbee_plugin_binance.dylib"
     }
     #[cfg(target_os = "linux")]
     {
-        "libbee_plugin_binance_mock.so"
+        "libbee_plugin_binance.so"
     }
     #[cfg(target_os = "windows")]
     {
-        "bee_plugin_binance_mock.dll"
+        "bee_plugin_binance.dll"
     }
 }
 

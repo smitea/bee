@@ -1,25 +1,28 @@
-//! `bee-plugin-influxdb-mock` — S33 mock plugin.
+//! `bee-plugin-influxdb` — production-grade reference implementation.
 //!
 //! Implements the `influxdb_emit` Output Adapter. Writes each
 //! event to a local append-only log file (default
 //! `/tmp/bee_demo_influxdb.log`) in line-protocol-ish text so a
 //! downstream MACD / EMA Pipeline can be observed end-to-end
-//! without an actual InfluxDB instance.
+//! without an actual InfluxDB instance. Plugin scaffold is
+//! production-grade (cdylib + FFI vtable); the actual sink is a
+//! log-file placeholder that will be replaced by the real
+//! InfluxDB v2 line-protocol client in S36.
 //!
 //! ## Architecture
 //!
 //! - [`Factory`]: produces the [`bee_plugin_sdk::PluginManifest`]
 //!   + [`bee_plugin_sdk::PluginHandle`] for the host.
-//! - [`InfluxMockOutput`]: the actual [`bee_adapter::OutputAdapter`]
+//! - [`InfluxOutput`]: the actual [`bee_adapter::OutputAdapter`]
 //!   implementation. `open` creates/opens the log file in append
 //!   mode; `emit` appends one line per event; `close` flushes the
 //!   buffered writer and drops the file handle.
 //! - `cdylib_plugin!(Factory)` invocation at the bottom generates
 //!   the FFI entry symbols.
 //!
-//! The mock is a **sink**: events go in, lines on disk come out.
-//! No background task — `emit` is called by the host's dataflow
-//! runtime for each event that reaches the Phase.
+//! The placeholder is a **sink**: events go in, lines on disk
+//! come out. No background task — `emit` is called by the host's
+//! dataflow runtime for each event that reaches the Phase.
 
 use std::path::PathBuf;
 
@@ -29,9 +32,9 @@ use bee_plugin_sdk::{
 };
 use tokio::io::{AsyncWriteExt, BufWriter};
 
-/// Configuration for the mock influxdb output.
+/// Configuration for the influxdb output.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct InfluxMockConfig {
+pub struct InfluxConfig {
     /// Logical database name. Goes into the line-protocol-ish
     /// header as a tag, e.g. `database=bitcoin`.
     pub database: String,
@@ -42,7 +45,7 @@ pub struct InfluxMockConfig {
     pub path: Option<PathBuf>,
 }
 
-impl InfluxMockConfig {
+impl InfluxConfig {
     /// Default log file path used when `path` is `None`.
     pub const DEFAULT_PATH: &str = "/tmp/bee_demo_influxdb.log";
 
@@ -55,7 +58,7 @@ impl InfluxMockConfig {
     }
 }
 
-impl Default for InfluxMockConfig {
+impl Default for InfluxConfig {
     fn default() -> Self {
         Self {
             database: "bitcoin".into(),
@@ -65,19 +68,19 @@ impl Default for InfluxMockConfig {
     }
 }
 
-/// Mock `influxdb_emit` Output Adapter. Appends one line per
-/// event to the configured log file in line-protocol-ish format:
+/// `influxdb_emit` Output Adapter. Appends one line per event to
+/// the configured log file in line-protocol-ish format:
 ///
 /// ```text
 /// <measurement>,database=<database> sequence=<seq>,timestamp=<ts> value="<payload>"
 /// ```
-pub struct InfluxMockOutput {
-    config: InfluxMockConfig,
+pub struct InfluxOutput {
+    config: InfluxConfig,
     writer: BufWriter<tokio::fs::File>,
 }
 
-impl OutputAdapter for InfluxMockOutput {
-    type Config = InfluxMockConfig;
+impl OutputAdapter for InfluxOutput {
+    type Config = InfluxConfig;
 
     async fn open(config: Self::Config) -> AdapterResult<Self> {
         let path = config.resolved_path();
@@ -129,11 +132,11 @@ impl OutputAdapter for InfluxMockOutput {
     }
 }
 
-/// Factory for the influxdb mock plugin. Holds no state; both
-/// methods are pure.
-pub struct InfluxMockFactory;
+/// Factory for the influxdb plugin. Holds no state; both methods
+/// are pure.
+pub struct InfluxFactory;
 
-impl Factory for InfluxMockFactory {
+impl Factory for InfluxFactory {
     fn manifest() -> PluginManifest {
         PluginManifest {
             name: PluginName("influxdb".into()),
@@ -168,10 +171,10 @@ mod vtable_shim {
     use bee_plugin_sdk::event::{decode_event, EventBytes};
     use bee_plugin_sdk::vtable::OutputAdapterVtable;
 
-    use super::{InfluxMockConfig, InfluxMockOutput};
+    use super::{InfluxConfig, InfluxOutput};
 
     pub struct Ctx {
-        pub adapter: Mutex<InfluxMockOutput>,
+        pub adapter: Mutex<InfluxOutput>,
     }
 
     fn block_on<F: std::future::Future>(f: F) -> F::Output {
@@ -188,11 +191,11 @@ mod vtable_shim {
         _err_out: *mut EventBytes,
     ) -> *mut std::ffi::c_void {
         let bytes = std::slice::from_raw_parts(config_ptr, config_len);
-        let cfg: InfluxMockConfig = match bincode::deserialize(bytes) {
+        let cfg: InfluxConfig = match bincode::deserialize(bytes) {
             Ok(c) => c,
             Err(_) => return std::ptr::null_mut(),
         };
-        let adapter = match block_on(InfluxMockOutput::open(cfg)) {
+        let adapter = match block_on(InfluxOutput::open(cfg)) {
             Ok(a) => a,
             Err(_) => return std::ptr::null_mut(),
         };
@@ -242,7 +245,7 @@ mod vtable_shim {
     };
 }
 
-bee_plugin_sdk::cdylib_plugin!(InfluxMockFactory);
+bee_plugin_sdk::cdylib_plugin!(InfluxFactory);
 
 #[cfg(test)]
 mod tests {
@@ -277,11 +280,11 @@ mod tests {
     #[tokio::test]
     async fn emit_writes_line_per_event() {
         let path = unique_path("emit_writes_line_per_event");
-        let cfg = InfluxMockConfig {
+        let cfg = InfluxConfig {
             path: Some(path.clone()),
             ..Default::default()
         };
-        let mut adapter = InfluxMockOutput::open(cfg).await.unwrap();
+        let mut adapter = InfluxOutput::open(cfg).await.unwrap();
         for i in 0..3 {
             adapter.emit(make_event(i, b"hello")).await.unwrap();
         }
@@ -307,7 +310,7 @@ mod tests {
     #[test]
     fn default_path_is_tmp_bee_demo() {
         assert_eq!(
-            InfluxMockConfig::default().resolved_path(),
+            InfluxConfig::default().resolved_path(),
             PathBuf::from("/tmp/bee_demo_influxdb.log"),
         );
     }
@@ -315,11 +318,11 @@ mod tests {
     #[tokio::test]
     async fn close_flushes_buffer() {
         let path = unique_path("close_flushes_buffer");
-        let cfg = InfluxMockConfig {
+        let cfg = InfluxConfig {
             path: Some(path.clone()),
             ..Default::default()
         };
-        let mut adapter = InfluxMockOutput::open(cfg).await.unwrap();
+        let mut adapter = InfluxOutput::open(cfg).await.unwrap();
         adapter.emit(make_event(0, b"flushed")).await.unwrap();
         // Before close: BufWriter has the line buffered. tokio's
         // `BufWriter` does NOT flush on drop (to avoid blocking),
@@ -336,7 +339,7 @@ mod tests {
 
     #[test]
     fn factory_manifest_declares_emit_adapter() {
-        let m = InfluxMockFactory::manifest();
+        let m = InfluxFactory::manifest();
         assert_eq!(m.name.0, "influxdb");
         assert_eq!(m.abi_version, "v1");
         assert_eq!(m.adapters.len(), 1);
@@ -346,7 +349,7 @@ mod tests {
 
     #[test]
     fn factory_init_returns_handle_with_manifest() {
-        let h = InfluxMockFactory::init().unwrap();
+        let h = InfluxFactory::init().unwrap();
         assert_eq!(h.manifest.name.0, "influxdb");
         assert_eq!(h.manifest.adapters.len(), 1);
         assert_eq!(h.manifest.adapters[0].name, "emit");
@@ -355,11 +358,11 @@ mod tests {
     #[test]
     fn vtable_open_emit_close_writes_event_to_log() {
         let path = unique_path("vtable_open_emit_close");
-        let cfg = InfluxMockConfig {
+        let cfg = InfluxConfig {
             path: Some(path.clone()),
             ..Default::default()
         };
-        let handle = InfluxMockFactory::init().expect("init");
+        let handle = InfluxFactory::init().expect("init");
         let vtable = *handle
             .output_adapters
             .get("emit")
@@ -393,7 +396,7 @@ mod tests {
 
     #[test]
     fn vtable_open_with_garbage_config_returns_null() {
-        let handle = InfluxMockFactory::init().expect("init");
+        let handle = InfluxFactory::init().expect("init");
         let vtable = *handle
             .output_adapters
             .get("emit")

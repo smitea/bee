@@ -651,11 +651,11 @@ async fn run_plugin_cli(args: &[String]) -> Result<(), String> {
             // plugin set covers all three Adapter kinds + a
             // Handler-only plugin (ta-lib).
             let entries: &[(&str, &str, &str)] = &[
-                ("bee-plugin-binance-mock", "binance", "input"),
-                ("bee-plugin-google-news-mock", "google_news", "input"),
-                ("bee-plugin-influxdb-mock", "influxdb", "output"),
-                ("bee-plugin-mongodb-mock", "mongodb", "output"),
-                ("bee-plugin-ta-lib-mock", "ta-lib", "handler"),
+                ("bee-plugin-binance", "binance", "input"),
+                ("bee-plugin-google-news", "google_news", "input"),
+                ("bee-plugin-influxdb", "influxdb", "output"),
+                ("bee-plugin-mongodb", "mongodb", "output"),
+                ("bee-plugin-ta-lib", "ta-lib", "handler"),
             ];
             // The mock plugins all declare feature_version=1.0.0 /
             // abi_version=v1. S33 deferred the per-plugin version

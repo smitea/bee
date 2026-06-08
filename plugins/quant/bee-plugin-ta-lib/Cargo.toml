@@ -1,0 +1,21 @@
+[package]
+name = "bee-plugin-ta-lib"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Bee 量化交易参考实现:技术分析 Handler 集合 (MACD/EMA/decision_tree/sentiment_analyzer)。Plugin 结构是 production-grade;实际计算是简化版占位。"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+bee-plugin-sdk = { path = "../../../crates/bee-plugin-sdk" }
+bee-adapter = { path = "../../../crates/bee-adapter" }
+tokio = { workspace = true }
+thiserror = "2"
+bincode = "1"
+serde = { version = "1", features = ["derive"] }
+
+[lints]
+workspace = true

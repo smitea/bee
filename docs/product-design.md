@@ -100,48 +100,7 @@ Pipeline Author ──writes SQL/Lua──▶ Bee Cluster
 
 ## 4. Core scenarios
 
-### Scenario A: Quant decision pipeline (from the original SQL example)
-
-**User story**: As a quant researcher, I want to combine "5-minute BTC tick data" with "Google news sentiment" into a decision signal, written to InfluxDB / MongoDB.
-
-**How Bee supports it**:
-
-- Tick stream via `binance.subscribe('BTC/USDT', '5min')` — Producer Pipeline auto-shared.
-- News stream via `google_news.search('Bitcoin')` — same.
-- Use `ASOF JOIN` to align multi-frequency streams.
-- Decision layer with `decision_tree(...)` UDF.
-- Multi-sink output with `EMIT INTO influxdb.emit(...)` / `EMIT INTO mongodb.emit(...)`.
-
-> **Important**: `binance` / `google_news` / `influxdb` / `mongodb` / `decision_tree` / `ASOF JOIN` are all **third-party plugins or SQL extensions**, **not in Bee core**. Bee core provides: DSL framework, `use` compiler, Adapter / Handler trait, Registry, Stream sharing, cross-Pipeline edges, Failover. The concrete ticker/news/UDF implementations are provided by the community or user teams in independent Plugin crates, compiled as `cdylib` and loaded by Bee.
-
-> **Canonical example**: see [`examples/quant_btc_strategy.sql`](../../examples/quant_btc_strategy.sql) for the full SQL, and [`scripts/demo-quant-prod.sh`](../../scripts/demo-quant-prod.sh) for a one-click end-to-end run against real external systems. The four `binance` / `google_news` / `influxdb` / `mongodb` Datasources each come from an **independent production-grade Plugin crate** under `plugins/` (real Binance WS, real NewsAPI, real InfluxDB v2, real MongoDB) — no business code in Bee core, maximum reusability. The two Handler plugins (`ta-indicators` with `yata`/`ta-lib`, `onnx-ml` with `tract` + FinBERT) ship similarly. The full deployment story is S33–S40 in [`docs/stories.md`](./stories.md).
-
-**User's workload**: write a SQL snippet; Bee handles the rest automatically (including: Datasource registration, Stream sharing, Binance credential management, rate-limit avoidance).
-
-> **On Datasource config granularity**: **connection-level config** (API key, base URL, rate limits) is written by the admin at Datasource registration time; **per-call config** (symbol, interval, query string) is written by the Pipeline Author in SQL. These two layers are **strictly separated** — the same Datasource `binance` can be called by any number of Pipelines with different per-call args.
-
-### Scenario B: Real-time multi-source monitoring
-
-**User story**: As a platform SRE, I want to aggregate "API gateway logs + business error rate + database slow queries + third-party dependency health" in real time to an alerting channel.
-
-**How Bee supports it**:
-
-- 4 Input Adapters: `k8s_logs` / `metrics` / `mysql_slow` / `external_health`.
-- A Pipeline does thresholding + EWMA smoothing.
-- `EMIT INTO pagerduty.emit(...)` outputs alerts.
-
-### Scenario C: Cross-team data sharing
-
-**User story**: As the data platform team, I want the "user click stream" to be subscribed to by 4 downstream teams (recommendation, risk control, BI, advertising) independently, without affecting each other.
-
-**How Bee supports it**:
-
-- Upstream has a Producer Pipeline running a Kafka consumer.
-- 4 downstream Pipelines each subscribe and compute different metrics.
-- Any downstream Pipeline going down doesn't affect the others.
-- Upstream rate limit / quota is managed centrally on the Producer side.
-
-### Scenario D: Performance showcase (the 5-minute evaluator demo)
+### Scenario A: Performance showcase (the 5-minute evaluator demo)
 
 **User story**: As a new evaluator (engineer, PM, or seed user), I want to run Bee on my laptop, see three classic CS problems solved end-to-end, and get a measurable performance table across 1 / 3 / 5 Nodes — in under 5 minutes, with no third-party services required.
 
@@ -189,6 +148,27 @@ The script **measures and prints** the numbers; the user reads off the row that 
 **Why this is in the product design (not just internal docs)**: it is the canonical "what does Bee do?" answer for an outsider. The Fibonacci demo is the smallest possible test of Bee's state-management path. The prime sieve is the smallest possible test of Bee's distributed-scheduling path. The multi-stream analytics is the smallest possible test of Bee's SQL runtime. Together they cover the three pillars (state / scheduling / SQL) of the system in 5 minutes and zero external dependencies.
 
 See [`scripts/demo-perf.sh`](../../scripts/demo-perf.sh) and [`examples/performance/README.md`](../../examples/performance/README.md). Implementation tracked as **S41** in [`docs/stories.md`](./stories.md).
+
+### Scenario B: Real-time multi-source monitoring
+
+**User story**: As a platform SRE, I want to aggregate "API gateway logs + business error rate + database slow queries + third-party dependency health" in real time to an alerting channel.
+
+**How Bee supports it**:
+
+- 4 Input Adapters: `k8s_logs` / `metrics` / `mysql_slow` / `external_health`.
+- A Pipeline does thresholding + EWMA smoothing.
+- `EMIT INTO pagerduty.emit(...)` outputs alerts.
+
+### Scenario C: Cross-team data sharing
+
+**User story**: As the data platform team, I want the "user click stream" to be subscribed to by 4 downstream teams (recommendation, risk control, BI, advertising) independently, without affecting each other.
+
+**How Bee supports it**:
+
+- Upstream has a Producer Pipeline running a Kafka consumer.
+- 4 downstream Pipelines each subscribe and compute different metrics.
+- Any downstream Pipeline going down doesn't affect the others.
+- Upstream rate limit / quota is managed centrally on the Producer side.
 
 ---
 
@@ -400,7 +380,7 @@ Aligned with [docs/architecture.md §12.1](./architecture.md#121-roadmap) and [d
 | --- | --- |
 | **0.1 – 0.2** | **Single-node works**: `bee run pipeline.sql` locally shows the stream. Demo to seed users. |
 | **0.3 – 0.4** | **Small cluster**: 3-node Failover demo. **First external paying user**. |
-| **0.5** | **Rate-limit sharing + cross-Pipeline**: scenario A (quant) goes to production, **first quant strategy in production** (S33–S40 milestone). |
+| **0.5** | **Rate-limit sharing + cross-Pipeline**: scenario B (real-time multi-source monitoring) goes to production; quant reference implementation lands in `docs/best-practices/quant/`. |
 | **0.6 – 0.7** | **Plugin system**: third parties can write Adapters; **3 external Adapters in the community**. |
 | **0.8 – 1.0** | **Production-ready**: observability panel + Schema evolution; **public 1.0 announcement**. |
 | **1.x** | Enterprise features + docs site + training. |

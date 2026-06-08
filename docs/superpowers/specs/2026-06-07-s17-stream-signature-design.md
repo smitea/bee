@@ -368,7 +368,7 @@ serde_json = "1"     # NEW (was transitive)
 - [ ] `cargo build --workspace` clean (0 warnings)
 - [ ] `cargo test --workspace` all pass; 7 new test files / test groups
 - [ ] `StreamSignature` matches ADR-0011 formula exactly
-- [ ] Deploying two Pipelines with the same `use binance; binance.subscribe('BTC/USDT', '5min')` produces one Producer + one Subscriber (asserted via `datasource_producers` registry)
+- [ ] Deploying two Pipelines with the same `use exchange; exchange.subscribe(symbol='X/Y', interval='5min')` produces one Producer + one Subscriber (asserted via `datasource_producers` registry)
 - [ ] Deploying two Pipelines with different `symbol` produces two Producers
 - [ ] Killing a Producer's Node transitions all Subscribers to `WaitingForUpstream` (CP-level)
 - [ ] `bee jobs list` shows `Producer` / `Subscriber` / `Independent` mode column

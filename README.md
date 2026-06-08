@@ -24,17 +24,17 @@
 | [docs/product-design.md](docs/product-design.md) | Product vision / users / scenarios / business model | Product / early users / partners |
 | [**docs/architecture.md**](docs/architecture.md) | **System architecture (OSS format)**: Why / Goals / Principles / Subsystems / Operations / Security / Performance | Evaluators / operators / contributors |
 | [**docs/internals.md**](docs/internals.md) | **Implementation details**: BRP wire format / 8-crate boundary / Plugin SDK contract / KV internal layout | Implementers / advanced contributors |
-| [docs/stories.md](docs/stories.md) | **42 implementation stories + S33/S41 spikes** (vertical slice breakdown) | Implementers |
+| [docs/stories.md](docs/stories.md) | Generic Bee feature set: **32 implementation stories + S41 spike** (S0–S31 + performance showcase). Quant trading stories (S33–S40) live in [docs/best-practices/quant/stories.md](docs/best-practices/quant/stories.md). | Implementers |
 | [docs/adr/](docs/adr/) | Irreversible architecture decision records (ADR) | Implementers |
 
 ## Quickstart (after implementation)
 
 > Once the first AFK stories land, the canonical "5-minute end-to-end demo" lives at:
 >
-> - `scripts/demo-quant-prod.sh` — starts a 3-node cluster, loads 6 production plugins (Binance WS, NewsAPI, InfluxDB v2, MongoDB, ta-indicators, FinBERT ONNX), registers Datasources, deploys two quant strategies + a backfill variant, verifies Producer sharing, asserts all 11 ADRs' Consequences
-> - `examples/quant_btc_strategy.sql` — the canonical quant pipeline (BTC K-line + news sentiment + decision tree + InfluxDB/MongoDB sinks)
-> - `plugins/bee-plugin-{binance,google-news,influxdb,mongodb,ta-indicators,onnx-ml}/` — six independent `cdylib` production plugins (no business code in Bee core; each is reusable by any user that needs that data source)
-> - **`scripts/demo-perf.sh`** — the **5-minute performance showcase**: Fibonacci streaming + distributed prime sieve + multi-stream analytics, with a measured performance table across 1 / 3 / 5 Nodes. This is the demo a new evaluator can run to see "what does Bee actually do, fast?" — independent of any third-party service. See [examples/performance/README.md](examples/performance/README.md) and [docs/product-design.md §4.4](docs/product-design.md#44-performance-showcase)
+> - **`scripts/demo-perf.sh`** — the **5-minute performance showcase**: Fibonacci streaming + distributed prime sieve + multi-stream analytics, with a measured performance table across 1 / 3 / 5 Nodes. This is the demo a new evaluator can run to see "what does Bee actually do, fast?" — independent of any third-party service. See [examples/performance/README.md](examples/performance/README.md) and [docs/product-design.md §4.1](docs/product-design.md#41-performance-showcase)
+> - The canonical 5-minute end-to-end demo will land as
+>   `scripts/demo-perf-prod.sh` (S41 performance showcase, in flight).
+> - The quant-trading reference implementation lives separately at [docs/best-practices/quant/](docs/best-practices/quant/); see [docs/best-practices/quant/scripts/demo-quant-prod.sh](docs/best-practices/quant/scripts/demo-quant-prod.sh) for the equivalent demo against real Binance WS / NewsAPI / InfluxDB v2 / MongoDB.
 
 ## Design Goals
 
@@ -79,9 +79,16 @@ Bee compiles user-authored SQL / Lua Pipelines into Phase DAGs; the Control Plan
         └── 0011-stream-identity-and-backfill.md
 ```
 
-> Examples live under `examples/`:
-> - `examples/quant_btc_strategy.sql` — the canonical quant pipeline (S40)
+> Examples live under `examples/` and `docs/best-practices/quant/examples/`:
+> - `docs/best-practices/quant/examples/quant_btc_macd.sql` + `quant_btc_sentiment.sql` — the quant-trading reference pipelines (S40)
 > - `examples/performance/` — the Fibonacci + prime sieve + multi-stream analytics demos (S41)
+>
+> Example plugins under [plugins/quant/](plugins/quant/) are
+> quant-trading reference implementations (binance / google-news /
+> influxdb / mongodb / ta-lib). Their plugin STRUCTURE is
+> production-grade; the data sources are placeholders. They live
+> under [docs/best-practices/quant/](docs/best-practices/quant/) as
+> real-world business examples.
 
 > Source directories (`Cargo.toml`, `crates/`, …) will be created in roadmap stage 0.1.
 
@@ -91,7 +98,7 @@ Bee compiles user-authored SQL / Lua Pipelines into Phase DAGs; the Control Plan
 
 - [ ] **0.1 – 0.2** Single-node works: `bee run pipeline.sql` shows the stream. Demo to seed users.
 - [ ] **0.3 – 0.4** Small cluster: 3-node Failover demo. **First external paying user**.
-- [ ] **0.5** Rate-limit sharing + cross-Pipeline: scenario A (quant) goes to production, **first quant strategy in production**.
+- [ ] **0.5** Rate-limit sharing + cross-Pipeline: scenario B (real-time multi-source monitoring) goes to production; quant reference implementation lands in [docs/best-practices/quant/](docs/best-practices/quant/).
 - [ ] **0.6 – 0.7** Plugin system (Rust plugins) + scheduling optimizer. **3 external Adapters in the community** + performance showcase demo (S41).
 - [ ] **0.8** SQL performance tuning: ms-level micro-batch / UDF profiling / Hint syntax. **Quant scenario tunable**.
 - [ ] **0.9 – 1.0** Production-ready: observability panel + Schema evolution. **Public 1.0 announcement**.
@@ -111,3 +118,16 @@ Until a public contributing guide is published, follow the principle: **open an 
 ## License
 
 TBD (will be specified when the first crate is published; leaning Apache 2.0).
+
+## Quant trading reference
+
+The quant-trading implementation (S33 HITL milestone + S34–S40
+production plugins + e2e deploy) is a large, real-world business
+example. It lives in its own documentation section:
+
+- [docs/best-practices/quant/](docs/best-practices/quant/) — stories,
+  ADRs, examples, demo scripts, design specs.
+
+The 5 reference plugin crates are at
+[plugins/quant/](plugins/quant/) and are part of the workspace
+members.

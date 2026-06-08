@@ -1,7 +1,10 @@
-//! `bee-plugin-ta-lib-mock` — S33 mock plugin.
+//! `bee-plugin-ta-lib` — production-grade reference implementation.
 //!
 //! Implements Handler UDFs (pure-compute functions invoked by
 //! Phases): `ema`, `macd`, `decision_tree`, `sentiment_analyzer`.
+//! Plugin scaffold is production-grade (cdylib + FFI vtable); the
+//! actual algorithms are simplified placeholder versions that
+//! will be replaced by a real `ta-lib` binding in S38.
 //!
 //! Handlers are free functions with stable signatures. The
 //! runtime parses the generic `Event` payload bytes (from
@@ -12,7 +15,7 @@
 //!
 //! ## Architecture
 //!
-//! - [`TaLibMockFactory`]: produces the
+//! - [`TaLibFactory`]: produces the
 //!   [`bee_plugin_sdk::PluginManifest`] + [`bee_plugin_sdk::PluginHandle`]
 //!   for the host.
 //! - Free-function handlers: the actual compute primitives. Pure
@@ -33,7 +36,7 @@ pub struct MacdResult {
     pub histogram: f64,
 }
 
-/// Mock trading decision produced by [`decision_tree`].
+/// Trading decision produced by [`decision_tree`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Decision {
     Buy,
@@ -103,7 +106,7 @@ pub fn macd(
     }
 }
 
-/// Mock decision tree combining a MACD histogram and a sentiment
+/// Decision tree combining a MACD histogram and a sentiment
 /// score.
 ///
 /// - `hist > 0` AND `sentiment > 0.5` → `Buy`
@@ -119,7 +122,7 @@ pub fn decision_tree(macd_histogram: f64, sentiment_score: f64) -> Decision {
     }
 }
 
-/// Mock keyword-based sentiment analyzer. Returns a score in
+/// Keyword-based sentiment analyzer. Returns a score in
 /// `[-1, 1]`.
 ///
 /// Positive keywords: `bullish`, `growth`, `high`, `buy`, `rally`,
@@ -179,11 +182,11 @@ fn ema_last_n(series: &[f64], n: usize) -> f64 {
     ema(&series[series.len() - n..], n)
 }
 
-/// Factory for the ta-lib mock plugin. Holds no state; both
-/// methods are pure.
-pub struct TaLibMockFactory;
+/// Factory for the ta-lib plugin. Holds no state; both methods
+/// are pure.
+pub struct TaLibFactory;
 
-impl Factory for TaLibMockFactory {
+impl Factory for TaLibFactory {
     fn manifest() -> PluginManifest {
         PluginManifest {
             name: PluginName("ta-lib".into()),
@@ -420,7 +423,7 @@ mod vtable_shim_sentiment_analyzer {
     };
 }
 
-bee_plugin_sdk::cdylib_plugin!(TaLibMockFactory);
+bee_plugin_sdk::cdylib_plugin!(TaLibFactory);
 
 #[cfg(test)]
 mod tests {
@@ -495,7 +498,7 @@ mod tests {
 
     #[test]
     fn factory_manifest_declares_four_handlers() {
-        let m = TaLibMockFactory::manifest();
+        let m = TaLibFactory::manifest();
         assert_eq!(m.name.0, "ta-lib");
         assert_eq!(m.abi_version, "v1");
         assert!(m.adapters.is_empty());
@@ -509,14 +512,14 @@ mod tests {
 
     #[test]
     fn factory_init_returns_handle_with_manifest() {
-        let h = TaLibMockFactory::init().unwrap();
+        let h = TaLibFactory::init().unwrap();
         assert_eq!(h.manifest.name.0, "ta-lib");
         assert_eq!(h.manifest.handlers.len(), 4);
     }
 
     #[test]
     fn vtable_macd_init_state_and_handle() {
-        let handle = TaLibMockFactory::init().expect("init");
+        let handle = TaLibFactory::init().expect("init");
         let vtable = *handle.handlers.get("MACD").expect("MACD vtable");
         let mut state_out = EventBytes::EMPTY;
         let rc = unsafe { ((*vtable).init_state)(&mut state_out) };
@@ -554,7 +557,7 @@ mod tests {
 
     #[test]
     fn vtable_ema_init_state_and_handle() {
-        let handle = TaLibMockFactory::init().expect("init");
+        let handle = TaLibFactory::init().expect("init");
         let vtable = *handle.handlers.get("EMA").expect("EMA vtable");
         let mut state_out = EventBytes::EMPTY;
         let rc = unsafe { ((*vtable).init_state)(&mut state_out) };
@@ -585,7 +588,7 @@ mod tests {
 
     #[test]
     fn vtable_decision_tree_handle_buy() {
-        let handle = TaLibMockFactory::init().expect("init");
+        let handle = TaLibFactory::init().expect("init");
         let vtable = *handle
             .handlers
             .get("decision_tree")
@@ -614,7 +617,7 @@ mod tests {
 
     #[test]
     fn vtable_decision_tree_handle_sell() {
-        let handle = TaLibMockFactory::init().expect("init");
+        let handle = TaLibFactory::init().expect("init");
         let vtable = *handle
             .handlers
             .get("decision_tree")
@@ -643,7 +646,7 @@ mod tests {
 
     #[test]
     fn vtable_sentiment_analyzer_handle_positive() {
-        let handle = TaLibMockFactory::init().expect("init");
+        let handle = TaLibFactory::init().expect("init");
         let vtable = *handle
             .handlers
             .get("sentiment_analyzer")
@@ -673,7 +676,7 @@ mod tests {
 
     #[test]
     fn vtable_handle_with_garbage_event_returns_error() {
-        let handle = TaLibMockFactory::init().expect("init");
+        let handle = TaLibFactory::init().expect("init");
         let vtable = *handle.handlers.get("EMA").expect("EMA vtable");
         let mut state = EventBytes::EMPTY;
         unsafe { ((*vtable).init_state)(&mut state) };

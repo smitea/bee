@@ -38,7 +38,7 @@ set -euo pipefail
 : "${BEE_DEMO_BUILD_TIMEOUT_S:=300}"
 : "${BEE_DEMO_TEST_TIMEOUT_S:=180}"
 
-WORKSPACE_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+WORKSPACE_ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
 cd "$WORKSPACE_ROOT"
 
 # Track results
@@ -80,9 +80,9 @@ fi
 
 # Step 3: verify .dylib/.so artifacts for 5 mock plugins
 step "verify 5 mock plugin cdylib artifacts"
-for plugin in bee-plugin-binance-mock bee-plugin-google-news-mock \
-              bee-plugin-influxdb-mock bee-plugin-mongodb-mock \
-              bee-plugin-ta-lib-mock; do
+for plugin in bee-plugin-binance bee-plugin-google-news \
+              bee-plugin-influxdb bee-plugin-mongodb \
+              bee-plugin-ta-lib; do
   if [ "$(uname)" = "Darwin" ]; then
     ARTIFACT="target/debug/lib${plugin//-/_}.dylib"
   else
@@ -113,7 +113,7 @@ fi
 
 # Step 5: SQL files non-empty + contain use directives
 step "verify 2 SQL pipelines in examples/"
-for f in examples/quant_btc_macd.sql examples/quant_btc_sentiment.sql; do
+for f in docs/best-practices/quant/examples/quant_btc_macd.sql docs/best-practices/quant/examples/quant_btc_sentiment.sql; do
   if [ -f "$f" ]; then
     if grep -q "^use binance;" "$f" && \
        grep -q "EMIT INTO influxdb" "$f"; then
