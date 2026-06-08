@@ -155,12 +155,151 @@ pub struct BeeHostV1 {
             name: *const std::ffi::c_char,
             vtable: *const vtable::HandlerVtable,
         )>,
+
+    /// KV: read a value by key. On success, returns 0 and writes
+    /// the value pointer + length to `out_value` and `out_len` (caller
+    /// frees via `host_alloc_free`). On not-found, returns 1. On error,
+    /// returns -1.
+    pub kv_get: Option<
+        unsafe extern "C" fn(
+            ctx: *mut std::ffi::c_void,
+            key: *const std::ffi::c_char,
+            out_value: *mut *mut u8,
+            out_len: *mut usize,
+        ) -> i32,
+    >,
+
+    /// KV: write a value (overwrites). Returns 0 on success, -1 on error.
+    pub kv_put: Option<
+        unsafe extern "C" fn(
+            ctx: *mut std::ffi::c_void,
+            key: *const std::ffi::c_char,
+            value: *const u8,
+            len: usize,
+        ) -> i32,
+    >,
+
+    /// KV: compare-and-swap. Returns 0 on success, 1 on mismatch, -1 on error.
+    pub kv_cas: Option<
+        unsafe extern "C" fn(
+            ctx: *mut std::ffi::c_void,
+            key: *const std::ffi::c_char,
+            expected: *const u8,
+            exp_len: usize,
+            new: *const u8,
+            new_len: usize,
+        ) -> i32,
+    >,
+
+    /// Get the current stream_id (32-byte hash of the SQL call site).
+    /// Returns 0 on success, -1 on error.
+    pub current_stream_id: Option<
+        unsafe extern "C" fn(
+            ctx: *mut std::ffi::c_void,
+            out_id: *mut [u8; 32],
+        ) -> i32,
+    >,
 }
 
 // `BeeHostV1` is a plain data struct; the host controls access
 // through the `ctx` and ensures no data races. We don't derive
 // Send/Sync because the struct contains a raw pointer, but the host
 // never shares a `BeeHostV1` across threads.
+
+impl BeeHostV1 {
+    /// Safe wrapper for `kv_get`. Returns `Ok(Some(value))` if found,
+    /// `Ok(None)` if not found, `Err(SdkError)` on error.
+    pub fn safe_kv_get(&self, key: &str) -> Result<Option<Vec<u8>>, SdkError> {
+        let kv_get = self
+            .kv_get
+            .ok_or(SdkError::HostFnMissing("kv_get"))?;
+        let c_key = std::ffi::CString::new(key)
+            .map_err(|_| SdkError::InvalidKey(key.into()))?;
+        let mut out_value: *mut u8 = std::ptr::null_mut();
+        let mut out_len: usize = 0;
+        let rc = unsafe {
+            kv_get(self.ctx, c_key.as_ptr(), &mut out_value, &mut out_len)
+        };
+        match rc {
+            0 => {
+                if out_len == 0 {
+                    return Ok(Some(Vec::new()));
+                }
+                let value =
+                    unsafe { std::slice::from_raw_parts(out_value, out_len) }
+                        .to_vec();
+                Ok(Some(value))
+            }
+            1 => Ok(None),
+            _ => Err(SdkError::KvError("kv_get failed")),
+        }
+    }
+
+    /// Safe wrapper for `kv_put`. Writes (or overwrites) `value` at
+    /// `key`. Returns `Ok(())` on success, `Err(SdkError)` on error.
+    pub fn safe_kv_put(&self, key: &str, value: &[u8]) -> Result<(), SdkError> {
+        let kv_put = self
+            .kv_put
+            .ok_or(SdkError::HostFnMissing("kv_put"))?;
+        let c_key = std::ffi::CString::new(key)
+            .map_err(|_| SdkError::InvalidKey(key.into()))?;
+        let rc = unsafe {
+            kv_put(self.ctx, c_key.as_ptr(), value.as_ptr(), value.len())
+        };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(SdkError::KvError("kv_put failed"))
+        }
+    }
+
+    /// Safe wrapper for `kv_cas`. Compares `expected` to the current
+    /// value at `key`; on match, writes `new` and returns `Ok(true)`.
+    /// On mismatch, returns `Ok(false)`. On error, returns
+    /// `Err(SdkError)`.
+    pub fn safe_kv_cas(
+        &self,
+        key: &str,
+        expected: &[u8],
+        new: &[u8],
+    ) -> Result<bool, SdkError> {
+        let kv_cas = self
+            .kv_cas
+            .ok_or(SdkError::HostFnMissing("kv_cas"))?;
+        let c_key = std::ffi::CString::new(key)
+            .map_err(|_| SdkError::InvalidKey(key.into()))?;
+        let rc = unsafe {
+            kv_cas(
+                self.ctx,
+                c_key.as_ptr(),
+                expected.as_ptr(),
+                expected.len(),
+                new.as_ptr(),
+                new.len(),
+            )
+        };
+        match rc {
+            0 => Ok(true),
+            1 => Ok(false),
+            _ => Err(SdkError::KvError("kv_cas failed")),
+        }
+    }
+
+    /// Safe wrapper for `current_stream_id`. Returns the 32-byte
+    /// stream_id hash for the current SQL call site.
+    pub fn safe_current_stream_id(&self) -> Result<[u8; 32], SdkError> {
+        let f = self
+            .current_stream_id
+            .ok_or(SdkError::HostFnMissing("current_stream_id"))?;
+        let mut out_id = [0u8; 32];
+        let rc = unsafe { f(self.ctx, &mut out_id) };
+        if rc == 0 {
+            Ok(out_id)
+        } else {
+            Err(SdkError::KvError("current_stream_id failed"))
+        }
+    }
+}
 
 /// Opaque handle the plugin owns. The plugin's `bee_plugin_init`
 /// returns a `*mut PluginHandle` and `bee_plugin_drop` consumes it.
@@ -243,6 +382,37 @@ pub enum PluginError {
 }
 
 pub type PluginResult<T> = std::result::Result<T, PluginError>;
+
+/// Errors returned by the safe Rust wrappers around the [`BeeHostV1`]
+/// function pointers. The host may be missing a function pointer
+/// (older ABI), the plugin may have passed an invalid key (e.g. an
+/// interior NUL), or the underlying KV call may have failed.
+#[derive(Debug)]
+pub enum SdkError {
+    /// The host's [`BeeHostV1`] table did not have this function
+    /// pointer set (e.g. an older host ABI).
+    HostFnMissing(&'static str),
+    /// The key contained an interior NUL byte and could not be
+    /// converted to a C string.
+    InvalidKey(String),
+    /// The underlying host KV call returned a non-success code that
+    /// is not part of the documented success/not-found contract.
+    KvError(&'static str),
+}
+
+impl std::fmt::Display for SdkError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SdkError::HostFnMissing(name) => {
+                write!(f, "host function pointer {} is None", name)
+            }
+            SdkError::InvalidKey(k) => write!(f, "invalid KV key: {}", k),
+            SdkError::KvError(msg) => write!(f, "KV error: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for SdkError {}
 
 /// Link to the ABI migration guide, included in the
 /// `PluginError::AbiMismatch` message. The MVP placeholder is a
@@ -467,6 +637,30 @@ mod tests {
             let _ = h.register_output_adapter_vtable;
             let _ = h.register_handler_vtable;
         }
+    }
+
+    // ---- BeeHostV1 KV extension (S41 Task 2) ----
+
+    #[test]
+    fn bee_host_v1_has_kv_function_pointers() {
+        // Compile-time check: the 4 new function-pointer fields exist on
+        // BeeHostV1 and are of the right type. The test value is irrelevant
+        // — the field types and the field set are what we care about.
+        let host = BeeHostV1 {
+            ctx: std::ptr::null_mut(),
+            register_adapter: None,
+            register_input_adapter_vtable: None,
+            register_output_adapter_vtable: None,
+            register_handler_vtable: None,
+            kv_get: None,
+            kv_put: None,
+            kv_cas: None,
+            current_stream_id: None,
+        };
+        assert!(host.kv_get.is_none());
+        assert!(host.kv_put.is_none());
+        assert!(host.kv_cas.is_none());
+        assert!(host.current_stream_id.is_none());
     }
 
     // ---- AbiVersion (S20) ----
