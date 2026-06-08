@@ -14,10 +14,11 @@
 //! [`bee_plugin_sdk::cdylib_plugin!`] and follows the contract:
 //!
 //! - `init(host: *mut BeeHostV1) -> *mut PluginHandle`
-//!   - `host` is currently unused by S33 mock plugins (we pass
-//!     `null_mut()`); the S19+ follow-up that calls back into the
-//!     host for `register_adapter` will thread a real `BeeHostV1`
-//!     through.
+//!   - `host` is a real `BeeHostV1` whose function pointers are
+//!     populated by [`build_demo_host`]. S33 mock plugins ignore
+//!     the host entirely; the S41 perf-fib plugin uses the new
+//!     `kv_get` / `kv_put` / `kv_cas` / `current_stream_id`
+//!     slots for KV-backed state.
 //!   - On success, returns a non-null `*mut PluginHandle` produced
 //!     by `Arc::into_raw(Arc::new(handle))`.
 //!   - On error, returns null.
@@ -30,17 +31,205 @@
 //! `Library`. When `LoadedPlugin` drops, the library is unloaded
 //! (the OS reclaims the `.so`); the `Arc<PluginHandle>` is dropped
 //! last via the `Arc::from_raw` produced by the plugin.
+//!
+//! ## S41 host-side wiring
+//!
+//! As of S41 Task 3, [`load_library`] constructs a real
+//! `BeeHostV1` (via [`build_demo_host`]) and passes its address
+//! to `init`. The 4 new function pointers — `kv_get`, `kv_put`,
+//! `kv_cas`, `current_stream_id` — are backed by an in-process
+//! `HashMap` and a process-global `AtomicU64`. Real Bee uses the
+//! raft-replicated KV cluster; this demo is for the S41 Task 3
+//! wiring only.
 
+use std::collections::HashMap;
+use std::ffi::{CStr, c_char, c_void};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use bee_plugin_sdk::{
     compute_plugin_id, AbiVersion, BeeHostV1, PluginError, PluginHandle, PluginId, PluginManifest,
     PluginResult,
 };
 use libloading::{Library, Symbol};
+use sha2::{Digest, Sha256};
 
 use crate::PluginManager;
+
+// ---- Demo host state (S41 Task 3) ----
+//
+// The S41 perf-fib plugin exercises the new `kv_*` and
+// `current_stream_id` function pointers on `BeeHostV1`. For the
+// in-process `load_library` path, the host backs them with
+// process-global state below. Real Bee uses the raft-replicated
+// KV cluster; this in-process HashMap is for the S41 Task 3
+// wiring only. The `unsafe_code = "allow"` lint at the crate
+// level covers the FFI plumbing.
+
+static STREAM_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+static KV_STORE_DEMO: LazyLock<Mutex<HashMap<String, Vec<u8>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+// ---- Demo host FFI (S41 Task 3) ----
+//
+// Implementations of the 4 new `BeeHostV1` function pointers
+// added in Task 2. They read/write the process-global state
+// above. The `ctx` parameter is ignored (the plugin SDK contract
+// allows the host to use a per-call context, but our demo
+// uses a process-global store). Memory returned via `kv_get` is
+// leaked via `Box::into_raw`; the plugin is expected to free
+// it through a future `host_alloc_free` (out of S41 scope).
+
+/// FFI impl of `kv_get`. On success (rc=0), writes the value's
+/// pointer + length to `out_value` / `out_len`. The pointer is
+/// a `Box::into_raw`-leaked allocation the caller is expected
+/// to free via `host_alloc_free` (TBD). On not-found, returns 1.
+/// On invalid args, returns -1.
+unsafe extern "C" fn host_kv_get(
+    _ctx: *mut c_void,
+    key: *const c_char,
+    out_value: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    if key.is_null() || out_value.is_null() || out_len.is_null() {
+        return -1;
+    }
+    let key_str = match CStr::from_ptr(key).to_str() {
+        Ok(s) => s.to_owned(),
+        Err(_) => return -1,
+    };
+    let value_opt = {
+        let store = KV_STORE_DEMO.lock().expect("KV_STORE_DEMO poisoned");
+        store.get(&key_str).cloned()
+    };
+    match value_opt {
+        Some(v) => {
+            let len = v.len();
+            let boxed = v.into_boxed_slice();
+            let ptr = Box::into_raw(boxed) as *mut u8;
+            *out_value = ptr;
+            *out_len = len;
+            0
+        }
+        None => 1,
+    }
+}
+
+/// FFI impl of `kv_put`. Inserts (or overwrites) the value at
+/// `key`. Returns 0 on success, -1 on invalid args.
+unsafe extern "C" fn host_kv_put(
+    _ctx: *mut c_void,
+    key: *const c_char,
+    value: *const u8,
+    len: usize,
+) -> i32 {
+    if key.is_null() || (value.is_null() && len > 0) {
+        return -1;
+    }
+    let key_str = match CStr::from_ptr(key).to_str() {
+        Ok(s) => s.to_owned(),
+        Err(_) => return -1,
+    };
+    let bytes: Vec<u8> = if len == 0 {
+        Vec::new()
+    } else {
+        std::slice::from_raw_parts(value, len).to_vec()
+    };
+    KV_STORE_DEMO
+        .lock()
+        .expect("KV_STORE_DEMO poisoned")
+        .insert(key_str, bytes);
+    0
+}
+
+/// FFI impl of `kv_cas`. Compares the current value at `key` to
+/// `expected`; on match, writes `new` and returns 0. On
+/// mismatch (including not-found) returns 1. On invalid args
+/// returns -1.
+unsafe extern "C" fn host_kv_cas(
+    _ctx: *mut c_void,
+    key: *const c_char,
+    expected: *const u8,
+    exp_len: usize,
+    new: *const u8,
+    new_len: usize,
+) -> i32 {
+    if key.is_null()
+        || (expected.is_null() && exp_len > 0)
+        || (new.is_null() && new_len > 0)
+    {
+        return -1;
+    }
+    let key_str = match CStr::from_ptr(key).to_str() {
+        Ok(s) => s.to_owned(),
+        Err(_) => return -1,
+    };
+    let exp_bytes: Vec<u8> = if exp_len == 0 {
+        Vec::new()
+    } else {
+        std::slice::from_raw_parts(expected, exp_len).to_vec()
+    };
+    let new_bytes: Vec<u8> = if new_len == 0 {
+        Vec::new()
+    } else {
+        std::slice::from_raw_parts(new, new_len).to_vec()
+    };
+    let mut store = KV_STORE_DEMO.lock().expect("KV_STORE_DEMO poisoned");
+    let matches = match store.get(&key_str) {
+        Some(v) => v == &exp_bytes,
+        None => false,
+    };
+    if matches {
+        store.insert(key_str, new_bytes);
+        0
+    } else {
+        1
+    }
+}
+
+/// FFI impl of `current_stream_id`. Increments a process-global
+/// counter, sha256-hashes it, and writes the 32-byte digest to
+/// `out_id`. The same counter value always produces the same
+/// digest, so the stream_id is stable within a process.
+/// Returns 0 on success, -1 on invalid args.
+unsafe extern "C" fn host_current_stream_id(
+    _ctx: *mut c_void,
+    out_id: *mut [u8; 32],
+) -> i32 {
+    if out_id.is_null() {
+        return -1;
+    }
+    let n = STREAM_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut hasher = Sha256::new();
+    hasher.update(n.to_be_bytes());
+    let digest = hasher.finalize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest);
+    *out_id = out;
+    0
+}
+
+/// Construct a real `BeeHostV1` for the demo loader. The 4 new
+/// function pointers (`kv_get`, `kv_put`, `kv_cas`,
+/// `current_stream_id`) are wired to the FFI implementations
+/// above. The 4 existing `register_*_vtable` slots are left as
+/// `None` — the S33 mock plugins do not call back into the
+/// host, and the S33-deferred registry wiring is out of scope
+/// for Task 3.
+fn build_demo_host() -> BeeHostV1 {
+    BeeHostV1 {
+        ctx: std::ptr::null_mut(),
+        register_adapter: None,
+        register_input_adapter_vtable: None,
+        register_output_adapter_vtable: None,
+        register_handler_vtable: None,
+        kv_get: Some(host_kv_get),
+        kv_put: Some(host_kv_put),
+        kv_cas: Some(host_kv_cas),
+        current_stream_id: Some(host_current_stream_id),
+    }
+}
 
 /// A plugin loaded from a `cdylib` on disk.
 ///
@@ -74,9 +263,10 @@ impl LoadedPlugin {
 /// 1. Read the file (for `PluginId` derivation).
 /// 2. Open the library with `libloading::Library::new`.
 /// 3. Resolve the `bee_plugin_init` symbol.
-/// 4. Call it with a null `BeeHostV1` (S33 mock plugins don't call
-///    back into the host; the FFI surface is reserved for
-///    follow-ups).
+/// 4. Call it with a real `BeeHostV1` built by
+///    [`build_demo_host`] (S41 Task 3: the new `kv_*` and
+///    `current_stream_id` function pointers are populated; the
+///    S33-deferred `register_*_vtable` slots are `None`).
 /// 5. Wrap the returned `*mut PluginHandle` in an `Arc`.
 ///
 /// # Errors
@@ -104,7 +294,9 @@ pub fn load_library<P: AsRef<Path>>(path: P) -> PluginResult<LoadedPlugin> {
                 path.display()
             ))
         })?;
-        let handle_ptr = init(std::ptr::null_mut());
+        let mut host = build_demo_host();
+        let host_ptr: *mut BeeHostV1 = &mut host;
+        let handle_ptr = init(host_ptr);
         if handle_ptr.is_null() {
             return Err(PluginError::Init(format!(
                 "{}: bee_plugin_init returned null",
