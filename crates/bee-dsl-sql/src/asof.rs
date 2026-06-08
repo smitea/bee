@@ -236,8 +236,8 @@ fn strip_trailing_join_keyword(before: &str) -> &str {
 
 /// Find the byte offset where the ASOF JOIN ON conditions end in
 /// `sql`. The conditions end at the first top-level
-/// (paren-depth 0) `WHERE`, `JOIN`, or statement-terminating `;`.
-/// Returns `sql.len()` if none is found (the conditions run to
+/// (paren-depth 0) `WHERE`, `JOIN`, `)`, or statement-terminating
+/// `;`. Returns `sql.len()` if none is found (the conditions run to
 /// the end of the slice).
 ///
 /// Nested parens are tracked, so a `WHERE` / `JOIN` / `;` inside
@@ -247,6 +247,17 @@ fn strip_trailing_join_keyword(before: &str) -> &str {
 /// view-inlining) and chopped the conditions short; a trailing
 /// `;` was baked into the parsed `ineq_right_col` and ended up
 /// inside the LATERAL subquery.
+///
+/// A depth-0 `)` is ALSO a sentinel: it indicates the close of
+/// an enclosing subquery. When the ASOF JOIN is itself nested
+/// inside a parenthesised subquery (e.g. `(SELECT ... FROM a
+/// ASOF JOIN b ON ... AND ... ) AS sub`), the next depth-0
+/// token after the ASOF conditions is the outer subquery's
+/// closing `)` — NOT a `WHERE` / `JOIN` / `;`. Without treating
+/// `)` as a sentinel, `cond_end` walks past it (and the
+/// `) AS sub` tail) all the way to the trailing `;`, and
+/// `conditions` swallows the entire `) GROUP BY ... LIMIT 10`
+/// tail, producing malformed LATERAL output.
 ///
 /// We compare the uppercased input byte-by-byte against the
 /// keyword bytes (with a leading space, matching the original
@@ -269,9 +280,10 @@ fn find_top_level_end_of_conditions(sql: &str) -> usize {
         match c {
             b'(' => depth += 1,
             b')' => {
-                if depth > 0 {
-                    depth -= 1;
+                if depth == 0 {
+                    return i;
                 }
+                depth -= 1;
             }
             b';' if depth == 0 => return i,
             _ if depth == 0 => {
@@ -474,6 +486,56 @@ mod tests {
             "LATERAL subquery must close with `LIMIT 1) v ON TRUE` \
              (with optional trailing `;`) at the end of the SQL. \
              Got: {translated}"
+        );
+    }
+
+    /// Regression: when the ASOF JOIN is itself inside a nested
+    /// subquery (e.g. `(SELECT ... FROM a ASOF JOIN b ON ...) AS sub`
+    /// after view-inlining or just user-written nesting), the next
+    /// token after the ASOF conditions at paren-depth 0 is `)` (the
+    /// close of the enclosing subquery), NOT `WHERE` / `JOIN` / `;`.
+    /// The previous `find_top_level_end_of_conditions` did not treat
+    /// depth-0 `)` as a sentinel, so it skipped over the subquery
+    /// close and walked all the way to the trailing `;` — making
+    /// `conditions` swallow the entire `) GROUP BY ... LIMIT 10`
+    /// tail and producing malformed LATERAL output (the LATERAL
+    /// subquery's closing `)` was missing because it had been
+    /// consumed as part of the ASOF conditions).
+    ///
+    /// The fix is to treat depth-0 `)` as a sentinel: it marks the
+    /// boundary between the ASOF ON conditions and the closing of
+    /// an enclosing subquery, so the ASOF conditions MUST end at
+    /// that boundary.
+    #[test]
+    fn translate_asof_inside_nested_subquery() {
+        let sql = "SELECT * FROM (SELECT * FROM a ASOF JOIN b ON a.id = b.id AND a.ts >= b.ts) AS sub";
+        let translated = translate_asof(sql).unwrap();
+
+        // The LATERAL subquery must close correctly: `LIMIT 1)` is
+        // the LATERAL subquery's closing paren, immediately followed
+        // by the right alias `b` and the `ON TRUE` clause. The outer
+        // subquery's `)` must NOT be swallowed into the conditions.
+        assert!(
+            translated.contains("LIMIT 1) b ON TRUE)"),
+            "LATERAL subquery's closing `)` must be present, AND the \
+             outer subquery's `)` must come after `ON TRUE`. Got: {translated}"
+        );
+        // The trailing `) AS sub` of the outer enclosing subquery
+        // must survive verbatim in the output.
+        assert!(
+            translated.contains(") AS sub"),
+            "outer subquery's closing `) AS sub` must be preserved. \
+             Got: {translated}"
+        );
+        // Equi + inequality conditions must be present in the LATERAL
+        // subquery (not eaten by a too-greedy cond_end).
+        assert!(
+            translated.contains("b.id = a.id"),
+            "expected equi condition in: {translated}"
+        );
+        assert!(
+            translated.contains("b.ts <= a.ts"),
+            "expected translated inequality in: {translated}"
         );
     }
 
