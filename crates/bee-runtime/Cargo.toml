@@ -8,7 +8,7 @@ description = "Bee 应用层: Pipeline / Phase / Handler / Dag / Compiler (数�
 
 [dependencies]
 tokio = { workspace = true }
-arrow-schema = "55"
+arrow-schema = "56"
 bee-adapter = { workspace = true }
 bee-types = { workspace = true }
 bee-plugin-sdk = { workspace = true }
