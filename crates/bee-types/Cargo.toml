@@ -1,0 +1,12 @@
+[package]
+name = "bee-types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Bee 共享类型: 跨 crate 的核心枚举 (JobLifecycleState 等),打破控制面↔运行时循环依赖。"
+
+[dependencies]
+
+[lints]
+workspace = true

@@ -206,3 +206,140 @@ async fn bee_jobs_inspect_unknown_job_returns_none_at_library_level() {
     assert!(output.contains("\x1b[33mwaiting_for_upstream\x1b[0m"), "missing yellow:\n{output}");
     assert!(output.contains("\x1b[31mfailed\x1b[0m"), "missing red:\n{output}");
 }
+
+// ---- S17 §4: jobs_view Mode column ----
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn job_mode_distinguishes_producer_subscriber_independent() {
+    use bee_control::control_plane::JobMode;
+
+    let cluster = fresh_cluster().await;
+    let leader = cluster.leader().await.expect("leader");
+
+    cluster
+        .submit(
+            leader,
+            Op::RegisterDatasourceProducer { signature: "sig-A".into(), job_id: 1 },
+        )
+        .await
+        .expect("register producer 1");
+    cluster
+        .submit(
+            leader,
+            Op::RegisterJob {
+                job_id: 2,
+                dag_hash: "d".into(),
+                owner_node: leader,
+                tenant: 0,
+            },
+        )
+        .await
+        .expect("register job 2");
+    cluster
+        .submit(
+            leader,
+            Op::UpdateJobLifecycle { job_id: 2, state: JobLifecycleState::Running },
+        )
+        .await
+        .expect("job 2 -> Running");
+    cluster
+        .submit(
+            leader,
+            Op::RegisterDependency {
+                downstream_job: 2,
+                upstream_job: 1,
+                stream: "sig-A".into(),
+            },
+        )
+        .await
+        .expect("register dep 2 -> 1");
+    cluster
+        .submit(
+            leader,
+            Op::RegisterJob {
+                job_id: 3,
+                dag_hash: "i".into(),
+                owner_node: leader,
+                tenant: 0,
+            },
+        )
+        .await
+        .expect("register job 3");
+
+    let handle = cluster.node(leader).expect("handle");
+    let cp = handle.cp.lock().await;
+    assert_eq!(cp.job_mode(1), JobMode::Producer);
+    assert_eq!(cp.job_mode(2), JobMode::Subscriber);
+    assert_eq!(cp.job_mode(3), JobMode::Independent);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn job_mode_producer_wins_when_chained() {
+    use bee_control::control_plane::JobMode;
+
+    // Job 1 is itself a Producer AND has a dep on another Producer.
+    // Producer should win (the Job produces its own stream).
+    let cluster = fresh_cluster().await;
+    let leader = cluster.leader().await.expect("leader");
+
+    cluster
+        .submit(
+            leader,
+            Op::RegisterDatasourceProducer { signature: "outer".into(), job_id: 1 },
+        )
+        .await
+        .expect("register outer producer");
+    cluster
+        .submit(
+            leader,
+            Op::RegisterDatasourceProducer { signature: "inner".into(), job_id: 2 },
+        )
+        .await
+        .expect("register inner producer");
+    cluster
+        .submit(
+            leader,
+            Op::RegisterJob {
+                job_id: 1,
+                dag_hash: "d".into(),
+                owner_node: leader,
+                tenant: 0,
+            },
+        )
+        .await
+        .expect("register job 1");
+    cluster
+        .submit(
+            leader,
+            Op::RegisterDependency {
+                downstream_job: 1,
+                upstream_job: 2,
+                stream: "inner".into(),
+            },
+        )
+        .await
+        .expect("register dep 1 -> 2");
+
+    let handle = cluster.node(leader).expect("handle");
+    let cp = handle.cp.lock().await;
+    assert_eq!(
+        cp.job_mode(1),
+        JobMode::Producer,
+        "Job 1 is a Producer (own signature) even though it also subscribes"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn job_mode_unknown_job_returns_independent() {
+    use bee_control::control_plane::JobMode;
+
+    let cluster = fresh_cluster().await;
+    let leader = cluster.leader().await.expect("leader");
+    let handle = cluster.node(leader).expect("handle");
+    let cp = handle.cp.lock().await;
+    assert_eq!(
+        cp.job_mode(999),
+        JobMode::Independent,
+        "a JobId with no record is treated as Independent (defensive default)"
+    );
+}

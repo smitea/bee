@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/bee-types",
     "crates/bee-transport",
     "crates/bee-codec",
     "crates/bee-session",
@@ -12,6 +13,11 @@ members = [
     "crates/bee-plugin-sdk",
     "crates/bee-kv-test",
     "bee",
+    "plugins/bee-plugin-binance-mock",
+    "plugins/bee-plugin-google-news-mock",
+    "plugins/bee-plugin-influxdb-mock",
+    "plugins/bee-plugin-mongodb-mock",
+    "plugins/bee-plugin-ta-lib-mock",
 ]
 
 [workspace.package]
@@ -29,6 +35,7 @@ bee-codec = { path = "crates/bee-codec" }
 bee-transport = { path = "crates/bee-transport" }
 bee-runtime = { path = "crates/bee-runtime" }
 bee-control = { path = "crates/bee-control" }
+bee-types = { path = "crates/bee-types" }
 bee-dsl-sql = { path = "crates/bee-dsl-sql" }
 bee-adapter = { path = "crates/bee-adapter" }
 bee-plugin-sdk = { path = "crates/bee-plugin-sdk" }

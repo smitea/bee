@@ -19,7 +19,7 @@
 //!   in-memory cluster as a demo; the production path queries
 //!   another Node's ControlPlane over the BRP control channel.
 
-use crate::control_plane::{ControlPlaneStateMachine, JobRecord, TaskRecord};
+use crate::control_plane::{ControlPlaneStateMachine, JobMode, JobRecord, TaskRecord};
 use crate::kv::{JobLifecycleState, TaskStatus};
 
 /// Format the `bee jobs` listing. Returns a Markdown-style table
@@ -28,8 +28,8 @@ use crate::kv::{JobLifecycleState, TaskStatus};
 /// red=failed).
 pub fn format_jobs(cp: &ControlPlaneStateMachine) -> String {
     let mut out = String::new();
-    out.push_str("JobId | Name                | Status              | Tasks | Owner\n");
-    out.push_str("------+---------------------+---------------------+-------+------\n");
+    out.push_str("JobId | Name                | Status              | Mode       | Tasks | Owner\n");
+    out.push_str("------+---------------------+---------------------+------------+-------+------\n");
     let jobs = cp.list_jobs();
     if jobs.is_empty() {
         out.push_str("(no jobs)\n");
@@ -42,10 +42,11 @@ pub fn format_jobs(cp: &ControlPlaneStateMachine) -> String {
             .filter(|t| t.job_id == job.job_id)
             .count();
         out.push_str(&format!(
-            "{:5} | {:<19} | {:<19} | {:5} | {:5}\n",
+            "{:5} | {:<19} | {:<19} | {:<10} | {:5} | {:5}\n",
             job.job_id,
             truncate(&job.dag_hash, 19),
             colorize_lifecycle(&format_lifecycle(job.lifecycle)),
+            format_mode(cp.job_mode(job.job_id)),
             task_count,
             job.owner_node,
         ));
@@ -135,6 +136,18 @@ fn format_lifecycle(s: JobLifecycleState) -> String {
         Failed => "failed",
     }
     .to_string()
+}
+
+/// S17 §4: render a Job's mode for the listing table.
+/// `Independent` (the most common case for a normal Pipeline)
+/// renders as `-` so the table stays visually compact.
+fn format_mode(m: JobMode) -> String {
+    use JobMode::*;
+    match m {
+        Producer => "Producer".to_string(),
+        Subscriber => "Subscriber".to_string(),
+        Independent => "-".to_string(),
+    }
 }
 
 fn format_status(s: TaskStatus) -> String {

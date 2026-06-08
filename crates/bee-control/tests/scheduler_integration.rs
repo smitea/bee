@@ -9,6 +9,7 @@ fn linear_pipeline(tasks: Vec<TaskSpec>, edges: Vec<Edge>) -> Pipeline {
         name: "sched-test".to_string(),
         tasks,
         edges,
+        stream_identities: vec![],
     }
 }
 

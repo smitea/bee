@@ -89,6 +89,22 @@ pub struct ControlPlaneStateMachine {
     datasource_producers: HashMap<String, u32>,
 }
 
+/// S17 §4: a Job's role with respect to Stream sharing.
+/// - `Producer`: this JobId appears in the
+///   `datasource_producers` registry (it is the canonical owner
+///   of a Stream).
+/// - `Subscriber`: this Job has at least one dependency whose
+///   `upstream_job` is a Producer (it consumes a Stream owned by
+///   another Job).
+/// - `Independent`: neither — the Job is a normal, self-contained
+///   Pipeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobMode {
+    Producer,
+    Subscriber,
+    Independent,
+}
+
 impl ControlPlaneStateMachine {
     pub fn new() -> Self {
         Self::default()
@@ -279,6 +295,54 @@ impl ControlPlaneStateMachine {
     /// Producer/Subscriber breakdown.
     pub fn datasource_producer_count(&self) -> usize {
         self.datasource_producers.len()
+    }
+
+    /// S17 §3: when a Producer Job dies (Failed / Completed /
+    /// removed), all Subscribers (Jobs whose `dependencies`
+    /// list contains `upstream_job == producer_job_id`) must flip
+    /// from `Running` to `WaitingForUpstream`. Returns the list of
+    /// JobIds that were flipped, for the orchestrator's log.
+    ///
+    /// Idempotent: subscribers that are already
+    /// `WaitingForUpstream` (or any non-`Running` state) are not
+    /// touched, even if they still have a dependency on the dead
+    /// producer.
+    pub fn propagate_producer_death(
+        &mut self,
+        producer_job_id: u32,
+    ) -> Vec<u32> {
+        let mut flipped = vec![];
+        for (job_id, job) in self.jobs.iter_mut() {
+            let depends_on_dead = job
+                .dependencies
+                .iter()
+                .any(|d| d.upstream_job == producer_job_id);
+            if depends_on_dead
+                && job.lifecycle == JobLifecycleState::Running
+            {
+                job.lifecycle = JobLifecycleState::WaitingForUpstream;
+                flipped.push(*job_id);
+            }
+        }
+        flipped
+    }
+
+    /// S17 §4: derive a Job's [`JobMode`] at view time. A JobId
+    /// with no record returns `Independent` (defensive default
+    /// for views that may be queried before all jobs are
+    /// registered).
+    pub fn job_mode(&self, job_id: u32) -> JobMode {
+        if self.datasource_producers.values().any(|&p| p == job_id) {
+            return JobMode::Producer;
+        }
+        if let Some(job) = self.jobs.get(&job_id) {
+            for d in &job.dependencies {
+                if self.datasource_producers.values().any(|&p| p == d.upstream_job) {
+                    return JobMode::Subscriber;
+                }
+            }
+        }
+        JobMode::Independent
     }
 
     pub fn list_tasks(&self) -> Vec<TaskRecord> {

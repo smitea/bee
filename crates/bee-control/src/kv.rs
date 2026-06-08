@@ -115,22 +115,13 @@ pub enum TaskStatus {
     Failed,
 }
 
-/// S18: high-level lifecycle of a Pipeline Job. `WaitingForUpstream`
-/// means the Job is registered but at least one declared dependency
-/// (`Job B depends on Job A's output`) has not yet reached `Running`.
-/// The deployer / orchestrator drives transitions: Pending → Scheduled
-/// → Running (or WaitingForUpstream → Running once deps are met).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum JobLifecycleState {
-    #[default]
-    Pending,
-    Scheduled,
-    /// S18: dependencies declared but not all upstreams are `Running`.
-    WaitingForUpstream,
-    Running,
-    Completed,
-    Failed,
-}
+/// S18: high-level lifecycle of a Pipeline Job. The enum lives in
+/// the `bee-types` sub-crate so `bee-runtime` (and any other
+/// consumer that doesn't otherwise need `bee-control`) can use it
+/// without creating a `bee-control ↔ bee-runtime` cycle. This
+/// re-export keeps the historical `bee_control::kv::JobLifecycleState`
+/// path working.
+pub use bee_types::JobLifecycleState;
 
 #[derive(Debug, Default, Clone)]
 pub struct KVStateMachine {

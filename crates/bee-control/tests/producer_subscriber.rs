@@ -171,3 +171,151 @@ async fn different_signatures_get_different_producers() {
     assert_eq!(read_producer(&cluster, &sig_b).await, Some(2));
     assert_eq!(read_producer_count(&cluster).await, 2);
 }
+
+// ---- S17 §3: propagate_producer_death ----
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn producer_death_flips_running_subscribers_to_waiting() {
+    use bee_control::kv::{JobLifecycleState, Op};
+
+    let cluster = fresh_cluster().await;
+    let leader = cluster.leader().await.expect("leader");
+
+    // Register Job A as a Producer for a signature.
+    let sig = "binance:BTC/USDT:5m".to_string();
+    cluster
+        .submit(
+            leader,
+            Op::RegisterDatasourceProducer { signature: sig.clone(), job_id: 1 },
+        )
+        .await
+        .expect("register producer A");
+    wait_for_producer(&cluster, &sig, 1, Duration::from_secs(2)).await;
+
+    // Register Job B with a dependency on A (Subscriber pattern).
+    cluster
+        .submit(
+            leader,
+            Op::RegisterJob {
+                job_id: 2,
+                dag_hash: "dag-b".into(),
+                owner_node: leader,
+                tenant: 0,
+            },
+        )
+        .await
+        .expect("register job B");
+    cluster
+        .submit(
+            leader,
+            Op::RegisterDependency {
+                downstream_job: 2,
+                upstream_job: 1,
+                stream: sig.clone(),
+            },
+        )
+        .await
+        .expect("register B's dep on A");
+    // Order matters: RegisterDependency auto-flips a Running job to
+    // WaitingForUpstream (S18). Set Running AFTER the dep is wired so
+    // B is in the Running state at the time we propagate A's death.
+    cluster
+        .submit(
+            leader,
+            Op::UpdateJobLifecycle { job_id: 2, state: JobLifecycleState::Running },
+        )
+        .await
+        .expect("B -> Running");
+
+    // Now propagate A's death.
+    let flipped = {
+        let handle = cluster.node(leader).expect("handle");
+        let mut cp = handle.cp.lock().await;
+        cp.propagate_producer_death(1)
+    };
+
+    assert_eq!(flipped, vec![2], "Job B should have been flipped");
+
+    // Verify B's lifecycle is now WaitingForUpstream.
+    let handle = cluster.node(leader).expect("handle");
+    let cp = handle.cp.lock().await;
+    assert_eq!(cp.list_jobs()[0].lifecycle, JobLifecycleState::WaitingForUpstream);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn producer_death_is_noop_on_already_waiting_subscribers() {
+    use bee_control::kv::{JobLifecycleState, Op};
+
+    let cluster = fresh_cluster().await;
+    let leader = cluster.leader().await.expect("leader");
+
+    cluster
+        .submit(
+            leader,
+            Op::RegisterDatasourceProducer { signature: "sig".into(), job_id: 1 },
+        )
+        .await
+        .expect("register A");
+    cluster
+        .submit(leader, Op::RegisterJob {
+            job_id: 2, dag_hash: "d".into(), owner_node: leader, tenant: 0,
+        })
+        .await
+        .expect("register B");
+    cluster
+        .submit(leader, Op::UpdateJobLifecycle { job_id: 2, state: JobLifecycleState::WaitingForUpstream })
+        .await
+        .expect("B -> WaitingForUpstream");
+    cluster
+        .submit(leader, Op::RegisterDependency {
+            downstream_job: 2, upstream_job: 1, stream: "sig".into(),
+        })
+        .await
+        .expect("register dep");
+
+    let flipped = {
+        let handle = cluster.node(leader).expect("handle");
+        let mut cp = handle.cp.lock().await;
+        cp.propagate_producer_death(1)
+    };
+
+    assert!(flipped.is_empty(), "B is already WaitingForUpstream; no flip");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn producer_death_does_not_touch_unrelated_running_jobs() {
+    use bee_control::kv::{JobLifecycleState, Op};
+
+    let cluster = fresh_cluster().await;
+    let leader = cluster.leader().await.expect("leader");
+
+    // A is the Producer, B depends on A (Subscriber), C is unrelated.
+    cluster.submit(leader, Op::RegisterDatasourceProducer { signature: "s".into(), job_id: 1 })
+        .await.expect("");
+    cluster.submit(leader, Op::RegisterJob { job_id: 2, dag_hash: "d".into(), owner_node: leader, tenant: 0 })
+        .await.expect("");
+    cluster.submit(leader, Op::RegisterDependency { downstream_job: 2, upstream_job: 1, stream: "s".into() })
+        .await.expect("");
+    // Set Running AFTER dep wiring (RegisterDependency auto-flips
+    // Running -> WaitingForUpstream; see S18).
+    cluster.submit(leader, Op::UpdateJobLifecycle { job_id: 2, state: JobLifecycleState::Running })
+        .await.expect("");
+
+    cluster.submit(leader, Op::RegisterJob { job_id: 3, dag_hash: "c".into(), owner_node: leader, tenant: 0 })
+        .await.expect("");
+    cluster.submit(leader, Op::UpdateJobLifecycle { job_id: 3, state: JobLifecycleState::Running })
+        .await.expect("");
+
+    let flipped = {
+        let handle = cluster.node(leader).expect("handle");
+        let mut cp = handle.cp.lock().await;
+        cp.propagate_producer_death(1)
+    };
+
+    assert_eq!(flipped, vec![2], "only B should flip; C is unrelated");
+
+    let handle = cluster.node(leader).expect("handle");
+    let cp = handle.cp.lock().await;
+    let c = cp.list_jobs().into_iter().find(|j| j.job_id == 3).expect("C exists");
+    assert_eq!(c.lifecycle, JobLifecycleState::Running, "C must remain Running");
+}

@@ -341,6 +341,129 @@ pub fn check_inline_credentials(sql: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// S17 §2: extract the stream-producing identities from a SQL
+/// Pipeline. An identity is a triple `(datasource_name,
+/// adapter_method, stream_topology_args)`. The `datasource_name`
+/// comes from the matching `use <name>;` directive; the
+/// `adapter_method` and `stream_topology_args` come from the
+/// `<name>.<method>(<args>)` calls in the body.
+///
+/// For the MVP, args are captured as a `BTreeMap<String, String>`
+/// (string-typed only). Numeric / boolean / null args are
+/// serialized to their JSON form. Plugins that need richer
+/// topology args can override the S17 signature in a follow-up.
+pub fn extract_stream_identities(
+    sql: &str,
+) -> Vec<(String, String, std::collections::BTreeMap<String, String>)> {
+    use std::collections::BTreeMap;
+    let (directives, body) = match preprocess(sql) {
+        Ok(v) => v,
+        Err(_) => return vec![],
+    };
+    let mut out: Vec<(String, String, BTreeMap<String, String>)> = vec![];
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for line in body.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("--") {
+            continue;
+        }
+        let bytes = line.as_bytes();
+        let mut i = 0;
+        while i + 1 < bytes.len() {
+            let c = bytes[i];
+            if !(c.is_ascii_alphabetic() || c == b'_') {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                i += 1;
+            }
+            let name = &line[start..i];
+            let mut j = i;
+            while j < bytes.len() && bytes[j] == b' ' {
+                j += 1;
+            }
+            if j >= bytes.len() || bytes[j] != b'.' {
+                continue;
+            }
+            if j + 1 >= bytes.len()
+                || !(bytes[j + 1].is_ascii_alphabetic() || bytes[j + 1] == b'_')
+            {
+                continue;
+            }
+            let method_start = j + 1;
+            let mut k = method_start;
+            while k < bytes.len() && (bytes[k].is_ascii_alphanumeric() || bytes[k] == b'_') {
+                k += 1;
+            }
+            let method = &line[method_start..k];
+            let mut paren_depth = 0;
+            let mut m = k;
+            let mut found_paren = false;
+            while m < bytes.len() {
+                match bytes[m] {
+                    b'(' => {
+                        paren_depth += 1;
+                        found_paren = true;
+                        m += 1;
+                    }
+                    b')' => {
+                        paren_depth -= 1;
+                        if paren_depth == 0 {
+                            break;
+                        }
+                        m += 1;
+                    }
+                    _ => m += 1,
+                }
+            }
+            if !found_paren || paren_depth != 0 {
+                continue;
+            }
+            let args_text = &line[k..=m.min(bytes.len() - 1)];
+            let args_inner = args_text
+                .trim_start_matches('(')
+                .trim_end_matches(')')
+                .trim();
+            let mut map: BTreeMap<String, String> = BTreeMap::new();
+            for pair in args_inner.split(',') {
+                let pair = pair.trim();
+                if pair.is_empty() {
+                    continue;
+                }
+                let (k_str, v_str) = if let Some(idx) = pair.find("=>") {
+                    (pair[..idx].trim(), pair[idx + 2..].trim())
+                } else if let Some(idx) = pair.find('=') {
+                    (pair[..idx].trim(), pair[idx + 1..].trim())
+                } else {
+                    continue;
+                };
+                let v_str = v_str
+                    .trim_matches('\'')
+                    .trim_matches('"')
+                    .to_string();
+                map.insert(k_str.to_string(), v_str);
+            }
+            let dedup_key = format!("{name}.{method}");
+            if !seen.insert(dedup_key) {
+                continue;
+            }
+            // The preprocessor already enforces strict mode; if a
+            // matching `use <name>;` is missing, `preprocess` would
+            // have returned `Err` and we'd be in the early-return
+            // path. The directive lookup is a no-op for the MVP but
+            // keeps the door open for per-datasource filtering
+            // (e.g. excluding Emit-only datasources from the
+            // signature list).
+            let _matched_use = directives.iter().find(|d| d.name == name);
+            out.push((name.to_string(), method.to_string(), map));
+        }
+    }
+    out
+}
+
 /// S29 redo: validate `EMIT INTO <datasource>` (basic). The
 /// `EMIT INTO` clause must reference a `use`'d Datasource. Returns
 /// `Ok(())` if all `EMIT INTO` clauses are covered, `Err(msg)` if
@@ -726,5 +849,41 @@ mod tests {
         let sql = "use binance;\nemit into binance (symbol) VALUES ('BTC')";
         let d = parse_use_directives(sql);
         assert!(check_emit_into(sql, &d).is_ok());
+    }
+
+    // ---- S17 §2: extract_stream_identities ----
+    //
+    // NOTE: `parse_use_directives` is line-based — each directive
+    // must be on its own line. The realistic Bee SQL format always
+    // splits `use` lines from the SELECT body with newlines, so
+    // the tests below mirror that shape. Single-line SQL like
+    // `"use binance; SELECT ..."` will not parse the `use` (the
+    // line-scan treats the whole line as one token).
+
+    #[test]
+    fn extract_identities_finds_single_call() {
+        let sql = "use binance;\nSELECT * FROM binance.subscribe(symbol='BTC/USDT', interval='5min')";
+        let ids = extract_stream_identities(sql);
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids[0].0, "binance");
+        assert_eq!(ids[0].1, "subscribe");
+        assert!(!ids[0].2.is_empty(), "args map should be non-empty");
+    }
+
+    #[test]
+    fn extract_identities_finds_multiple_calls() {
+        let sql = "use binance;\nuse google_news;\n\
+                   SELECT * FROM binance.subscribe(symbol='BTC/USDT', interval='5min')\n\
+                   JOIN google_news.search(query='btc')";
+        let ids = extract_stream_identities(sql);
+        assert_eq!(ids.len(), 2);
+    }
+
+    #[test]
+    fn extract_identities_dedupes_repeated_calls() {
+        let sql = "use binance;\nSELECT * FROM binance.subscribe(symbol='BTC/USDT', interval='5min')\n\
+                   WHERE EXISTS (SELECT 1 FROM binance.subscribe(symbol='BTC/USDT', interval='5min'))";
+        let ids = extract_stream_identities(sql);
+        assert_eq!(ids.len(), 1, "repeated calls must dedupe");
     }
 }

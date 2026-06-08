@@ -20,7 +20,10 @@ use tokio::task::JoinHandle;
 
 pub mod metrics;
 pub mod scheduler;
+pub mod subscriber;
 pub mod test_utils;
+
+pub use bee_types::JobLifecycleState;
 
 pub type PhaseId = u32;
 

@@ -24,7 +24,8 @@ pub use physical::{
     run_pipeline_with_config, DataFusionPhase, RunConfig, RunMode,
 };
 pub use preprocess::{
-    check_strict_mode, parse_use_directives, preprocess, UseDirective,
+    check_strict_mode, extract_stream_identities, parse_use_directives,
+    preprocess, UseDirective,
 };
 
 /// 解析一条 SQL 语句,返回 DataFusion 的 Statement AST 列表。

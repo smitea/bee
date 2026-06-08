@@ -61,10 +61,29 @@ pub struct Edge {
     pub to: u32,
 }
 
+/// S17 §2: the (datasource_name, adapter_method, stream_topology_args)
+/// triple extracted from a Pipeline's SQL by
+/// [`bee_dsl_sql::preprocess::extract_stream_identities`]. Re-exported
+/// here so callers of `Pipeline` don't need to depend on bee-dsl-sql
+/// just to spell the field type.
+pub type StreamIdentity = (
+    String,
+    String,
+    std::collections::BTreeMap<String, String>,
+);
+
 pub struct Pipeline {
     pub name: String,
     pub tasks: Vec<TaskSpec>,
     pub edges: Vec<Edge>,
+    /// S17 §2: stream-producing identities extracted from the
+    /// original SQL. Populated by [`Pipeline::from_sql`]; left
+    /// empty when the Pipeline is built via the struct literal
+    /// (legacy path used by `deploy_pipeline.rs`, `work_stealing.rs`,
+    /// etc.). When non-empty, `Deployer::deploy` consults the CP
+    /// for each signature and routes the Job as Producer or
+    /// Subscriber per ADR-0011.
+    pub stream_identities: Vec<StreamIdentity>,
 }
 
 impl Pipeline {
@@ -96,8 +115,64 @@ impl Pipeline {
                 },
             ],
             edges: vec![Edge { from: 1, to: 2 }, Edge { from: 2, to: 3 }],
+            stream_identities: vec![],
         };
         (p, log)
+    }
+
+    /// S17 §2: build a Pipeline from raw SQL. Extracts the
+    /// stream identities via [`bee_dsl_sql::preprocess::extract_stream_identities`];
+    /// for the MVP, synthesizes a minimal linear DAG (one
+    /// `Started` Phase per stream identity, plus a terminal sink).
+    /// Future: route through `bee_dsl_sql::compile_to_dag` for a
+    /// proper Logical-to-Physical compilation.
+    ///
+    /// The synthesized DAG has zero resource requirements
+    /// (`cpu_millicores = 0`, `mem_mb = 0`) so it always fits on
+    /// the smallest worker. Pipelines built via `from_sql` exist
+    /// primarily to exercise the deployer's signature-driven
+    /// Producer/Subscriber wiring; the runtime DAG shape is a
+    /// stand-in until S20+ replaces it with the full compile path.
+    pub fn from_sql(
+        name: &str,
+        sql: &str,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        use bee_dsl_sql::preprocess::extract_stream_identities;
+        let stream_identities = extract_stream_identities(sql);
+        let mut tasks: Vec<TaskSpec> = stream_identities
+            .iter()
+            .enumerate()
+            .map(|(i, _)| TaskSpec {
+                task_id: (i + 1) as u32,
+                phase_id: i as u32,
+                handler_kind: HandlerKind::Started { tag: format!("P{i}") },
+                cpu_millicores: 0,
+                mem_mb: 0,
+            })
+            .collect();
+        let sink_id = (tasks.len() + 1) as u32;
+        tasks.push(TaskSpec {
+            task_id: sink_id,
+            phase_id: tasks.len() as u32,
+            handler_kind: HandlerKind::Terminal { tag: "SINK".to_string() },
+            cpu_millicores: 0,
+            mem_mb: 0,
+        });
+        let mut edges: Vec<Edge> = (1..sink_id)
+            .map(|i| Edge { from: i, to: i + 1 })
+            .collect();
+        if stream_identities.is_empty() {
+            // No stream identities = no upstream tasks; drop the
+            // synthesized SINK so the pipeline is genuinely empty.
+            tasks.pop();
+            edges.clear();
+        }
+        Ok(Pipeline {
+            name: name.to_string(),
+            tasks,
+            edges,
+            stream_identities,
+        })
     }
 }
 
@@ -240,6 +315,46 @@ impl Deployer {
                 )
             .await
             .map_err(DeployError::Submit)?;
+
+        // S17 §2 (ADR-0011): for each stream identity declared by
+        // the Pipeline's SQL, decide whether this Job is the
+        // Producer (first writer) or a Subscriber (reuses an
+        // existing Producer's stream). The decision is made by
+        // looking up the leader's CP for the signature; the CP
+        // itself is the source of truth and applies the
+        // "first writer wins" rule on its own.
+        //
+        // Pipelines built via the struct literal (legacy path —
+        // `deploy_pipeline.rs`, `work_stealing.rs`, etc.) have an
+        // empty `stream_identities` vec, so this loop is a no-op
+        // for them. Only Pipelines built via `Pipeline::from_sql`
+        // exercise the Producer/Subscriber routing.
+        for (ds_name, method, args) in &pipeline.stream_identities {
+            let sig = crate::signature::stream_signature(ds_name, method, args);
+            let existing_producer: Option<u32> = {
+                let handle = self
+                    .cluster
+                    .node(leader)
+                    .expect("leader handle exists after wait_for_leader");
+                let cp = handle.cp.lock().await;
+                cp.lookup_datasource_producer(&sig)
+            };
+            let s17_op = match existing_producer {
+                Some(producer_id) if producer_id != job_id => Op::RegisterDependency {
+                    downstream_job: job_id,
+                    upstream_job: producer_id,
+                    stream: sig,
+                },
+                _ => Op::RegisterDatasourceProducer {
+                    signature: sig,
+                    job_id,
+                },
+            };
+            self.cluster
+                .submit(leader, s17_op)
+                .await
+                .map_err(DeployError::Submit)?;
+        }
 
         for task in &pipeline.tasks {
             let worker_id = placement_map[&task.task_id];

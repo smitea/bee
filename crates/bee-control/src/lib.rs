@@ -20,7 +20,10 @@ pub mod raft;
 pub mod rebalancer;
 pub mod scheduler;
 pub mod secret_store;
+pub mod signature;
 pub mod worker;
+
+pub use bee_types::JobLifecycleState;
 
 pub use builtin_handlers::{LogSink, StartedHandler, TerminalHandler};
 pub use control_plane::{ControlPlaneStateMachine, JobRecord, TaskRecord};

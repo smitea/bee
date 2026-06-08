@@ -19,6 +19,7 @@ fn linear_3_pipeline() -> Pipeline {
             Edge { from: 1, to: 2 },
             Edge { from: 2, to: 3 },
         ],
+        stream_identities: vec![],
     }
 }
 
