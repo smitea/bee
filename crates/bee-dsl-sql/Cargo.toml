@@ -18,6 +18,12 @@ arrow-array = "56"
 arrow-schema = "56"
 bee-runtime = { workspace = true }
 bee-plugin-sdk = { workspace = true }
+# S41 (9c): in-process shortcut for the perf-fib plugin. The proper
+# architecture loads `bee-plugin-perf-fib` as a cdylib via FFI; the
+# S41 MVP links it as a regular rlib so the demo runs without the
+# libloading dance. See `udfs.rs::register_perf_fib` for the
+# dispatcher and the S41 plan §9c for the migration path.
+bee-plugin-perf-fib = { path = "../../plugins/bee-plugin-perf-fib" }
 serde_json = "1"
 thiserror = "2"
 

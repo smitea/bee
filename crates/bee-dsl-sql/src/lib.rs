@@ -13,6 +13,7 @@ mod handlers;
 mod physical;
 pub mod preprocess;
 pub mod sinks;
+mod udfs;
 
 #[cfg(feature = "test-fixtures")]
 pub mod test_fixtures;
@@ -31,21 +32,87 @@ pub use physical::{
 };
 pub use preprocess::{
     check_strict_mode, extract_stream_identities, parse_use_directives,
-    preprocess, strip_emit_into, EmitTarget, UseDirective,
+    preprocess, strip_create_source_and_view, strip_emit_into,
+    CreateDefinition, CreateKind, EmitTarget, UseDirective,
 };
 
-/// S41 (9b): preprocess a SQL string for execution, including the
-/// `ASOF JOIN` → `LEFT JOIN LATERAL` translation. Call this before
-/// handing the SQL to DataFusion. The transformation is a no-op
-/// if the SQL does not contain an `ASOF JOIN` clause.
+/// S41 (9b / 9c): preprocess a SQL string for execution, including:
+/// - `CREATE SOURCE` / `CREATE VIEW` stripping + name → subquery
+///   substitution (S41 9c)
+/// - `ASOF JOIN` → `LEFT JOIN LATERAL` translation (S41 9b)
+/// - `use` directive stripping (S29)
+/// - `EMIT INTO <target>` prefix stripping (S41 9a)
 ///
-/// Returns the translated SQL, ready for DataFusion's parser.
+/// Call this before handing the SQL to DataFusion. Each
+/// transformation is a no-op if the SQL does not contain the
+/// relevant syntax. Returns the translated SQL, ready for
+/// DataFusion's parser.
 pub fn preprocess_sql_v2(sql: &str) -> std::result::Result<String, datafusion::error::DataFusionError> {
-    if sql.to_uppercase().contains("ASOF JOIN") {
-        translate_asof(sql)
+    // 1. Strip leading `use` lines. The S29 preprocessor does this
+    //    (and also runs strict mode + inline-credential checks),
+    //    but we re-implement the strip here to keep the v2 path
+    //    free of strict-mode coupling. Strict mode is opt-in via
+    //    `preprocess()` from the CLI's `--strict` flag.
+    let without_use = strip_use_lines(sql);
+    eprintln!("=== DEBUG: after strip_use_lines ===\n{without_use}\n=== END ===");
+
+    // 2. Strip `CREATE SOURCE` / `CREATE VIEW` and substitute
+    //    references to the declared name with the body as a
+    //    subquery.
+    let (_defs, after_create) = strip_create_source_and_view(&without_use);
+    eprintln!("=== DEBUG: after strip_create ===\n{after_create}\n=== END ===");
+
+    // 3. Strip `EMIT INTO <target>` prefix. The `run_pipeline`
+    //    entry point also calls `strip_emit_into`, but that call
+    //    happens BEFORE `compile_to_physical_plan` and therefore
+    //    before this preprocessor. To make the v2 preprocessor
+    //    self-contained (callers that skip `run_pipeline` still
+    //    get a valid DataFusion SQL), we strip it here too.
+    let (_target, after_emit) = strip_emit_into(&after_create);
+    eprintln!("=== DEBUG: after strip_emit ===\n{after_emit}\n=== END ===");
+
+    // 4. Translate `ASOF JOIN` → `LEFT JOIN LATERAL`.
+    if after_emit.to_uppercase().contains("ASOF JOIN") {
+        translate_asof(&after_emit)
     } else {
-        Ok(sql.to_string())
+        Ok(after_emit)
     }
+}
+
+/// S41 (9c): strip the leading `use ...;` lines from a SQL string.
+/// Lifted from the S29 `preprocess` module's private helper. The v2
+/// preprocessor path needs to strip `use` lines without triggering
+/// strict-mode / inline-credential checks (those are opt-in).
+///
+/// The leading run of "skippable" lines includes `use ...;` lines,
+/// blank lines, and `--` comment lines. We stop skipping the moment
+/// we see real SQL content (a `SELECT` / `CREATE` / `EMIT` /
+/// non-`use` non-comment line).
+///
+/// Preserves a trailing newline iff the input had one, so the
+/// preprocessor is transparent for the "no `use` lines" case.
+fn strip_use_lines(sql: &str) -> String {
+    let mut out = String::with_capacity(sql.len());
+    let mut past_use_block = false;
+    for line in sql.lines() {
+        let trimmed = line.trim_start();
+        let is_skippable = trimmed.is_empty()
+            || trimmed.starts_with("use ")
+            || trimmed.starts_with("use\t")
+            || trimmed == "use"
+            || trimmed.starts_with("use;")
+            || trimmed.starts_with("--");
+        if !past_use_block && is_skippable {
+            continue;
+        }
+        past_use_block = true;
+        out.push_str(line);
+        out.push('\n');
+    }
+    if !sql.ends_with('\n') && out.ends_with('\n') {
+        out.pop();
+    }
+    out
 }
 
 /// 解析一条 SQL 语句,返回 DataFusion 的 Statement AST 列表。
@@ -57,6 +124,10 @@ pub fn parse_sql(source: &str) -> DfResult<Vec<datafusion::sql::parser::Statemen
         datafusion::sql::parser::DFParserBuilder::new(source)
             .build()?
             .parse_statements()?;
+    eprintln!("=== DEBUG: parse_sql found {} statements ===", stmts.len());
+    for (i, stmt) in stmts.iter().enumerate() {
+        eprintln!("  stmt[{i}]: {stmt:?}");
+    }
     Ok(stmts.into())
 }
 
@@ -480,5 +551,14 @@ mod tests {
             out.contains("b.ts <= a.ts"),
             "expected translated inequality in: {out}"
         );
+    }
+
+    #[test]
+    fn debug_preprocess_fibonacci_sql() {
+        let sql = std::fs::read_to_string("../../examples/performance/fibonacci.sql").unwrap();
+        let out = preprocess_sql_v2(&sql).unwrap();
+        eprintln!("=== preprocess_sql_v2 output ===\n{out}\n=== END ===");
+        // Just a smoke test — we want to see the output.
+        assert!(out.contains("SELECT"), "expected SELECT in: {out}");
     }
 }

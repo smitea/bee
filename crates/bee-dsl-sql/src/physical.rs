@@ -90,27 +90,49 @@ impl Default for RunConfig {
 /// name `stream` (the S13+ default; tests that use a different name
 /// should call `analyze_with` + `register_csv` themselves).
 ///
+/// S41 (9c): the CSV registration is skipped if the file does not
+/// exist. This lets the S41 demos (which use `generate_series` /
+/// `CREATE SOURCE` instead of a CSV) run via `bee run
+/// examples/performance/<demo>.sql` without needing a dummy CSV.
+///
 /// S41 (9b): the SQL is preprocessed via [`super::preprocess_sql_v2`]
 /// before reaching DataFusion. This rewrites Bee extensions
-/// (currently `ASOF JOIN`) into a form DataFusion's parser can
-/// accept.
+/// (currently `ASOF JOIN`, `CREATE SOURCE` / `CREATE VIEW`) into a
+/// form DataFusion's parser can accept.
+///
+/// S41 (9c): UDFs from test-fixtures (when the feature is on) and
+/// the perf-fib plugin are registered on the `SessionContext`
+/// before the SQL is analyzed. This is what makes `fib_step(n)` and
+/// `generate_series(1, N)` callable from SQL.
 pub async fn compile_to_physical_plan(
     sql: &str,
     csv_path: &Path,
 ) -> DfResult<Arc<dyn ExecutionPlan>> {
     let ctx = SessionContext::new();
-    ctx.register_csv(
-        "stream",
-        csv_path.to_str().ok_or_else(|| {
-            datafusion::error::DataFusionError::Plan(format!(
-                "csv path {csv_path:?} is not valid UTF-8"
-            ))
-        })?,
-        CsvReadOptions::default(),
-    )
-    .await?;
+
+    // Register UDFs (test-fixtures + perf-fib) before the SQL is
+    // analyzed so the analyzer can resolve the function names.
+    crate::udfs::register_test_fixtures(&ctx)?;
+    crate::udfs::register_perf_fib(&ctx)?;
+
+    // S41 (9c): only register the CSV if the file actually exists.
+    // The S41 demos don't use a CSV; they synthesize data via
+    // `generate_series` / `CREATE SOURCE`.
+    if csv_path.exists() {
+        ctx.register_csv(
+            "stream",
+            csv_path.to_str().ok_or_else(|| {
+                datafusion::error::DataFusionError::Plan(format!(
+                    "csv path {csv_path:?} is not valid UTF-8"
+                ))
+            })?,
+            CsvReadOptions::default(),
+        )
+        .await?;
+    }
 
     let preprocessed = super::preprocess_sql_v2(sql)?;
+    eprintln!("=== DEBUG: preprocessed SQL ===\n{preprocessed}\n=== END ===");
     let logical = super::analyze_with_ctx(&ctx, &preprocessed).await?;
     ctx.state().create_physical_plan(&logical).await
 }
