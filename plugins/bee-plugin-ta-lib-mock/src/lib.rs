@@ -21,12 +21,12 @@
 //!   the FFI entry symbols.
 
 use bee_plugin_sdk::{
-    Factory, HandlerDescriptor, PluginHandle, PluginManifest, PluginName,
+    event::EventBytes, Factory, HandlerDescriptor, PluginHandle, PluginManifest, PluginName,
 };
 
 /// Result of a MACD computation. The last
 /// `(macd_line, signal_line, histogram)` triple.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MacdResult {
     pub macd_line: f64,
     pub signal_line: f64,
@@ -34,7 +34,7 @@ pub struct MacdResult {
 }
 
 /// Mock trading decision produced by [`decision_tree`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Decision {
     Buy,
     Sell,
@@ -200,11 +200,224 @@ impl Factory for TaLibMockFactory {
     }
 
     fn init() -> bee_plugin_sdk::PluginResult<PluginHandle> {
+        let mut handlers = std::collections::HashMap::new();
+        handlers.insert(
+            "MACD".to_string(),
+            &vtable_shim_macd::VTABLE as *const _,
+        );
+        handlers.insert(
+            "EMA".to_string(),
+            &vtable_shim_ema::VTABLE as *const _,
+        );
+        handlers.insert(
+            "decision_tree".to_string(),
+            &vtable_shim_decision_tree::VTABLE as *const _,
+        );
+        handlers.insert(
+            "sentiment_analyzer".to_string(),
+            &vtable_shim_sentiment_analyzer::VTABLE as *const _,
+        );
         Ok(PluginHandle {
             manifest: Self::manifest(),
             inner: std::sync::Arc::new(()),
+            input_adapters: std::collections::HashMap::new(),
+            output_adapters: std::collections::HashMap::new(),
+            handlers,
         })
     }
+}
+
+fn write_event_bytes(out: *mut EventBytes, value: impl serde::Serialize) -> i32 {
+    let bytes = match bincode::serialize(&value) {
+        Ok(b) => b,
+        Err(_) => return -1,
+    };
+    let len = bytes.len();
+    let ptr = bytes.as_ptr();
+    std::mem::forget(bytes);
+    unsafe { *out = EventBytes { ptr, len } };
+    0
+}
+
+mod vtable_shim_macd {
+    //! MACD handler shim. State: `Vec<f64>` (price history).
+    //! Event: `f64` (new price). Result: `MacdResult`.
+
+    use super::{macd, MacdResult};
+
+    use bee_plugin_sdk::event::EventBytes;
+    use bee_plugin_sdk::vtable::HandlerVtable;
+
+    pub unsafe extern "C" fn init_state(out: *mut EventBytes) -> i32 {
+        super::write_event_bytes(out, Vec::<f64>::new())
+    }
+
+    pub unsafe extern "C" fn handle(
+        state_ptr: *const u8,
+        state_len: usize,
+        event_ptr: *const u8,
+        event_len: usize,
+        new_state_out: *mut EventBytes,
+        result_out: *mut EventBytes,
+        _err_out: *mut EventBytes,
+    ) -> i32 {
+        let state_bytes = std::slice::from_raw_parts(state_ptr, state_len);
+        let mut state: Vec<f64> = match bincode::deserialize(state_bytes) {
+            Ok(s) => s,
+            Err(_) => return -1,
+        };
+        let event_bytes = std::slice::from_raw_parts(event_ptr, event_len);
+        let price: f64 = match bincode::deserialize(event_bytes) {
+            Ok(p) => p,
+            Err(_) => return -1,
+        };
+        state.push(price);
+        let result = if state.len() >= 26 {
+            macd(&state, 12, 26, 9)
+        } else {
+            MacdResult {
+                macd_line: 0.0,
+                signal_line: 0.0,
+                histogram: 0.0,
+            }
+        };
+        if super::write_event_bytes(new_state_out, &state) != 0 {
+            return -1;
+        }
+        super::write_event_bytes(result_out, &result)
+    }
+
+    pub const VTABLE: HandlerVtable = HandlerVtable {
+        handle,
+        init_state,
+    };
+}
+
+mod vtable_shim_ema {
+    //! EMA handler shim. State: `Vec<f64>` (price history).
+    //! Event: `f64` (new price). Result: `f64` (last EMA value).
+
+    use super::ema;
+
+    use bee_plugin_sdk::event::EventBytes;
+    use bee_plugin_sdk::vtable::HandlerVtable;
+
+    pub unsafe extern "C" fn init_state(out: *mut EventBytes) -> i32 {
+        super::write_event_bytes(out, Vec::<f64>::new())
+    }
+
+    pub unsafe extern "C" fn handle(
+        state_ptr: *const u8,
+        state_len: usize,
+        event_ptr: *const u8,
+        event_len: usize,
+        new_state_out: *mut EventBytes,
+        result_out: *mut EventBytes,
+        _err_out: *mut EventBytes,
+    ) -> i32 {
+        let state_bytes = std::slice::from_raw_parts(state_ptr, state_len);
+        let mut state: Vec<f64> = match bincode::deserialize(state_bytes) {
+            Ok(s) => s,
+            Err(_) => return -1,
+        };
+        let event_bytes = std::slice::from_raw_parts(event_ptr, event_len);
+        let price: f64 = match bincode::deserialize(event_bytes) {
+            Ok(p) => p,
+            Err(_) => return -1,
+        };
+        state.push(price);
+        let result = ema(&state, 20);
+        if super::write_event_bytes(new_state_out, &state) != 0 {
+            return -1;
+        }
+        super::write_event_bytes(result_out, &result)
+    }
+
+    pub const VTABLE: HandlerVtable = HandlerVtable {
+        handle,
+        init_state,
+    };
+}
+
+mod vtable_shim_decision_tree {
+    //! Decision-tree handler shim. State: empty.
+    //! Event: `(f64, f64)` = (macd_histogram, sentiment_score).
+    //! Result: `Decision`.
+
+    use super::{decision_tree, Decision};
+
+    use bee_plugin_sdk::event::EventBytes;
+    use bee_plugin_sdk::vtable::HandlerVtable;
+
+    pub unsafe extern "C" fn init_state(out: *mut EventBytes) -> i32 {
+        super::write_event_bytes(out, Vec::<u8>::new())
+    }
+
+    pub unsafe extern "C" fn handle(
+        _state_ptr: *const u8,
+        _state_len: usize,
+        event_ptr: *const u8,
+        event_len: usize,
+        new_state_out: *mut EventBytes,
+        result_out: *mut EventBytes,
+        _err_out: *mut EventBytes,
+    ) -> i32 {
+        let event_bytes = std::slice::from_raw_parts(event_ptr, event_len);
+        let (hist, sentiment): (f64, f64) = match bincode::deserialize(event_bytes) {
+            Ok(v) => v,
+            Err(_) => return -1,
+        };
+        let result = decision_tree(hist, sentiment);
+        if super::write_event_bytes(new_state_out, Vec::<u8>::new()) != 0 {
+            return -1;
+        }
+        super::write_event_bytes(result_out, &result)
+    }
+
+    pub const VTABLE: HandlerVtable = HandlerVtable {
+        handle,
+        init_state,
+    };
+}
+
+mod vtable_shim_sentiment_analyzer {
+    //! Sentiment-analyzer handler shim. State: empty.
+    //! Event: `String` (text to analyze). Result: `f64` in `[-1, 1]`.
+
+    use super::sentiment_analyzer;
+
+    use bee_plugin_sdk::event::EventBytes;
+    use bee_plugin_sdk::vtable::HandlerVtable;
+
+    pub unsafe extern "C" fn init_state(out: *mut EventBytes) -> i32 {
+        super::write_event_bytes(out, Vec::<u8>::new())
+    }
+
+    pub unsafe extern "C" fn handle(
+        _state_ptr: *const u8,
+        _state_len: usize,
+        event_ptr: *const u8,
+        event_len: usize,
+        new_state_out: *mut EventBytes,
+        result_out: *mut EventBytes,
+        _err_out: *mut EventBytes,
+    ) -> i32 {
+        let event_bytes = std::slice::from_raw_parts(event_ptr, event_len);
+        let text: String = match bincode::deserialize(event_bytes) {
+            Ok(s) => s,
+            Err(_) => return -1,
+        };
+        let result = sentiment_analyzer(&text);
+        if super::write_event_bytes(new_state_out, Vec::<u8>::new()) != 0 {
+            return -1;
+        }
+        super::write_event_bytes(result_out, &result)
+    }
+
+    pub const VTABLE: HandlerVtable = HandlerVtable {
+        handle,
+        init_state,
+    };
 }
 
 bee_plugin_sdk::cdylib_plugin!(TaLibMockFactory);
@@ -299,5 +512,185 @@ mod tests {
         let h = TaLibMockFactory::init().unwrap();
         assert_eq!(h.manifest.name.0, "ta-lib");
         assert_eq!(h.manifest.handlers.len(), 4);
+    }
+
+    #[test]
+    fn vtable_macd_init_state_and_handle() {
+        let handle = TaLibMockFactory::init().expect("init");
+        let vtable = *handle.handlers.get("MACD").expect("MACD vtable");
+        let mut state_out = EventBytes::EMPTY;
+        let rc = unsafe { ((*vtable).init_state)(&mut state_out) };
+        assert_eq!(rc, 0);
+        let state: Vec<f64> =
+            bincode::deserialize(unsafe { std::slice::from_raw_parts(state_out.ptr, state_out.len) })
+                .expect("decode state");
+        assert!(state.is_empty());
+        // Feed a few prices; result should be a MacdResult with
+        // finite values (32 prices are needed for full MACD).
+        let mut new_state = state_out;
+        let mut result = EventBytes::EMPTY;
+        for i in 0..32 {
+            let price = (i as f64) * 1.0 + 100.0;
+            let event_bytes = bincode::serialize(&price).unwrap();
+            let rc = unsafe {
+                ((*vtable).handle)(
+                    new_state.ptr,
+                    new_state.len,
+                    event_bytes.as_ptr(),
+                    event_bytes.len(),
+                    &mut new_state,
+                    &mut result,
+                    std::ptr::null_mut(),
+                )
+            };
+            assert_eq!(rc, 0, "handle iter {i} returned {rc}");
+        }
+        let r_bytes = unsafe { std::slice::from_raw_parts(result.ptr, result.len) };
+        let macd: MacdResult = bincode::deserialize(r_bytes).expect("decode result");
+        assert!(macd.macd_line.is_finite());
+        assert!(macd.signal_line.is_finite());
+        assert!(macd.histogram.is_finite());
+    }
+
+    #[test]
+    fn vtable_ema_init_state_and_handle() {
+        let handle = TaLibMockFactory::init().expect("init");
+        let vtable = *handle.handlers.get("EMA").expect("EMA vtable");
+        let mut state_out = EventBytes::EMPTY;
+        let rc = unsafe { ((*vtable).init_state)(&mut state_out) };
+        assert_eq!(rc, 0);
+        let prices: Vec<f64> = (1..=10).map(|x| x as f64).collect();
+        let mut new_state = state_out;
+        let mut result = EventBytes::EMPTY;
+        for &p in &prices {
+            let event_bytes = bincode::serialize(&p).unwrap();
+            let rc = unsafe {
+                ((*vtable).handle)(
+                    new_state.ptr,
+                    new_state.len,
+                    event_bytes.as_ptr(),
+                    event_bytes.len(),
+                    &mut new_state,
+                    &mut result,
+                    std::ptr::null_mut(),
+                )
+            };
+            assert_eq!(rc, 0, "handle returned {rc}");
+        }
+        let r_bytes = unsafe { std::slice::from_raw_parts(result.ptr, result.len) };
+        let ema_value: f64 = bincode::deserialize(r_bytes).expect("decode result");
+        assert!(ema_value.is_finite());
+        assert!(ema_value > 0.0, "ema_value={ema_value}");
+    }
+
+    #[test]
+    fn vtable_decision_tree_handle_buy() {
+        let handle = TaLibMockFactory::init().expect("init");
+        let vtable = *handle
+            .handlers
+            .get("decision_tree")
+            .expect("decision_tree vtable");
+        let mut state = EventBytes::EMPTY;
+        unsafe { ((*vtable).init_state)(&mut state) };
+        let event_bytes = bincode::serialize(&(0.1_f64, 0.6_f64)).unwrap();
+        let mut new_state = EventBytes::EMPTY;
+        let mut result = EventBytes::EMPTY;
+        let rc = unsafe {
+            ((*vtable).handle)(
+                state.ptr,
+                state.len,
+                event_bytes.as_ptr(),
+                event_bytes.len(),
+                &mut new_state,
+                &mut result,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(rc, 0);
+        let r_bytes = unsafe { std::slice::from_raw_parts(result.ptr, result.len) };
+        let decision: Decision = bincode::deserialize(r_bytes).expect("decode result");
+        assert_eq!(decision, Decision::Buy);
+    }
+
+    #[test]
+    fn vtable_decision_tree_handle_sell() {
+        let handle = TaLibMockFactory::init().expect("init");
+        let vtable = *handle
+            .handlers
+            .get("decision_tree")
+            .expect("decision_tree vtable");
+        let mut state = EventBytes::EMPTY;
+        unsafe { ((*vtable).init_state)(&mut state) };
+        let event_bytes = bincode::serialize(&(-0.1_f64, -0.6_f64)).unwrap();
+        let mut new_state = EventBytes::EMPTY;
+        let mut result = EventBytes::EMPTY;
+        let rc = unsafe {
+            ((*vtable).handle)(
+                state.ptr,
+                state.len,
+                event_bytes.as_ptr(),
+                event_bytes.len(),
+                &mut new_state,
+                &mut result,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(rc, 0);
+        let r_bytes = unsafe { std::slice::from_raw_parts(result.ptr, result.len) };
+        let decision: Decision = bincode::deserialize(r_bytes).expect("decode result");
+        assert_eq!(decision, Decision::Sell);
+    }
+
+    #[test]
+    fn vtable_sentiment_analyzer_handle_positive() {
+        let handle = TaLibMockFactory::init().expect("init");
+        let vtable = *handle
+            .handlers
+            .get("sentiment_analyzer")
+            .expect("sentiment_analyzer vtable");
+        let mut state = EventBytes::EMPTY;
+        unsafe { ((*vtable).init_state)(&mut state) };
+        let event_bytes = bincode::serialize(&"bullish growth high buy rally adoption".to_string())
+            .unwrap();
+        let mut new_state = EventBytes::EMPTY;
+        let mut result = EventBytes::EMPTY;
+        let rc = unsafe {
+            ((*vtable).handle)(
+                state.ptr,
+                state.len,
+                event_bytes.as_ptr(),
+                event_bytes.len(),
+                &mut new_state,
+                &mut result,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(rc, 0);
+        let r_bytes = unsafe { std::slice::from_raw_parts(result.ptr, result.len) };
+        let score: f64 = bincode::deserialize(r_bytes).expect("decode result");
+        assert!((score - 1.0).abs() < 1e-9, "score={score}");
+    }
+
+    #[test]
+    fn vtable_handle_with_garbage_event_returns_error() {
+        let handle = TaLibMockFactory::init().expect("init");
+        let vtable = *handle.handlers.get("EMA").expect("EMA vtable");
+        let mut state = EventBytes::EMPTY;
+        unsafe { ((*vtable).init_state)(&mut state) };
+        let garbage = vec![0xFFu8; 4];
+        let mut new_state = EventBytes::EMPTY;
+        let mut result = EventBytes::EMPTY;
+        let rc = unsafe {
+            ((*vtable).handle)(
+                state.ptr,
+                state.len,
+                garbage.as_ptr(),
+                garbage.len(),
+                &mut new_state,
+                &mut result,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(rc, -1, "garbage event should return -1");
     }
 }

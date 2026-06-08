@@ -14,6 +14,8 @@ bee-plugin-sdk = { path = "../../crates/bee-plugin-sdk" }
 bee-adapter = { path = "../../crates/bee-adapter" }
 tokio = { workspace = true }
 thiserror = "2"
+bincode = "1"
+serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 bee-registry = { path = "../../crates/bee-registry" }

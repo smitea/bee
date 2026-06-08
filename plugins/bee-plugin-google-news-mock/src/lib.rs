@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use bee_adapter::{AdapterResult, Event, InputAdapter};
 use bee_plugin_sdk::{
-    AdapterDescriptor, Factory, PluginHandle, PluginManifest, PluginName,
+    vtable::InputAdapterVtable, AdapterDescriptor, Factory, PluginHandle, PluginManifest, PluginName,
 };
 
 /// Fixed set of fake news headlines the mock cycles through.
@@ -36,7 +36,7 @@ const FAKE_TITLES: &[&str] = &[
 ];
 
 /// Configuration for the mock google_news input.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GoogleNewsMockConfig {
     /// Free-form query string the downstream pipeline filters on.
     /// Goes into the event payload prefix as ASCII bytes.
@@ -128,11 +128,101 @@ impl Factory for GoogleNewsMockFactory {
     }
 
     fn init() -> bee_plugin_sdk::PluginResult<PluginHandle> {
+        let vtable: *const InputAdapterVtable = &vtable_shim::VTABLE;
+        let mut input_adapters = std::collections::HashMap::new();
+        input_adapters.insert("search".to_string(), vtable);
         Ok(PluginHandle {
             manifest: Self::manifest(),
             inner: std::sync::Arc::new(()),
+            input_adapters,
+            output_adapters: std::collections::HashMap::new(),
+            handlers: std::collections::HashMap::new(),
         })
     }
+}
+
+mod vtable_shim {
+    use std::sync::Mutex;
+
+    use bee_adapter::InputAdapter;
+    use bee_plugin_sdk::event::{encode_event, EventBytes};
+    use bee_plugin_sdk::vtable::InputAdapterVtable;
+
+    use super::{AdapterResult, GoogleNewsMockConfig, GoogleNewsMockInput, Event};
+
+    pub struct Ctx {
+        pub input: Mutex<GoogleNewsMockInput>,
+    }
+
+    fn block_on<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build tokio runtime")
+            .block_on(f)
+    }
+
+    pub unsafe extern "C" fn open(
+        config_ptr: *const u8,
+        config_len: usize,
+        _err_out: *mut EventBytes,
+    ) -> *mut std::ffi::c_void {
+        let bytes = std::slice::from_raw_parts(config_ptr, config_len);
+        let cfg: GoogleNewsMockConfig = match bincode::deserialize(bytes) {
+            Ok(c) => c,
+            Err(_) => return std::ptr::null_mut(),
+        };
+        let input = match block_on(GoogleNewsMockInput::open(cfg)) {
+            Ok(i) => i,
+            Err(_) => return std::ptr::null_mut(),
+        };
+        let ctx = Box::new(Ctx {
+            input: Mutex::new(input),
+        });
+        Box::into_raw(ctx) as *mut std::ffi::c_void
+    }
+
+    pub unsafe extern "C" fn next(
+        ctx: *mut std::ffi::c_void,
+        out: *mut EventBytes,
+    ) -> i32 {
+        let result: AdapterResult<Option<Event>> = block_on(async move {
+            let ctx = &*(ctx as *const Ctx);
+            let mut input = ctx.input.lock().unwrap();
+            input.next().await
+        });
+        match result {
+            Ok(Some(event)) => {
+                let bytes = encode_event(&event);
+                let len = bytes.len();
+                let ptr = bytes.as_ptr();
+                std::mem::forget(bytes);
+                *out = EventBytes { ptr, len };
+                1
+            }
+            Ok(None) => {
+                *out = EventBytes::EMPTY;
+                0
+            }
+            Err(_) => -1,
+        }
+    }
+
+    pub unsafe extern "C" fn close(ctx: *mut std::ffi::c_void) -> i32 {
+        if ctx.is_null() {
+            return 0;
+        }
+        let ctx = Box::from_raw(ctx as *mut Ctx);
+        let input = ctx.input.into_inner().expect("mutex poisoned");
+        let _ = block_on(input.close());
+        0
+    }
+
+    pub const VTABLE: InputAdapterVtable = InputAdapterVtable {
+        open,
+        next,
+        close,
+    };
 }
 
 bee_plugin_sdk::cdylib_plugin!(GoogleNewsMockFactory);
@@ -140,6 +230,7 @@ bee_plugin_sdk::cdylib_plugin!(GoogleNewsMockFactory);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bee_plugin_sdk::event::EventBytes;
 
     /// Local helper: open an `InputAdapter` and collect all
     /// events. Mirrors `bee_runtime::test_utils::collect_mock`
@@ -230,5 +321,56 @@ mod tests {
     fn factory_init_returns_handle_with_manifest() {
         let h = GoogleNewsMockFactory::init().unwrap();
         assert_eq!(h.manifest.name.0, "google_news");
+    }
+
+    #[test]
+    fn vtable_open_next_close_round_trips_news_event() {
+        let handle = GoogleNewsMockFactory::init().expect("init");
+        let vtable = *handle
+            .input_adapters
+            .get("search")
+            .expect("search vtable");
+        let cfg = GoogleNewsMockConfig {
+            query: "Ethereum".into(),
+            count: 2,
+            ..Default::default()
+        };
+        let cfg_bytes = bincode::serialize(&cfg).unwrap();
+        let ctx = unsafe {
+            ((*vtable).open)(cfg_bytes.as_ptr(), cfg_bytes.len(), std::ptr::null_mut())
+        };
+        assert!(!ctx.is_null(), "open returned null");
+        for expected_seq in 0..2 {
+            let mut out = EventBytes::EMPTY;
+            let rc = unsafe { ((*vtable).next)(ctx, &mut out) };
+            assert_eq!(rc, 1, "event {expected_seq}");
+            let bytes = unsafe { std::slice::from_raw_parts(out.ptr, out.len) };
+            let event: Event = bincode::deserialize(bytes).expect("decode");
+            assert_eq!(event.sequence, expected_seq as u64);
+            let payload = String::from_utf8_lossy(&event.payload);
+            let prefix = format!("Ethereum,{},", expected_seq);
+            assert!(
+                payload.starts_with(&prefix),
+                "event {expected_seq} payload: {payload}"
+            );
+        }
+        let mut out = EventBytes::EMPTY;
+        let rc = unsafe { ((*vtable).next)(ctx, &mut out) };
+        assert_eq!(rc, 0, "expected end-of-stream, got {rc}");
+        unsafe { ((*vtable).close)(ctx) };
+    }
+
+    #[test]
+    fn vtable_open_with_garbage_config_returns_null() {
+        let handle = GoogleNewsMockFactory::init().expect("init");
+        let vtable = *handle
+            .input_adapters
+            .get("search")
+            .expect("search vtable");
+        let garbage = vec![0xFFu8; 8];
+        let ctx = unsafe {
+            ((*vtable).open)(garbage.as_ptr(), garbage.len(), std::ptr::null_mut())
+        };
+        assert!(ctx.is_null(), "open with garbage should return null");
     }
 }

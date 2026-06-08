@@ -128,6 +128,9 @@ impl PluginManager {
             let handle = PluginHandle {
                 manifest: manifest.clone(),
                 inner: Arc::new(()),
+                input_adapters: std::collections::HashMap::new(),
+                output_adapters: std::collections::HashMap::new(),
+                handlers: std::collections::HashMap::new(),
             };
             RegisteredPlugin {
                 manifest,
@@ -349,6 +352,9 @@ mod tests {
             Ok(PluginHandle {
                 manifest: self.manifest(),
                 inner: Arc::new(()),
+                input_adapters: std::collections::HashMap::new(),
+                output_adapters: std::collections::HashMap::new(),
+                handlers: std::collections::HashMap::new(),
             })
         }
     }
@@ -664,6 +670,9 @@ mod tests {
                 Ok(PluginHandle {
                     manifest: self.manifest(),
                     inner: Arc::new(()),
+                    input_adapters: std::collections::HashMap::new(),
+                    output_adapters: std::collections::HashMap::new(),
+                    handlers: std::collections::HashMap::new(),
                 })
             }
         }

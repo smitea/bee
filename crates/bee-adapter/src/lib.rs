@@ -30,7 +30,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// A single event pulled from an Input Adapter or pushed to an Output
 /// Adapter. The `payload` is opaque bytes — the Adapter author picks
 /// the encoding (JSON, protobuf, Arrow, raw struct bytes, etc.).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Event {
     /// Wall-clock timestamp in milliseconds since the unix epoch.
     /// Producers should set this to the time the event was observed

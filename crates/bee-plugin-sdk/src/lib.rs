@@ -27,7 +27,9 @@ use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
+pub mod event;
 pub mod macros;
+pub mod vtable;
 pub use macros::Factory;
 
 /// Content-hash of the loaded plugin binary. Two builds of the same
@@ -131,6 +133,28 @@ pub struct BeeHostV1 {
     /// references (e.g. `binance.subscribe(...)`) to the Plugin.
     pub register_adapter:
         Option<unsafe extern "C" fn(ctx: *mut std::ffi::c_void, adapter: *const AdapterDescriptor)>,
+
+    // S33-deferred: register the plugin's vtable alongside the
+    // adapter descriptor. The host stores the vtable pointer in
+    // its PluginHandle; the runtime consults it on every event.
+    pub register_input_adapter_vtable:
+        Option<unsafe extern "C" fn(
+            ctx: *mut std::ffi::c_void,
+            name: *const std::ffi::c_char,
+            vtable: *const vtable::InputAdapterVtable,
+        )>,
+    pub register_output_adapter_vtable:
+        Option<unsafe extern "C" fn(
+            ctx: *mut std::ffi::c_void,
+            name: *const std::ffi::c_char,
+            vtable: *const vtable::OutputAdapterVtable,
+        )>,
+    pub register_handler_vtable:
+        Option<unsafe extern "C" fn(
+            ctx: *mut std::ffi::c_void,
+            name: *const std::ffi::c_char,
+            vtable: *const vtable::HandlerVtable,
+        )>,
 }
 
 // `BeeHostV1` is a plain data struct; the host controls access
@@ -148,6 +172,17 @@ pub struct PluginHandle {
     /// Optional plugin-private state. The Plugin SDK does not look
     /// inside; the host just keeps the `Arc` alive.
     pub inner: Arc<dyn std::any::Any + Send + Sync + 'static>,
+
+    // S33-deferred: per-adapter vtable registries. Populated by
+    // the plugin in `init()` and frozen for the plugin's
+    // lifetime. The host looks up vtables by adapter/handler
+    // name and calls through the function pointers.
+    pub input_adapters:
+        std::collections::HashMap<String, *const vtable::InputAdapterVtable>,
+    pub output_adapters:
+        std::collections::HashMap<String, *const vtable::OutputAdapterVtable>,
+    pub handlers:
+        std::collections::HashMap<String, *const vtable::HandlerVtable>,
 }
 
 /// Rust trait a plugin's `cdylib` crate implements. The plugin's
@@ -422,6 +457,16 @@ mod tests {
         // (Smoke test: the size is non-zero, the field offsets are
         // predictable for the C side.)
         assert!(std::mem::size_of::<BeeHostV1>() > 0);
+    }
+
+    #[test]
+    fn bee_host_v1_has_register_vtable_slots() {
+        // Compile-time check: the new slots are present.
+        fn _check_slots(h: &BeeHostV1) {
+            let _ = h.register_input_adapter_vtable;
+            let _ = h.register_output_adapter_vtable;
+            let _ = h.register_handler_vtable;
+        }
     }
 
     // ---- AbiVersion (S20) ----

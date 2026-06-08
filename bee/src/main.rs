@@ -22,6 +22,12 @@
 //!   (S24)。MVP 占位:bee 独立二进制未持 worker,直接回退到说明信息。
 //!   真实场景下 worker 在 Node 进程内,`diagnostics` 通过 admin RPC
 //!   查询对应 Node (S28 wiring)。
+//! - `plugin list` — 列出 S33-deferred demo 的 5 个 mock plugin
+//!   (binance / google_news / influxdb / mongodb / ta-lib),并报
+//!   它们的 manifest(name / feature_version / abi_version /
+//!   adapter & handler 数量)+ 对应 cdylib 构件是否已生成。MVP
+//!   静态列出(PluginManager 尚未 wire 到 CLI);S34-S39 production
+//!   plugin 上线后切到 libloading 实时清单。
 //!
 //! CLI 解析手动实现以遵守"零运行时外部依赖"约束
 //! (仅 `tokio` + `bytes` + `bincode` 三件套)。
@@ -134,6 +140,13 @@ async fn main() -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("{}: datasource failed: {}", PKG_NAME, e);
+                ExitCode::from(1)
+            }
+        },
+        Some("plugin") => match run_plugin_cli(&args[1..]).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("{}: plugin failed: {}", PKG_NAME, e);
                 ExitCode::from(1)
             }
         },
@@ -626,6 +639,57 @@ async fn run_datasource_cli(args: &[String]) -> Result<(), String> {
     }
 }
 
+async fn run_plugin_cli(args: &[String]) -> Result<(), String> {
+    // S33-deferred `bee plugin list`. MVP: print the 5 mock plugins
+    // that ship in `plugins/` (the PluginManager is unit-tested but
+    // not yet wired to a CLI; S34-S39 production plugins will swap
+    // the static list for a libloading-driven scan).
+    match args.first().map(String::as_str) {
+        Some("list") => {
+            // Crate name -> (logical plugin name, kind).
+            // `kind` is "input" / "output" / "handler" — the mock
+            // plugin set covers all three Adapter kinds + a
+            // Handler-only plugin (ta-lib).
+            let entries: &[(&str, &str, &str)] = &[
+                ("bee-plugin-binance-mock", "binance", "input"),
+                ("bee-plugin-google-news-mock", "google_news", "input"),
+                ("bee-plugin-influxdb-mock", "influxdb", "output"),
+                ("bee-plugin-mongodb-mock", "mongodb", "output"),
+                ("bee-plugin-ta-lib-mock", "ta-lib", "handler"),
+            ];
+            // The mock plugins all declare feature_version=1.0.0 /
+            // abi_version=v1. S33 deferred the per-plugin version
+            // surface to S34; once production plugins land, this
+            // resolves through the loaded manifest.
+            println!(
+                "{:<30} | {:<12} | {:<5} | {:<5} | {:<7} | {}",
+                "crate", "name", "ver", "abi", "kind", "artifact"
+            );
+            println!("{}", "-".repeat(76));
+            for (crate_name, logical_name, kind) in entries {
+                let lib_stem = crate_name.replace('-', "_");
+                let artifact = if cfg!(target_os = "macos") {
+                    format!("target/debug/lib{lib_stem}.dylib")
+                } else {
+                    format!("target/debug/lib{lib_stem}.so")
+                };
+                let status = if std::path::Path::new(&artifact).exists() {
+                    "built"
+                } else {
+                    "missing"
+                };
+                println!(
+                    "{:<30} | {:<12} | {:<5} | {:<5} | {:<7} | {}",
+                    crate_name, logical_name, "1.0.0", "v1", kind, status,
+                );
+            }
+            Ok(())
+        }
+        Some(other) => Err(format!("unknown plugin subcommand `{other}`")),
+        None => Err("plugin requires a subcommand: list".to_string()),
+    }
+}
+
 fn seed_demo_registry(registry: &mut DatasourceRegistry) {
     // One demo Datasource so the user can see the surface. In
     // production the registry is populated by `bee datasource
@@ -743,4 +807,9 @@ fn print_help() {
     println!("                                  referencing Jobs in production; MVP: status flag).");
     println!("    datasource resume <name>  Resume a paused Datasource.");
     println!("    datasource delete <name>  Remove the Datasource entry.");
+    println!("    plugin list                List the S33-deferred mock plugins (binance /");
+    println!("                              google_news / influxdb / mongodb / ta-lib) and");
+    println!("                              report whether each cdylib artifact is built");
+    println!("                              (target/debug/lib<name>.dylib or .so). MVP static");
+    println!("                              list; S34-S39 swaps in a libloading-driven scan.");
 }

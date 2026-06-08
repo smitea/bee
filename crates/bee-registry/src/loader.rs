@@ -40,6 +40,8 @@ use bee_plugin_sdk::{
 };
 use libloading::{Library, Symbol};
 
+use crate::PluginManager;
+
 /// A plugin loaded from a `cdylib` on disk.
 ///
 /// Owns the [`Library`] (which keeps the `.so` / `.dylib` mapped
@@ -141,6 +143,55 @@ pub fn check_abi(
     Ok(())
 }
 
+/// Walk `dir` (non-recursive) and `register_library` every file
+/// with the platform's dynamic-library extension
+/// (`.so`/`.dylib`/`.dll`). Returns the loaded `PluginId`s in
+/// directory-iteration order.
+///
+/// Errors from individual files (bad ABI, missing symbol, etc.)
+/// are collected into the returned `Vec<PluginError>` — one
+/// entry per failure. The caller can decide whether to abort or
+/// continue. Successfully-loaded plugins are registered with
+/// the `PluginManager` regardless of the per-file errors.
+///
+/// An empty directory (or a directory that contains no files
+/// with the dynamic-library extension) returns
+/// `(vec![], vec![])` — no error, no load. A missing directory
+/// returns an `Init` error describing the read failure.
+pub fn load_directory(
+    pm: &mut PluginManager,
+    dir: &Path,
+) -> (Vec<PluginId>, Vec<PluginError>) {
+    let mut loaded = vec![];
+    let mut errors = vec![];
+    let entries = match std::fs::read_dir(dir) {
+        Ok(it) => it,
+        Err(e) => {
+            errors.push(PluginError::Init(format!(
+                "read_dir {}: {e}",
+                dir.display()
+            )));
+            return (loaded, errors);
+        }
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let is_lib = matches!(ext, "so" | "dylib" | "dll");
+        if !is_lib {
+            continue;
+        }
+        match pm.register_library(&path) {
+            Ok(id) => loaded.push(id),
+            Err(e) => errors.push(e),
+        }
+    }
+    (loaded, errors)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,5 +227,14 @@ mod tests {
     fn load_missing_file_errors() {
         let result = load_library("/tmp/this_does_not_exist_xyz.so");
         assert!(matches!(result, Err(PluginError::Init(_))));
+    }
+
+    #[test]
+    fn load_directory_on_empty_dir_returns_no_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut pm = crate::PluginManager::new();
+        let (loaded, errors) = load_directory(&mut pm, dir.path());
+        assert!(loaded.is_empty(), "empty dir must not load anything");
+        assert!(errors.is_empty(), "empty dir must not produce errors");
     }
 }

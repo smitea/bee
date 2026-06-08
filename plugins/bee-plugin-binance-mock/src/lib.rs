@@ -22,11 +22,11 @@ use std::time::Duration;
 
 use bee_adapter::{AdapterResult, Event, InputAdapter};
 use bee_plugin_sdk::{
-    AdapterDescriptor, Factory, PluginHandle, PluginManifest, PluginName,
+    vtable::InputAdapterVtable, AdapterDescriptor, Factory, PluginHandle, PluginManifest, PluginName,
 };
 
 /// Configuration for the mock binance input.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BinanceMockConfig {
     /// Symbol (e.g. "BTC/USDT"). Goes into the event payload
     /// prefix as ASCII bytes for inspection.
@@ -133,11 +133,110 @@ impl Factory for BinanceMockFactory {
     }
 
     fn init() -> bee_plugin_sdk::PluginResult<PluginHandle> {
+        let vtable: *const InputAdapterVtable = &vtable_shim::VTABLE;
+        let mut input_adapters = std::collections::HashMap::new();
+        input_adapters.insert("subscribe".to_string(), vtable);
         Ok(PluginHandle {
             manifest: Self::manifest(),
             inner: std::sync::Arc::new(()),
+            input_adapters,
+            output_adapters: std::collections::HashMap::new(),
+            handlers: std::collections::HashMap::new(),
         })
     }
+}
+
+mod vtable_shim {
+    use std::sync::Mutex;
+
+    use bee_adapter::InputAdapter;
+    use bee_plugin_sdk::event::{encode_event, EventBytes};
+    use bee_plugin_sdk::vtable::InputAdapterVtable;
+
+    use super::{AdapterResult, BinanceMockConfig, BinanceMockInput, Event};
+
+    pub struct Ctx {
+        pub input: Mutex<BinanceMockInput>,
+    }
+
+    fn block_on<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build tokio runtime")
+            .block_on(f)
+    }
+
+    /// FFI open: bincode-decode a `BinanceMockConfig`, build the
+    /// concrete input, return a raw pointer to a heap-allocated
+    /// `Ctx` wrapper. Returns null on deserialization or
+    /// construction failure.
+    pub unsafe extern "C" fn open(
+        config_ptr: *const u8,
+        config_len: usize,
+        _err_out: *mut EventBytes,
+    ) -> *mut std::ffi::c_void {
+        let bytes = std::slice::from_raw_parts(config_ptr, config_len);
+        let cfg: BinanceMockConfig = match bincode::deserialize(bytes) {
+            Ok(c) => c,
+            Err(_) => return std::ptr::null_mut(),
+        };
+        let input = match block_on(BinanceMockInput::open(cfg)) {
+            Ok(i) => i,
+            Err(_) => return std::ptr::null_mut(),
+        };
+        let ctx = Box::new(Ctx {
+            input: Mutex::new(input),
+        });
+        Box::into_raw(ctx) as *mut std::ffi::c_void
+    }
+
+    /// FFI next: lock the input, call the async `next()`, encode
+    /// the result as bincode event bytes, write to `*out`. Returns
+    /// 1 on event, 0 on end-of-stream, -1 on error.
+    pub unsafe extern "C" fn next(
+        ctx: *mut std::ffi::c_void,
+        out: *mut EventBytes,
+    ) -> i32 {
+        let result: AdapterResult<Option<Event>> = block_on(async move {
+            let ctx = &*(ctx as *const Ctx);
+            let mut input = ctx.input.lock().unwrap();
+            input.next().await
+        });
+        match result {
+            Ok(Some(event)) => {
+                let bytes = encode_event(&event);
+                let len = bytes.len();
+                let ptr = bytes.as_ptr();
+                std::mem::forget(bytes);
+                *out = EventBytes { ptr, len };
+                1
+            }
+            Ok(None) => {
+                *out = EventBytes::EMPTY;
+                0
+            }
+            Err(_) => -1,
+        }
+    }
+
+    /// FFI close: take the `Ctx` back, consume the input, call
+    /// its async `close()`. Returns 0 on success.
+    pub unsafe extern "C" fn close(ctx: *mut std::ffi::c_void) -> i32 {
+        if ctx.is_null() {
+            return 0;
+        }
+        let ctx = Box::from_raw(ctx as *mut Ctx);
+        let input = ctx.input.into_inner().expect("mutex poisoned");
+        let _ = block_on(input.close());
+        0
+    }
+
+    pub const VTABLE: InputAdapterVtable = InputAdapterVtable {
+        open,
+        next,
+        close,
+    };
 }
 
 bee_plugin_sdk::cdylib_plugin!(BinanceMockFactory);
@@ -145,6 +244,7 @@ bee_plugin_sdk::cdylib_plugin!(BinanceMockFactory);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bee_plugin_sdk::event::EventBytes;
 
     /// Local helper: open an `InputAdapter` and collect all
     /// events. Mirrors `bee_runtime::test_utils::collect_mock`
@@ -211,5 +311,80 @@ mod tests {
     fn factory_init_returns_handle_with_manifest() {
         let h = BinanceMockFactory::init().unwrap();
         assert_eq!(h.manifest.name.0, "binance");
+    }
+
+    #[test]
+    fn vtable_open_next_close_round_trips_sine_wave_event() {
+        let handle = BinanceMockFactory::init().expect("init");
+        let vtable = *handle
+            .input_adapters
+            .get("subscribe")
+            .expect("subscribe vtable");
+        let cfg = BinanceMockConfig::default();
+        let cfg_bytes = bincode::serialize(&cfg).unwrap();
+        let ctx = unsafe {
+            ((*vtable).open)(cfg_bytes.as_ptr(), cfg_bytes.len(), std::ptr::null_mut())
+        };
+        assert!(!ctx.is_null(), "open returned null");
+        let mut out = EventBytes::EMPTY;
+        let rc = unsafe { ((*vtable).next)(ctx, &mut out) };
+        assert_eq!(rc, 1, "expected 1 event, got {rc}");
+        assert!(!out.ptr.is_null());
+        assert!(out.len > 0);
+        let bytes = unsafe { std::slice::from_raw_parts(out.ptr, out.len) };
+        let event: Event = bincode::deserialize(bytes).expect("decode event");
+        assert_eq!(event.sequence, 0);
+        let payload = String::from_utf8_lossy(&event.payload);
+        assert!(
+            payload.starts_with("BTC/USDT,5min,0,"),
+            "unexpected payload: {payload}"
+        );
+        unsafe { ((*vtable).close)(ctx) };
+    }
+
+    #[test]
+    fn vtable_next_returns_none_after_count_exhausted() {
+        let handle = BinanceMockFactory::init().expect("init");
+        let vtable = *handle
+            .input_adapters
+            .get("subscribe")
+            .expect("subscribe vtable");
+        let cfg = BinanceMockConfig {
+            count: 2,
+            ..Default::default()
+        };
+        let cfg_bytes = bincode::serialize(&cfg).unwrap();
+        let ctx = unsafe {
+            ((*vtable).open)(cfg_bytes.as_ptr(), cfg_bytes.len(), std::ptr::null_mut())
+        };
+        assert!(!ctx.is_null());
+        for expected_seq in 0..2 {
+            let mut out = EventBytes::EMPTY;
+            let rc = unsafe { ((*vtable).next)(ctx, &mut out) };
+            assert_eq!(rc, 1, "event {expected_seq}");
+            let bytes = unsafe { std::slice::from_raw_parts(out.ptr, out.len) };
+            let event: Event = bincode::deserialize(bytes).expect("decode");
+            assert_eq!(event.sequence, expected_seq as u64);
+        }
+        let mut out = EventBytes::EMPTY;
+        let rc = unsafe { ((*vtable).next)(ctx, &mut out) };
+        assert_eq!(rc, 0, "expected end-of-stream (0), got {rc}");
+        assert!(out.ptr.is_null());
+        assert_eq!(out.len, 0);
+        unsafe { ((*vtable).close)(ctx) };
+    }
+
+    #[test]
+    fn vtable_open_with_garbage_config_returns_null() {
+        let handle = BinanceMockFactory::init().expect("init");
+        let vtable = *handle
+            .input_adapters
+            .get("subscribe")
+            .expect("subscribe vtable");
+        let garbage = vec![0xFFu8; 8];
+        let ctx = unsafe {
+            ((*vtable).open)(garbage.as_ptr(), garbage.len(), std::ptr::null_mut())
+        };
+        assert!(ctx.is_null(), "open with garbage should return null");
     }
 }

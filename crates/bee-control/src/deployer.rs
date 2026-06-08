@@ -257,6 +257,21 @@ impl Deployer {
 
     /// Deploy a Pipeline. Returns the assigned JobId.
     pub async fn deploy(&mut self, pipeline: Pipeline) -> Result<u32, DeployError> {
+        // S33-deferred §3: pre-flight check. Every Plugin-kind
+        // adapter the Pipeline references must be registered
+        // in the PluginAdapterRegistry. The MVP warns on
+        // unknown names; a follow-up should make this a hard
+        // error.
+        let reg = bee_runtime::plugin_adapter::PluginAdapterRegistry::global();
+        for ident in &pipeline.stream_identities {
+            if reg.lookup_input(&ident.0).is_none() {
+                eprintln!(
+                    "warning: stream identity {}.{} has no registered input adapter; runtime will fail at Phase start",
+                    ident.0, ident.1
+                );
+            }
+        }
+
         let leader = self
             .cluster
             .wait_for_leader(Duration::from_secs(3))

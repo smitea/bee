@@ -19,6 +19,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 pub mod metrics;
+pub mod plugin_adapter;
 pub mod scheduler;
 pub mod subscriber;
 pub mod test_utils;

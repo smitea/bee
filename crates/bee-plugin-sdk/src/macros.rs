@@ -141,6 +141,9 @@ mod tests {
             Ok(PluginHandle {
                 manifest: Self::manifest(),
                 inner: Arc::new(()),
+                input_adapters: std::collections::HashMap::new(),
+                output_adapters: std::collections::HashMap::new(),
+                handlers: std::collections::HashMap::new(),
             })
         }
     }

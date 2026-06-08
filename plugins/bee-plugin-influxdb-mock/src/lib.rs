@@ -25,12 +25,12 @@ use std::path::PathBuf;
 
 use bee_adapter::{AdapterError, AdapterResult, Event, OutputAdapter};
 use bee_plugin_sdk::{
-    AdapterDescriptor, Factory, PluginHandle, PluginManifest, PluginName,
+    vtable::OutputAdapterVtable, AdapterDescriptor, Factory, PluginHandle, PluginManifest, PluginName,
 };
 use tokio::io::{AsyncWriteExt, BufWriter};
 
 /// Configuration for the mock influxdb output.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct InfluxMockConfig {
     /// Logical database name. Goes into the line-protocol-ish
     /// header as a tag, e.g. `database=bitcoin`.
@@ -148,11 +148,98 @@ impl Factory for InfluxMockFactory {
     }
 
     fn init() -> bee_plugin_sdk::PluginResult<PluginHandle> {
+        let vtable: *const OutputAdapterVtable = &vtable_shim::VTABLE;
+        let mut output_adapters = std::collections::HashMap::new();
+        output_adapters.insert("emit".to_string(), vtable);
         Ok(PluginHandle {
             manifest: Self::manifest(),
             inner: std::sync::Arc::new(()),
+            input_adapters: std::collections::HashMap::new(),
+            output_adapters,
+            handlers: std::collections::HashMap::new(),
         })
     }
+}
+
+mod vtable_shim {
+    use std::sync::Mutex;
+
+    use bee_adapter::OutputAdapter;
+    use bee_plugin_sdk::event::{decode_event, EventBytes};
+    use bee_plugin_sdk::vtable::OutputAdapterVtable;
+
+    use super::{InfluxMockConfig, InfluxMockOutput};
+
+    pub struct Ctx {
+        pub adapter: Mutex<InfluxMockOutput>,
+    }
+
+    fn block_on<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build tokio runtime")
+            .block_on(f)
+    }
+
+    pub unsafe extern "C" fn open(
+        config_ptr: *const u8,
+        config_len: usize,
+        _err_out: *mut EventBytes,
+    ) -> *mut std::ffi::c_void {
+        let bytes = std::slice::from_raw_parts(config_ptr, config_len);
+        let cfg: InfluxMockConfig = match bincode::deserialize(bytes) {
+            Ok(c) => c,
+            Err(_) => return std::ptr::null_mut(),
+        };
+        let adapter = match block_on(InfluxMockOutput::open(cfg)) {
+            Ok(a) => a,
+            Err(_) => return std::ptr::null_mut(),
+        };
+        let ctx = Box::new(Ctx {
+            adapter: Mutex::new(adapter),
+        });
+        Box::into_raw(ctx) as *mut std::ffi::c_void
+    }
+
+    pub unsafe extern "C" fn emit(
+        ctx: *mut std::ffi::c_void,
+        event_ptr: *const u8,
+        event_len: usize,
+    ) -> i32 {
+        let event_bytes = std::slice::from_raw_parts(event_ptr, event_len);
+        let event = match decode_event(event_bytes) {
+            Ok(e) => e,
+            Err(_) => return -1,
+        };
+        let result = block_on(async move {
+            let ctx = &*(ctx as *const Ctx);
+            let mut adapter = ctx.adapter.lock().unwrap();
+            adapter.emit(event).await
+        });
+        match result {
+            Ok(()) => 0,
+            Err(_) => -1,
+        }
+    }
+
+    pub unsafe extern "C" fn close(ctx: *mut std::ffi::c_void) -> i32 {
+        if ctx.is_null() {
+            return 0;
+        }
+        let ctx = Box::from_raw(ctx as *mut Ctx);
+        let adapter = ctx.adapter.into_inner().expect("mutex poisoned");
+        match block_on(adapter.close()) {
+            Ok(()) => 0,
+            Err(_) => -1,
+        }
+    }
+
+    pub const VTABLE: OutputAdapterVtable = OutputAdapterVtable {
+        open,
+        emit,
+        close,
+    };
 }
 
 bee_plugin_sdk::cdylib_plugin!(InfluxMockFactory);
@@ -263,5 +350,58 @@ mod tests {
         assert_eq!(h.manifest.name.0, "influxdb");
         assert_eq!(h.manifest.adapters.len(), 1);
         assert_eq!(h.manifest.adapters[0].name, "emit");
+    }
+
+    #[test]
+    fn vtable_open_emit_close_writes_event_to_log() {
+        let path = unique_path("vtable_open_emit_close");
+        let cfg = InfluxMockConfig {
+            path: Some(path.clone()),
+            ..Default::default()
+        };
+        let handle = InfluxMockFactory::init().expect("init");
+        let vtable = *handle
+            .output_adapters
+            .get("emit")
+            .expect("emit vtable");
+        let cfg_bytes = bincode::serialize(&cfg).unwrap();
+        let ctx = unsafe {
+            ((*vtable).open)(cfg_bytes.as_ptr(), cfg_bytes.len(), std::ptr::null_mut())
+        };
+        assert!(!ctx.is_null(), "open returned null");
+        let event = Event {
+            timestamp: 1_000_000,
+            sequence: 42,
+            payload: b"vtable-payload".to_vec(),
+        };
+        let event_bytes = bincode::serialize(&event).unwrap();
+        let rc = unsafe {
+            ((*vtable).emit)(
+                ctx,
+                event_bytes.as_ptr(),
+                event_bytes.len(),
+            )
+        };
+        assert_eq!(rc, 0, "emit returned {rc}");
+        let rc = unsafe { ((*vtable).close)(ctx) };
+        assert_eq!(rc, 0, "close returned {rc}");
+        let body = std::fs::read_to_string(&path).expect("read log");
+        assert!(body.contains("sequence=42"), "missing sequence: {body}");
+        assert!(body.contains("vtable-payload"), "missing payload: {body}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn vtable_open_with_garbage_config_returns_null() {
+        let handle = InfluxMockFactory::init().expect("init");
+        let vtable = *handle
+            .output_adapters
+            .get("emit")
+            .expect("emit vtable");
+        let garbage = vec![0xFFu8; 8];
+        let ctx = unsafe {
+            ((*vtable).open)(garbage.as_ptr(), garbage.len(), std::ptr::null_mut())
+        };
+        assert!(ctx.is_null(), "open with garbage should return null");
     }
 }

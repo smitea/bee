@@ -13,3 +13,6 @@ unsafe_code = "allow"
 thiserror = "2"
 sha2 = "0.10"
 hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+bincode = "1"
+bee-adapter = { workspace = true }
