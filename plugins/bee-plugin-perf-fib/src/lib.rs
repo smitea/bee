@@ -27,7 +27,8 @@
 use std::sync::Arc;
 
 use bee_plugin_sdk::{
-    Factory, HandlerDescriptor, PluginHandle, PluginManifest, PluginName,
+    BeeHostV1, Factory, HandlerDescriptor, PluginHandle, PluginManifest,
+    PluginName, SdkError,
 };
 use serde::{Deserialize, Serialize};
 
@@ -73,20 +74,43 @@ pub fn fib_seed(n: u64) -> i128 {
     if n == 0 { 0 } else { 1 }
 }
 
-/// `fib_step(n)` (Task 4 placeholder).
+/// Compute the KV key for the [`fib_step`] state, scoped by the current
+/// `stream_id` returned by the host. The key is the same for every call
+/// inside one SQL query (the `stream_id` is the hash of the call site), so
+/// the state evolves across calls within a Task.
+fn state_key(host: &BeeHostV1) -> Result<String, SdkError> {
+    let stream_id = host.safe_current_stream_id()?;
+    Ok(format!(
+        "state/handler/{}/fib_step/state",
+        hex::encode(stream_id)
+    ))
+}
+
+/// `fib_step(n)`: stateful Fibonacci step (Task 6, S41).
 ///
-/// The full Task 6 implementation will:
-/// 1. Build the KV key from `current_stream_id()` + `n`.
-/// 2. Read the prior `FibState` via `kv_get` (treat missing as
-///    `FibState { prev2: 0, prev1: 1 }` — i.e. the seed values).
-/// 3. Compute `state.next()` and `state.update(next)`.
-/// 4. Write the rolled state back via `kv_put` and return the
-///    computed value.
-///
-/// For the scaffold (Task 4), it returns 0 — Task 6 replaces this.
-pub fn fib_step(n: u64) -> i128 {
-    let _ = n;
-    0
+/// Reads the previous two emitted values from the host's KV, computes
+/// `prev2 + prev1`, writes the rolled state back, and returns the new
+/// value. If no state exists yet (first call, or fresh Task), the state
+/// is treated as the Fibonacci seed pair `(0, 1)`, so the first emitted
+/// value is `1`. A corrupted state is also treated as the seed pair —
+/// this is intentionally lenient: a Task that restarts mid-sequence
+/// simply resumes from the seed rather than panicking.
+pub fn fib_step(host: &BeeHostV1, _n: u64) -> i128 {
+    let key = state_key(host).expect("compute fib_step state key");
+    let current = match host.safe_kv_get(&key) {
+        Ok(Some(bytes)) => bincode::deserialize::<FibState>(&bytes)
+            .unwrap_or(FibState { prev2: 0, prev1: 1 }),
+        Ok(None) => FibState { prev2: 0, prev1: 1 },
+        Err(_) => FibState { prev2: 0, prev1: 1 },
+    };
+    let new_value = current.next();
+    let updated = FibState {
+        prev2: current.prev1,
+        prev1: new_value,
+    };
+    let bytes = bincode::serialize(&updated).unwrap();
+    host.safe_kv_put(&key, &bytes).expect("kv_put fib_step state");
+    new_value
 }
 
 /// The plugin's manifest. Declares 2 Handlers, no Adapters.

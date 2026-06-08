@@ -13,6 +13,7 @@ crate-type = ["cdylib", "rlib"]
 bee-plugin-sdk = { path = "../../crates/bee-plugin-sdk" }
 serde = { version = "1", features = ["derive"] }
 bincode = "1"
+hex = "0.4"
 
 [lints]
 workspace = true
