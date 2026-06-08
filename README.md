@@ -115,6 +115,22 @@ The project is in early stages. Ways to contribute:
 
 Until a public contributing guide is published, follow the principle: **open an Issue first, then submit a PR**.
 
+## Performance Demos
+
+The performance showcase is the new primary 5-minute demo of the
+main repo. It runs 3 demo pipelines end-to-end and prints a measured
+performance table:
+
+- **Fibonacci**: 1M values via stateful `fib_step` UDF + KV-backed state
+- **Prime sieve**: 10^8 integers via 20 sequential sieving Phases (correctness: count=12,779,448)
+- **Multi-stream analytics**: 3 input streams + JOIN + GROUP BY
+
+```bash
+scripts/demo-perf.sh
+```
+
+See [`examples/performance/README.md`](examples/performance/README.md) for the math, the Bee design choices, and how to read the numbers.
+
 ## License
 
 TBD (will be specified when the first crate is published; leaning Apache 2.0).
