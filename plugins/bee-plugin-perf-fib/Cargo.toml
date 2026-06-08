@@ -1,0 +1,18 @@
+[package]
+name = "bee-plugin-perf-fib"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Bee performance showcase plugin: Fibonacci Handler UDFs (fib_seed + fib_step with KV-backed state)."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+bee-plugin-sdk = { path = "../../crates/bee-plugin-sdk" }
+serde = { version = "1", features = ["derive"] }
+bincode = "1"
+
+[lints]
+workspace = true

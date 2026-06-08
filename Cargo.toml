@@ -13,6 +13,7 @@ members = [
     "crates/bee-plugin-sdk",
     "crates/bee-kv-test",
     "bee",
+    "plugins/bee-plugin-perf-fib",
     "plugins/quant/bee-plugin-binance",
     "plugins/quant/bee-plugin-google-news",
     "plugins/quant/bee-plugin-influxdb",
