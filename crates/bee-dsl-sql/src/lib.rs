@@ -12,6 +12,9 @@ mod handlers;
 mod physical;
 pub mod preprocess;
 
+#[cfg(feature = "test-fixtures")]
+pub mod test_fixtures;
+
 use datafusion::error::Result as DfResult;
 use datafusion::prelude::SessionContext;
 
