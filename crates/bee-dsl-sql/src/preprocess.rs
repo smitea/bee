@@ -514,6 +514,56 @@ pub fn check_emit_into(
     Ok(())
 }
 
+/// S41 (9a): sink target for `EMIT INTO <target>`. The MVP ships
+/// `Console` (built-in, writes rows to stdout). Future sinks
+/// (InfluxDB, MongoDB, …) will be added as enum variants and a
+/// corresponding arm in [`strip_emit_into`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmitTarget {
+    /// `EMIT INTO console` — write rows to stdout, one per line,
+    /// formatted as `col1=val1, col2=val2, ...`.
+    Console,
+}
+
+/// S41 (9a): recognize and strip an `EMIT INTO <target>` prefix from
+/// a SQL string. Returns the [`EmitTarget`] (or `None` if the SQL
+/// does not start with `EMIT INTO`) and the remaining SQL with the
+/// prefix removed.
+///
+/// The recognition is case-insensitive and tolerates leading
+/// whitespace. The target identifier is a single ASCII word (one
+/// run of non-whitespace chars). Unknown targets return
+/// `(None, original_sql)` so the rest of the pipeline can surface a
+/// proper error (DataFusion will reject the `EMIT INTO` syntax at
+/// parse time).
+pub fn strip_emit_into(sql: &str) -> (Option<EmitTarget>, String) {
+    let trimmed = sql.trim_start();
+    let upper = trimmed.to_ascii_uppercase();
+    if !upper.starts_with("EMIT INTO") {
+        return (None, sql.to_string());
+    }
+    // Skip the literal "EMIT INTO" then any whitespace.
+    let after_emit = &trimmed["EMIT INTO".len()..];
+    let after_ws = after_emit.trim_start();
+    // Take the target identifier: a single ASCII word up to the next
+    // whitespace (or end-of-string).
+    let target_end = after_ws
+        .find(|c: char| c.is_whitespace())
+        .unwrap_or(after_ws.len());
+    let target = &after_ws[..target_end];
+    if target.eq_ignore_ascii_case("console") {
+        // The remaining SQL is everything after the target identifier
+        // (and any whitespace).
+        let remaining = after_ws[target_end..].trim_start().to_string();
+        (Some(EmitTarget::Console), remaining)
+    } else {
+        // Unknown target — leave the SQL untouched. DataFusion's
+        // parser will reject `EMIT INTO` so the user gets a clear
+        // syntax error.
+        (None, sql.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -885,5 +935,47 @@ mod tests {
                    WHERE EXISTS (SELECT 1 FROM binance.subscribe(symbol='BTC/USDT', interval='5min'))";
         let ids = extract_stream_identities(sql);
         assert_eq!(ids.len(), 1, "repeated calls must dedupe");
+    }
+
+    // ---- S41 (9a): EMIT INTO strip preprocessor ----
+    //
+    // Wires `EMIT INTO console SELECT ...` into the SQL execution
+    // path. `strip_emit_into` recognizes the prefix, returns the
+    // sink target, and strips the prefix so DataFusion can parse the
+    // remaining SELECT.
+
+    #[test]
+    fn strip_emit_into_console() {
+        let (target, remaining) = strip_emit_into("EMIT INTO console SELECT 1");
+        assert_eq!(target, Some(EmitTarget::Console));
+        assert_eq!(remaining, "SELECT 1");
+    }
+
+    #[test]
+    fn strip_emit_into_console_lowercase() {
+        let (target, remaining) = strip_emit_into("emit into console SELECT 1");
+        assert_eq!(target, Some(EmitTarget::Console));
+        assert_eq!(remaining, "SELECT 1");
+    }
+
+    #[test]
+    fn strip_emit_into_console_with_leading_whitespace() {
+        let (target, remaining) = strip_emit_into("   EMIT INTO console\nSELECT 1");
+        assert_eq!(target, Some(EmitTarget::Console));
+        assert_eq!(remaining, "SELECT 1");
+    }
+
+    #[test]
+    fn strip_emit_into_no_prefix() {
+        let (target, remaining) = strip_emit_into("SELECT 1");
+        assert_eq!(target, None);
+        assert_eq!(remaining, "SELECT 1");
+    }
+
+    #[test]
+    fn strip_emit_into_unknown_target_passes_through() {
+        let (target, remaining) = strip_emit_into("EMIT INTO something_else SELECT 1");
+        assert_eq!(target, None);
+        assert_eq!(remaining, "EMIT INTO something_else SELECT 1");
     }
 }

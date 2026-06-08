@@ -200,7 +200,13 @@ pub async fn run_pipeline_with_config(
     csv_path: &Path,
     config: &RunConfig,
 ) -> Result<String, String> {
-    let plan = compile_to_physical_plan(sql, csv_path)
+    // S41 (9a): detect `EMIT INTO <target>` prefix and strip it
+    // before the SQL reaches DataFusion (DataFusion's parser
+    // doesn't recognize the keyword). The remaining SQL is a plain
+    // SELECT that DataFusion can plan + execute.
+    let (emit_target, stripped_sql) = crate::preprocess::strip_emit_into(sql);
+
+    let plan = compile_to_physical_plan(&stripped_sql, csv_path)
         .await
         .map_err(|e| format!("compile: {e}"))?;
     // S26: per-iteration latency tracker.
@@ -227,6 +233,21 @@ pub async fn run_pipeline_with_config(
         if matches!(config.mode, RunMode::MicroBatch) || i == 0 {
             all_batches.extend(batches);
         }
+    }
+
+    // S41 (9a): if the user asked for `EMIT INTO console`, dispatch
+    // the resulting batches to the console sink (one row per line,
+    // `col=val, ...`) instead of formatting as a Markdown-style
+    // table. The string we return is a short summary so the CLI's
+    // `Ok(s)` return value is still meaningful.
+    if let Some(crate::preprocess::EmitTarget::Console) = emit_target {
+        let mut total_rows: usize = 0;
+        for batch in &all_batches {
+            crate::sinks::console::emit_to_console(batch)
+                .map_err(|e| format!("console sink: {e}"))?;
+            total_rows += batch.num_rows();
+        }
+        return Ok(format!("(emitted {total_rows} row(s) to console)\n"));
     }
 
     let mut out = format_batches(&all_batches);

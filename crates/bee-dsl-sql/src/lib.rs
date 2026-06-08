@@ -29,7 +29,7 @@ pub use physical::{
 };
 pub use preprocess::{
     check_strict_mode, extract_stream_identities, parse_use_directives,
-    preprocess, UseDirective,
+    preprocess, strip_emit_into, EmitTarget, UseDirective,
 };
 
 /// 解析一条 SQL 语句,返回 DataFusion 的 Statement AST 列表。
