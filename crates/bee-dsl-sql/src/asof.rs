@@ -132,7 +132,15 @@ pub fn translate_asof(sql: &str) -> DfResult<String> {
     let asof_pos = upper.find("ASOF JOIN").unwrap();
     let after_asof = &sql[asof_pos + "ASOF JOIN".len()..];
     let on_pos = after_asof.to_uppercase().find(" ON ").unwrap();
-    let right_table = after_asof[..on_pos].trim().to_string();
+    // Capture the literal text between `ASOF JOIN` and ` ON `. This
+    // works for both bare-table form (`b`) and subquery form
+    // (`(SELECT * FROM views) v`); the LATERAL subquery wraps the
+    // right-side expression as-is. We then peel off the trailing alias
+    // (the token after the right-side expression) so the LATERAL
+    // subquery itself can be re-aliased in the outer query.
+    let right_text = after_asof[..on_pos].trim();
+
+    let (right_source, right_alias) = split_right_side(right_text);
 
     let (translated_ineq_op, order_direction) = if clause.ineq_op == ">=" {
         ("<=", "DESC")
@@ -142,7 +150,7 @@ pub fn translate_asof(sql: &str) -> DfResult<String> {
 
     // Keep both the equi-key and inequality column references with
     // their original `a.` / `b.` qualifiers. The LATERAL subquery's
-    // `FROM <right_table>` resolves `b.*` (inner) and `a.*` (outer
+    // `FROM <right_source>` resolves `b.*` (inner) and `a.*` (outer
     // correlation) — when DataFusion adds correlated-subquery
     // support, this is the form that will execute.
     let equi_right_col = &clause.equi_right_col;
@@ -151,11 +159,11 @@ pub fn translate_asof(sql: &str) -> DfResult<String> {
     let ineq_left_col = &clause.ineq_left_col;
 
     let lateral_subquery = format!(
-        "(SELECT * FROM {right_table} \
+        "(SELECT * FROM {right_source} \
          WHERE {equi_right_col} = {equi_left_col} \
            AND {ineq_right_col} {translated_ineq_op} {ineq_left_col} \
          ORDER BY {ineq_right_col} {order_direction} LIMIT 1)",
-        right_table = right_table,
+        right_source = right_source,
         equi_right_col = equi_right_col,
         equi_left_col = equi_left_col,
         ineq_right_col = ineq_right_col,
@@ -164,7 +172,16 @@ pub fn translate_asof(sql: &str) -> DfResult<String> {
         order_direction = order_direction,
     );
 
+    // `before` is the SQL up to (and including) the `JOIN` keyword of
+    // `ASOF JOIN`. If the user wrote `LEFT ASOF JOIN` or `RIGHT ASOF
+    // JOIN`, `before` ends with a trailing `LEFT ` / `RIGHT ` token
+    // (and possibly an `INNER ` too) that we must NOT re-emit before
+    // our own `LEFT JOIN LATERAL`, or we get the unparseable
+    // `LEFT LEFT JOIN LATERAL`. The translator only supports
+    // `AsOfSide::Left`, so we always rewrite to `LEFT JOIN LATERAL`.
     let before = &sql[..asof_pos];
+    let before = strip_trailing_join_keyword(before);
+
     let after_on_and_conditions = &after_asof[on_pos + 4..];
     let cond_end = after_on_and_conditions
         .to_uppercase()
@@ -177,11 +194,61 @@ pub fn translate_asof(sql: &str) -> DfResult<String> {
         "{before}LEFT JOIN LATERAL {subquery} {alias} ON TRUE{after}",
         before = before,
         subquery = lateral_subquery,
-        alias = right_table,
+        alias = right_alias,
         after = after,
     );
 
     Ok(translated)
+}
+
+/// Strip a trailing `LEFT ` / `RIGHT ` / `INNER ` (case-insensitive)
+/// join-keyword token from the slice. The translator only emits
+/// `LEFT JOIN LATERAL`, so a leading `LEFT ASOF JOIN` / `RIGHT ASOF
+/// JOIN` from the user must not survive into the output as a doubled
+/// keyword. Trailing whitespace is preserved verbatim so the joined
+/// output reads naturally.
+fn strip_trailing_join_keyword(before: &str) -> &str {
+    let upper = before.to_uppercase();
+    for kw in ["LEFT ", "RIGHT ", "INNER "] {
+        if upper.ends_with(kw) {
+            return &before[..before.len() - kw.len()];
+        }
+    }
+    before
+}
+
+/// Split the right-side text of an ASOF JOIN into `(source, alias)`.
+///
+/// The right-side may be either:
+///   - a bare table name (`b`), in which case `source = "b"` and
+///     `alias = "b"` (the alias defaults to the table name), or
+///   - a parenthesised subquery followed by an alias
+///     (`(SELECT * FROM views) v`), in which case
+///     `source = "(SELECT * FROM views)"` and `alias = "v"`.
+///
+/// The closing paren of the subquery is the LAST `)` in the trimmed
+/// text — anything after it (after trimming whitespace) is the alias.
+/// We deliberately don't track paren depth: ASOF JOIN right-sides in
+/// Bee's documented form are a single parenthesised expression with
+/// no nested outer parens beyond the outer `(` / `)`, and the
+/// `parse_asof` step already validated that the SQL is well-formed.
+fn split_right_side(right_text: &str) -> (&str, &str) {
+    let trimmed = right_text.trim();
+    if trimmed.starts_with('(') {
+        if let Some(close) = trimmed.rfind(')') {
+            let source = &trimmed[..=close];
+            let alias = trimmed[close + 1..].trim();
+            return (source, if alias.is_empty() { source } else { alias });
+        }
+        return (trimmed, trimmed);
+    }
+    // Bare table form: `b` (possibly with an explicit alias `b v`,
+    // but Bee's documented form is just the bare name). Split off
+    // the last whitespace-delimited token as the alias.
+    match trimmed.rsplit_once(char::is_whitespace) {
+        Some((src, alias)) => (src.trim(), alias.trim()),
+        None => (trimmed, trimmed),
+    }
 }
 
 #[cfg(test)]
@@ -224,6 +291,49 @@ mod tests {
         let translated = translate_asof(sql).unwrap();
         assert!(translated.contains("b.ts >= a.ts"));
         assert!(translated.contains("ORDER BY b.ts ASC"));
+    }
+
+    /// Regression: the demo shape is `LEFT ASOF JOIN <subquery> <alias> ON ...`
+    /// — a leading `LEFT` token and a parenthesised subquery on the
+    /// right. The naive translator emitted `LEFT LEFT JOIN LATERAL`
+    /// (a parse error) and could not handle a subquery right-side.
+    /// This test pins the real-world form so future regressions are
+    /// caught. See CONTEXT.md §"ASOF JOIN" translator and S41 demo wiring.
+    #[test]
+    fn translate_left_asof_with_subquery_and_alias() {
+        let sql = "SELECT c.user_id FROM clicks c \
+                   LEFT ASOF JOIN (SELECT * FROM views) v \
+                   ON c.user_id = v.user_id AND c.ts >= v.ts";
+        let translated = translate_asof(sql).unwrap();
+
+        assert!(
+            !translated.contains("LEFT LEFT"),
+            "translator must not double-prepend LEFT, got: {translated}"
+        );
+        assert!(
+            translated.contains("LEFT JOIN LATERAL"),
+            "expected LEFT JOIN LATERAL in: {translated}"
+        );
+        assert!(
+            translated.contains("LATERAL (SELECT"),
+            "expected LATERAL subquery wrapping the right-side, got: {translated}"
+        );
+        assert!(
+            translated.contains("v.user_id = c.user_id"),
+            "expected equi condition with subquery alias, got: {translated}"
+        );
+        assert!(
+            translated.contains("v.ts <= c.ts"),
+            "expected translated inequality, got: {translated}"
+        );
+        assert!(
+            translated.contains("ORDER BY v.ts DESC"),
+            "expected nearest-prior ORDER BY, got: {translated}"
+        );
+        assert!(
+            translated.contains("LIMIT 1"),
+            "expected LIMIT 1 in nearest-prior subquery, got: {translated}"
+        );
     }
 
     /// End-to-end correctness: the translated SQL must produce the
