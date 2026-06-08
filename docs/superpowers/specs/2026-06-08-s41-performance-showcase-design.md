@@ -23,8 +23,9 @@ The user has chosen to ship the **full feature set** of the 3 demos in 1-node mo
 - Multi-stream analytics (3 test-fixture streams + ASOF JOIN + WINDOW TUMBLING + multi-sink)
 
 This requires:
-- **DataFusion v49 → v50+** (v50 introduced ASOF JOIN; latest stable at design time)
+- **DataFusion v49 → v50+ upgrade** (for maintenance: 50+ has bug fixes + perf improvements; **not** for ASOF JOIN — see amendment below)
 - **BeeHostV1 extension** with `kv_get` / `kv_put` / `kv_cas` function pointers (for `fib_step` state)
+- **ASOF JOIN extension** in `bee-dsl-sql` (Bee-level; DataFusion does NOT have ASOF JOIN in any version — see ADR-0006 + DataFusion issue #318, still open as of 2026-06. The Bee extension is a SQL-to-SQL translation: `ASOF JOIN` → `LEFT JOIN LATERAL (subquery LIMIT 1)`).
 - **`console` sink** built into bee-dsl-sql (no external sink needed)
 - **2 test fixtures** in bee-dsl-sql (feature-gated): `generate_series`, `generate_events`
 - **1 new plugin**: `plugins/bee-plugin-perf-fib/` (Fibonacci UDFs, KV-backed state)
@@ -36,7 +37,15 @@ This requires:
 
 ```
 /Users/shaw/Developer/rust/bee/
-├── Cargo.toml                                  (UPDATE: datafusion "49" → ">=50",<52)
+├── Cargo.toml                                  (UPDATE: datafusion "49" → ">=50,<52" for maintenance; ASOF JOIN is Bee-level, not DataFusion)
+├── crates/
+│   ├── bee-dsl-sql/
+│   │   ├── Cargo.toml                          (UPDATE: add `test-fixtures` feature)
+│   │   └── src/
+│   │       ├── lib.rs                          (UPDATE: register console sink, fixtures, ASOF JOIN extension)
+│   │       ├── asof.rs                         (NEW: ASOF JOIN translator — SQL-to-SQL via LATERAL subquery)
+│   │       ├── sinks/console.rs                (NEW: console sink implementation)
+│   │       └── test_fixtures.rs                (NEW: generate_series + generate_events, cfg-gated)
 ├── crates/
 │   ├── bee-dsl-sql/
 │   │   ├── Cargo.toml                          (UPDATE: add `test-fixtures` feature)
@@ -47,7 +56,7 @@ This requires:
 │   └── bee-plugin-sdk/
 │       └── src/lib.rs                          (UPDATE: add kv_get / kv_put / kv_cas to BeeHostV1)
 ├── bee/src/main.rs                             (UPDATE: register kv_* host-side wiring for plugins)
-├── plugins/
+├── crates/bee-dsl-sql/src/parser.rs            (UPDATE: recognize ASOF JOIN keyword, route to asof.rs translator)
 │   ├── quant/                                  (unchanged; the 5 quant plugins)
 │   └── bee-plugin-perf-fib/                    (NEW: the only domain-specific plugin for the demo)
 │       ├── Cargo.toml
@@ -182,10 +191,36 @@ The `console` keyword is recognized by the `EMIT INTO` parser as a built-in sink
 1. Bump `Cargo.toml` workspace `datafusion = "49"` → `datafusion = "50"` (or latest 50.x stable at design time)
 2. Run `cargo build --workspace` — fix compile errors
 3. Run `cargo test --workspace` — fix test failures
-4. Verify ASOF JOIN works (write a small test that uses ASOF JOIN syntax)
-5. Verify all existing SQL still parses + executes
+4. Verify all existing SQL still parses + executes (the 354 existing tests should catch most issues)
+5. **DO NOT add an ASOF JOIN test in this task** — ASOF JOIN is a Bee extension, not a DataFusion feature. The translator is added in a separate task (see §6 below).
 
 If 50.x has too many breaking changes, fall back to 50.0.0 (the first 50.x release) and patch as needed.
+
+### 6. ASOF JOIN extension in Bee (NEW; replaces the "DataFusion has ASOF JOIN" misconception)
+
+**Status**: ADR-0006 acknowledges this is a Bee-level extension. The current code in `crates/bee-dsl-sql/src/lib.rs` (lines 4 + 34) declares ASOF JOIN as a "custom Statement type" but **no code implements it yet**. This task adds the implementation.
+
+**Approach**: SQL-to-SQL translation. The Bee parser recognizes `ASOF JOIN` as a custom keyword; before passing the SQL to DataFusion, the translator rewrites it to a pattern DataFusion CAN execute:
+
+- **Input SQL**: `a ASOF JOIN b ON a.id = b.id AND a.ts >= b.ts`
+- **Translated SQL**: `a LEFT JOIN LATERAL (SELECT * FROM b WHERE b.id = a.id AND b.ts <= a.ts ORDER BY b.ts DESC LIMIT 1) b ON TRUE`
+
+The translation is implemented in `crates/bee-dsl-sql/src/asof.rs`. The `Statement` enum gets a new variant `AsOfJoin { left, right, equi_keys, inequality, side }`. The translator converts this variant to a `Query` with a `LEFT JOIN LATERAL ... LIMIT 1` subquery.
+
+**Tests**:
+- `crates/bee-dsl-sql/src/asof.rs` unit tests: input SQL → expected translated SQL
+- An end-to-end test that uses ASOF JOIN syntax and verifies the result matches the expected nearest-prior match
+
+**Limitations for the S41 demo**:
+- Only `LEFT ASOF JOIN` is supported (the canonical case). `RIGHT ASOF JOIN` + `INNER ASOF JOIN` are deferred to a future S-XX.
+- The equi-key + inequality pattern is limited to one equi-key + one inequality (e.g., `a.id = b.id AND a.ts >= b.ts`). More complex patterns are future work.
+
+**Files**:
+- Create: `crates/bee-dsl-sql/src/asof.rs` — the translator + AST variant
+- Modify: `crates/bee-dsl-sql/src/parser.rs` (or wherever Statements are parsed) — recognize `ASOF JOIN` keyword
+- Modify: `crates/bee-dsl-sql/src/lib.rs` — wire the translator into the SQL execution path
+
+This task is in addition to the 9 phases listed in the Architecture section; it becomes "phase 2.5" or "phase 10" depending on the plan's task ordering.
 
 ### 6. Three SQL pipelines (`examples/performance/*.sql`)
 

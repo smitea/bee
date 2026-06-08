@@ -4,7 +4,7 @@
 
 **Goal:** Make S41 the new primary 5-minute demo of the main repo. Ship 3 performance demos (Fibonacci, prime sieve, multi-stream analytics) that run in 1-node, in-process mode via `bee run` and print a measured performance table.
 
-**Architecture:** 9 phases — (1) DataFusion 49→50+ upgrade (for ASOF JOIN), (2) BeeHostV1 KV extension (4 FFI function pointers), (3) `bee-plugin-perf-fib` plugin (stateful UDFs with KV-backed state), (4) test fixtures (`generate_series` + `generate_events`, feature-gated), (5) console sink (`EMIT INTO console`), (6) 3 SQL pipelines under `examples/performance/`, (7) `scripts/demo-perf.sh` (runs all 3, measures wall-clock, prints table, hard correctness check), (8) docs updates, (9) final verification.
+**Architecture:** 9 phases — (1) DataFusion 49→50+ upgrade (maintenance: 50+ has bug fixes + perf improvements; **not** for ASOF JOIN — ASOF JOIN is a Bee extension, see Task 9b), (2) BeeHostV1 KV extension (4 FFI function pointers), (3) `bee-plugin-perf-fib` plugin (stateful UDFs with KV-backed state), (4) test fixtures (`generate_series` + `generate_events`, feature-gated), (5) console sink (`EMIT INTO console`), (6) **ASOF JOIN extension in Bee** (SQL-to-SQL translator; DataFusion has no ASOF JOIN in any version — see ADR-0006 + DataFusion issue #318), (7) 3 SQL pipelines under `examples/performance/`, (8) `scripts/demo-perf.sh` (runs all 3, measures wall-clock, prints table, hard correctness check), (9) docs updates, (10) final verification.
 
 **Tech Stack:** Rust, Cargo, DataFusion v50+, libloading (existing), `bee-plugin-sdk`, `bee-dsl-sql`, `bee-kv-test` (in-process KV), Bash.
 
@@ -94,69 +94,17 @@ cd /Users/shaw/Developer/rust/bee && cargo test --workspace 2>&1 | grep -E "test
 ```
 Expected: 354 passing, 0 failing. If any tests fail due to DataFusion SQL parsing/execution changes, fix them (likely in test SQL strings in `crates/bee-dsl-sql/src/physical.rs` tests or `crates/bee-control/tests/`).
 
-- [ ] **Step 6: Add a small ASOF JOIN test to verify the upgrade**
-
-Open `crates/bee-dsl-sql/src/physical.rs` (or a new file `crates/bee-dsl-sql/src/asof_test.rs`). Add a unit test:
-
-```rust
-#[cfg(test)]
-mod asof_join_test {
-    use super::*;
-    use datafusion::arrow::array::{Int64Array, RecordBatch, StringArray};
-    use datafusion::arrow::datatypes::{DataType, Field, Schema};
-    use std::sync::Arc;
-
-    #[tokio::test]
-    async fn asof_join_parses_in_datafusion_50() {
-        // Two small tables + an ASOF JOIN
-        let schema_left = Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Int64, false),
-            Field::new("ts", DataType::Int64, false),
-        ]));
-        let schema_right = Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Int64, false),
-            Field::new("value", DataType::Utf8, false),
-        ]));
-
-        let left = RecordBatch::try_new(
-            schema_left.clone(),
-            vec![
-                Arc::new(Int64Array::from(vec![1, 2, 3])),
-                Arc::new(Int64Array::from(vec![10, 20, 30])),
-            ],
-        ).unwrap();
-        let right = RecordBatch::try_new(
-            schema_right.clone(),
-            vec![
-                Arc::new(Int64Array::from(vec![1, 2, 3])),
-                Arc::new(StringArray::from(vec!["a", "b", "c"])),
-            ],
-        ).unwrap();
-
-        let ctx = datafusion::prelude::SessionContext::new();
-        ctx.register_batch("left_t", left).unwrap();
-        ctx.register_batch("right_t", right).unwrap();
-
-        let df = ctx.sql(
-            "SELECT l.id, l.ts, r.value FROM left_t l \
-             ASOF JOIN right_t r ON l.id = r.id"
-        ).await;
-        assert!(df.is_ok(), "ASOF JOIN must parse in DataFusion 50: {:?}", df.err());
-    }
-}
-```
-
-- [ ] **Step 7: Run the ASOF JOIN test**
+- [ ] **Step 6: Run the full test suite to verify all 354 tests still pass after the upgrade**
 
 ```bash
-cd /Users/shaw/Developer/rust/bee && cargo test -p bee-dsl-sql asof_join_test 2>&1 | tail -10
+cd /Users/shaw/Developer/rust/bee && cargo test --workspace 2>&1 | grep -E "test result.*passed" | sed -E 's/.*ok\. ([0-9]+) passed.*/\1/' | awk '{sum += $1} END {print "Total:", sum}'
 ```
-Expected: PASS. If FAIL (ASOF JOIN syntax not supported in the exact DataFusion 50.x version), check the docs for the correct syntax; some versions require `ASOF JOIN` (with no `LEFT`/`RIGHT` prefix) and others may use different keywords.
+Expected: 354. The upgrade is for maintenance (bug fixes + perf improvements in DataFusion 50+); it does NOT add new features. ASOF JOIN is added separately as a Bee extension (see Task 9b).
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-cd /Users/shaw/Developer/rust/bee && git add Cargo.toml Cargo.lock && git -c user.name="opencode" -c user.email="opencode@local" commit -m "S41 (1): DataFusion 49 -> 50+ upgrade for ASOF JOIN support"
+cd /Users/shaw/Developer/rust/bee && git add Cargo.toml Cargo.lock && git -c user.name="opencode" -c user.email="opencode@local" commit -m "S41 (1): DataFusion 49 -> 50+ upgrade (maintenance; bug fixes + perf)"
 ```
 
 ---
@@ -1345,6 +1293,417 @@ Expected: PASS.
 
 ```bash
 cd /Users/shaw/Developer/rust/bee && git add crates/bee-dsl-sql && git -c user.name="opencode" -c user.email="opencode@local" commit -m "S41 (9): console sink — EMIT INTO console writes rows to stdout"
+```
+
+---
+
+## Task 9b: ASOF JOIN extension in Bee (NEW)
+
+**Why this task**: Per the design's §6 amendment, ASOF JOIN is a Bee-level extension (DataFusion has no ASOF JOIN in any version — see ADR-0006 + DataFusion issue #318, still open as of 2026-06). This task implements the Bee-level translator.
+
+**Files:**
+- Create: `crates/bee-dsl-sql/src/asof.rs` — the SQL-to-SQL translator
+- Modify: `crates/bee-dsl-sql/src/lib.rs` — register the translator in the SQL execution path
+
+- [ ] **Step 1: Write the failing test for ASOF JOIN translation**
+
+Create `crates/bee-dsl-sql/src/asof.rs`:
+
+```rust
+//! ASOF JOIN extension for Bee's SQL runtime.
+//!
+//! ASOF JOIN is a temporal JOIN that matches each row from the left
+//! side to the nearest-prior (or nearest) row from the right side, based
+//! on time + optional equi-keys. It is the canonical JOIN for financial
+//! time-series (kdb+, DolphinDB, pandas merge_asof).
+//!
+//! Bee's ASOF JOIN is implemented as a SQL-to-SQL translation: we
+//! recognize `LEFT ASOF JOIN` as a custom keyword in the parser, then
+//! rewrite it to a `LEFT JOIN LATERAL ... LIMIT 1` subquery that
+//! DataFusion can execute natively.
+
+#![allow(unused_imports)]
+
+use datafusion::error::{DataFusionError, Result as DfResult};
+
+/// The side of an ASOF JOIN (only `LEFT` is supported in S41 MVP).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AsOfSide {
+    Left,
+}
+
+/// Recognize whether a SQL string contains an `ASOF JOIN` clause.
+/// Returns the SQL with `ASOF` stripped (DataFusion will see `JOIN`),
+/// plus the parsed side + the join conditions.
+pub fn parse_asof(sql: &str) -> DfResult<Option<AsOfClause>> {
+    // Look for "ASOF JOIN" (case-insensitive, with flexible whitespace)
+    let upper = sql.to_uppercase();
+    let pos = upper.find("ASOF JOIN");
+    if pos.is_none() {
+        return Ok(None);
+    }
+    // Simple parser: extract the join conditions after "ASOF JOIN <right> ON"
+    // For S41 MVP, we support a single equi-key + single inequality.
+    // Example: "a ASOF JOIN b ON a.id = b.id AND a.ts >= b.ts"
+    let after_asof = &sql[pos.unwrap() + "ASOF JOIN".len()..];
+    // Find the ON clause
+    let on_pos = after_asof.to_uppercase().find(" ON ").ok_or_else(|| {
+        DataFusionError::Plan(format!("ASOF JOIN must be followed by ON clause: {}", sql))
+    })?;
+    let right_and_rest = &after_asof[on_pos + 4..];
+    // Find the WHERE or end of join conditions
+    let cond_end = right_and_rest
+        .to_uppercase()
+        .find(" WHERE ")
+        .unwrap_or(right_and_rest.len());
+    let conditions = &right_and_rest[..cond_end].trim();
+
+    // Parse conditions: expect "a.col = b.col AND a.col >= b.col"
+    let parts: Vec<&str> = conditions.split(" AND ").collect();
+    if parts.len() != 2 {
+        return Err(DataFusionError::Plan(format!(
+            "ASOF JOIN must have exactly 2 conditions (equi + inequality), got: {}",
+            conditions
+        )));
+    }
+    let equi = parts[0].trim();
+    let ineq = parts[1].trim();
+
+    // Equi condition: a.col = b.col
+    let equi_split: Vec<&str> = equi.split('=').collect();
+    if equi_split.len() != 2 {
+        return Err(DataFusionError::Plan(format!("Invalid equi condition: {}", equi)));
+    }
+    let equi_left = equi_split[0].trim().to_string();
+    let equi_right = equi_split[1].trim().to_string();
+
+    // Inequality: a.col >= b.col (must be >= or <=)
+    let ineq_op: &str;
+    if ineq.contains(">=") {
+        ineq_op = ">=";
+    } else if ineq.contains("<=") {
+        ineq_op = "<=";
+    } else {
+        return Err(DataFusionError::Plan(format!(
+            "ASOF JOIN inequality must be >= or <=, got: {}",
+            ineq
+        )));
+    }
+    let ineq_split: Vec<&str> = ineq.split(ineq_op).collect();
+    if ineq_split.len() != 2 {
+        return Err(DataFusionError::Plan(format!("Invalid inequality: {}", ineq)));
+    }
+    let ineq_left = ineq_split[0].trim().to_string();
+    let ineq_right = ineq_split[1].trim().to_string();
+
+    Ok(Some(AsOfClause {
+        side: AsOfSide::Left,
+        equi_left_col: equi_left,
+        equi_right_col: equi_right,
+        ineq_left_col: ineq_left,
+        ineq_right_col: ineq_right,
+        ineq_op: ineq_op.to_string(),
+    }))
+}
+
+/// Parsed ASOF JOIN clause.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AsOfClause {
+    pub side: AsOfSide,
+    /// Equi-key: rows match when `equi_left_col = equi_right_col`.
+    pub equi_left_col: String,
+    pub equi_right_col: String,
+    /// Inequality: rows match when `ineq_left_col >= ineq_right_col` (nearest prior).
+    pub ineq_left_col: String,
+    pub ineq_right_col: String,
+    /// The operator (`>=` or `<=`).
+    pub ineq_op: String,
+}
+
+/// Translate `a ASOF JOIN b ON a.id = b.id AND a.ts >= b.ts`
+/// to `a LEFT JOIN LATERAL (SELECT * FROM b WHERE b.id = a.id AND b.ts <= a.ts ORDER BY b.ts DESC LIMIT 1) b ON TRUE`
+///
+/// Returns the translated SQL with the ASOF keyword stripped (so DataFusion sees a regular JOIN).
+pub fn translate_asof(sql: &str) -> DfResult<String> {
+    let clause = match parse_asof(sql)? {
+        Some(c) => c,
+        None => return Ok(sql.to_string()),
+    };
+
+    // Extract the right-side table name (between "ASOF JOIN" and "ON")
+    let upper = sql.to_uppercase();
+    let asof_pos = upper.find("ASOF JOIN").unwrap();
+    let after_asof = &sql[asof_pos + "ASOF JOIN".len()..];
+    let on_pos = after_asof.to_uppercase().find(" ON ").unwrap();
+    let right_table = after_asof[..on_pos].trim().to_string();
+
+    // Determine the inequality direction.
+    // If user wrote `a.ts >= b.ts` (left >= right), we want the MAX b.ts <= a.ts
+    // (the nearest prior). Translation: `b.ts <= a.ts ORDER BY b.ts DESC LIMIT 1`.
+    // If user wrote `a.ts <= b.ts` (left <= right), we want the MIN b.ts >= a.ts
+    // (the nearest future). Translation: `b.ts >= a.ts ORDER BY b.ts ASC LIMIT 1`.
+    let (translated_ineq_op, order_direction) = if clause.ineq_op == ">=" {
+        ("<=", "DESC")
+    } else {
+        (">=", "ASC")
+    };
+
+    // Build the LATERAL subquery
+    let equi_left = &clause.equi_left_col;
+    let equi_right = &clause.equi_right_col;
+    let ineq_left = &clause.ineq_left_col;
+    let ineq_right = &clause.ineq_right_col;
+
+    // Strip `a.` and `b.` prefixes for the LATERAL subquery (it's a subquery on `b`)
+    let equi_right_col = equi_right.split('.').next_back().unwrap_or(equi_right);
+    let ineq_right_col = ineq_right.split('.').next_back().unwrap_or(ineq_right);
+    let equi_left_col = equi_left.split('.').next_back().unwrap_or(equi_left);
+    let ineq_left_col = ineq_left.split('.').next_back().unwrap_or(ineq_left);
+
+    let lateral_subquery = format!(
+        "(SELECT * FROM {right_table} \
+         WHERE {equi_right_col} = {equi_left_col} \
+           AND {ineq_right_col} {translated_op} {ineq_left_col} \
+         ORDER BY {ineq_right_col} {direction} LIMIT 1)",
+        right_table = right_table,
+        equi_right_col = equi_right_col,
+        equi_left_col = equi_left_col,
+        ineq_right_col = ineq_right_col,
+        translated_op = translated_ineq_op,
+        ineq_left_col = ineq_left_col,
+        direction = order_direction,
+    );
+
+    // Replace the ASOF JOIN clause with `LEFT JOIN <subquery> b ON TRUE`
+    // The original was: `a ASOF JOIN b ON ...`
+    // The replacement is: `a LEFT JOIN <subquery> b ON TRUE`
+    let before = &sql[..asof_pos];
+    let after_on_and_conditions = &after_asof[on_pos + 4..];
+    // Find the end of the ON conditions (next WHERE, JOIN, or end of statement)
+    let cond_end = after_on_and_conditions
+        .to_uppercase()
+        .find(" WHERE ")
+        .or_else(|| after_on_and_conditions.to_uppercase().find(" JOIN "))
+        .unwrap_or(after_on_and_conditions.len());
+    let after = &after_on_and_conditions[cond_end..];
+
+    let translated = format!(
+        "{before}LEFT JOIN {subquery} b ON TRUE{after}",
+        before = before,
+        subquery = lateral_subquery,
+        after = after,
+    );
+
+    Ok(translated)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_no_asof_returns_none() {
+        let sql = "SELECT * FROM a JOIN b ON a.id = b.id";
+        assert!(parse_asof(sql).unwrap().is_none());
+    }
+
+    #[test]
+    fn parse_left_asof_nearest_prior() {
+        let sql = "SELECT * FROM a ASOF JOIN b ON a.id = b.id AND a.ts >= b.ts";
+        let clause = parse_asof(sql).unwrap().unwrap();
+        assert_eq!(clause.side, AsOfSide::Left);
+        assert_eq!(clause.equi_left_col, "a.id");
+        assert_eq!(clause.equi_right_col, "b.id");
+        assert_eq!(clause.ineq_left_col, "a.ts");
+        assert_eq!(clause.ineq_right_col, "b.ts");
+        assert_eq!(clause.ineq_op, ">=");
+    }
+
+    #[test]
+    fn translate_left_asof_to_lateral() {
+        let sql = "SELECT * FROM a ASOF JOIN b ON a.id = b.id AND a.ts >= b.ts";
+        let translated = translate_asof(sql).unwrap();
+        // Should contain LEFT JOIN LATERAL (or our equivalent)
+        assert!(translated.contains("LEFT JOIN"));
+        assert!(translated.contains("SELECT * FROM b"));
+        assert!(translated.contains("b.id = a.id"));
+        assert!(translated.contains("b.ts <= a.ts"));
+        assert!(translated.contains("ORDER BY b.ts DESC"));
+        assert!(translated.contains("LIMIT 1"));
+    }
+
+    #[test]
+    fn translate_left_asof_nearest_future() {
+        // a.ts <= b.ts means we want the nearest future row from b
+        let sql = "SELECT * FROM a ASOF JOIN b ON a.id = b.id AND a.ts <= b.ts";
+        let translated = translate_asof(sql).unwrap();
+        assert!(translated.contains("b.ts >= a.ts"));
+        assert!(translated.contains("ORDER BY b.ts ASC"));
+    }
+
+    #[test]
+    fn asof_join_end_to_end_correctness() {
+        // An end-to-end test using real DataFusion execution.
+        // Two tables, ASOF JOIN, verify the result matches the nearest-prior semantic.
+        use datafusion::arrow::array::{Int64Array, RecordBatch, StringArray};
+        use datafusion::arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let schema_left = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("ts", DataType::Int64, false),
+        ]));
+        let schema_right = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("ts", DataType::Int64, false),
+            Field::new("value", DataType::Utf8, false),
+        ]));
+
+        let left = RecordBatch::try_new(
+            schema_left.clone(),
+            vec![
+                Arc::new(Int64Array::from(vec![1, 1, 2])),
+                Arc::new(Int64Array::from(vec![10, 20, 30])),
+            ],
+        ).unwrap();
+        let right = RecordBatch::try_new(
+            schema_right.clone(),
+            vec![
+                Arc::new(Int64Array::from(vec![1, 1, 2])),
+                Arc::new(Int64Array::from(vec![5, 15, 25])),
+                Arc::new(StringArray::from(vec!["a", "b", "c"])),
+            ],
+        ).unwrap();
+
+        let ctx = datafusion::prelude::SessionContext::new();
+        ctx.register_batch("a", left).unwrap();
+        ctx.register_batch("b", right).unwrap();
+
+        // Run the translated ASOF JOIN
+        let sql = "SELECT a.id, a.ts, b.value FROM a ASOF JOIN b ON a.id = b.id AND a.ts >= b.ts";
+        let translated = translate_asof(sql).unwrap();
+        let df = ctx.sql(&translated).await.unwrap();
+        let results = df.collect().await.unwrap();
+
+        // Verify the result
+        // Left row (id=1, ts=10) should match right (id=1, ts=5, value="a")
+        // Left row (id=1, ts=20) should match right (id=1, ts=15, value="b")
+        // Left row (id=2, ts=30) should match right (id=2, ts=25, value="c")
+        let id_col = results[0].column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+        let val_col = results[0].column(2).as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(id_col.value(0), 1);
+        assert_eq!(val_col.value(0), "a");
+        assert_eq!(id_col.value(1), 1);
+        assert_eq!(val_col.value(1), "b");
+        assert_eq!(id_col.value(2), 2);
+        assert_eq!(val_col.value(2), "c");
+    }
+}
+```
+
+- [ ] **Step 2: Run the test to verify the parsing + translation works**
+
+```bash
+cd /Users/shaw/Developer/rust/bee && cargo test -p bee-dsl-sql asof 2>&1 | tail -20
+```
+Expected: PASS for all 5 tests (parse_no_asof_returns_none, parse_left_asof_nearest_prior, translate_left_asof_to_lateral, translate_left_asof_nearest_future, asof_join_end_to_end_correctness).
+
+Note: the asof_join_end_to_end_correctness test actually executes the translated SQL in DataFusion 50. If DataFusion 50's LATERAL JOIN syntax differs from what we generate, the test will fail. Adjust the SQL generation if needed (e.g., DataFusion 50 may not support LATERAL but supports `unnest` + correlated subquery).
+
+- [ ] **Step 3: Wire the translator into the SQL execution path**
+
+Open `crates/bee-dsl-sql/src/lib.rs`. Find the function that executes a SQL string (likely in `physical.rs` or a `run_sql` function). Add a preprocessing step:
+
+```rust
+use crate::asof::translate_asof;
+
+pub fn preprocess_sql(sql: &str) -> std::result::Result<String, datafusion::error::DataFusionError> {
+    if sql.to_uppercase().contains("ASOF JOIN") {
+        translate_asof(sql)
+    } else {
+        Ok(sql.to_string())
+    }
+}
+```
+
+Then in the SQL execution function, call `preprocess_sql(sql)` before passing to DataFusion:
+
+```rust
+let preprocessed = preprocess_sql(sql)?;
+let df = ctx.sql(&preprocessed).await?;
+```
+
+- [ ] **Step 4: Add a test that verifies the SQL execution path uses the translator**
+
+Open `crates/bee-dsl-sql/src/lib.rs` (or a new test file). Add a test that uses `preprocess_sql` + a real `SessionContext`:
+
+```rust
+#[cfg(test)]
+mod preprocess_test {
+    use super::*;
+    use datafusion::arrow::array::{Int64Array, RecordBatch, StringArray};
+    use datafusion::arrow::datatypes::{DataType, Field, Schema};
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn asof_join_via_preprocess() {
+        let schema_left = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("ts", DataType::Int64, false),
+        ]));
+        let schema_right = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("ts", DataType::Int64, false),
+            Field::new("value", DataType::Utf8, false),
+        ]));
+        let left = RecordBatch::try_new(
+            schema_left.clone(),
+            vec![
+                Arc::new(Int64Array::from(vec![1])),
+                Arc::new(Int64Array::from(vec![10])),
+            ],
+        ).unwrap();
+        let right = RecordBatch::try_new(
+            schema_right.clone(),
+            vec![
+                Arc::new(Int64Array::from(vec![1])),
+                Arc::new(Int64Array::from(vec![5])),
+                Arc::new(StringArray::from(vec!["a"])),
+            ],
+        ).unwrap();
+        let ctx = datafusion::prelude::SessionContext::new();
+        ctx.register_batch("a", left).unwrap();
+        ctx.register_batch("b", right).unwrap();
+
+        let sql = "SELECT a.id, b.value FROM a ASOF JOIN b ON a.id = b.id AND a.ts >= b.ts";
+        let preprocessed = preprocess_sql(sql).unwrap();
+        let df = ctx.sql(&preprocessed).await.unwrap();
+        let results = df.collect().await.unwrap();
+        assert_eq!(results[0].num_rows(), 1);
+        let val_col = results[0].column(1).as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(val_col.value(0), "a");
+    }
+}
+```
+
+- [ ] **Step 5: Run the preprocess test**
+
+```bash
+cd /Users/shaw/Developer/rust/bee && cargo test -p bee-dsl-sql preprocess_test 2>&1 | tail -10
+```
+Expected: PASS.
+
+- [ ] **Step 6: Run all workspace tests to verify no regressions**
+
+```bash
+cd /Users/shaw/Developer/rust/bee && cargo test --workspace 2>&1 | grep -E "test result.*passed" | sed -E 's/.*ok\. ([0-9]+) passed.*/\1/' | awk '{sum += $1} END {print "Total:", sum}'
+```
+Expected: 354 (unchanged) + new asof tests.
+
+- [ ] **Step 7: Commit**
+
+```bash
+cd /Users/shaw/Developer/rust/bee && git add crates/bee-dsl-sql && git -c user.name="opencode" -c user.email="opencode@local" commit -m "S41 (9b): ASOF JOIN extension — Bee-level SQL-to-SQL translator (LEFT ASOF JOIN → LEFT JOIN LATERAL)"
 ```
 
 ---
