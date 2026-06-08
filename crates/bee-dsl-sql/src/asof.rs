@@ -59,10 +59,14 @@ pub fn parse_asof(sql: &str) -> DfResult<Option<AsOfClause>> {
         DataFusionError::Plan(format!("ASOF JOIN must be followed by ON clause: {}", sql))
     })?;
     let right_and_rest = &after_asof[on_pos + 4..];
-    let cond_end = right_and_rest
-        .to_uppercase()
-        .find(" WHERE ")
-        .unwrap_or(right_and_rest.len());
+    // The ASOF ON conditions end at the first top-level
+    // (paren-depth 0) `WHERE`, `JOIN`, or statement-terminating
+    // `;`. The old heuristic `find(" WHERE ")` latched onto the
+    // first nested `WHERE` (inside a subquery expanded by
+    // `preprocess_sql_v2`'s view-inlining) and chopped the
+    // conditions short; a trailing `;` was baked into the parsed
+    // `ineq_right_col` and ended up inside the LATERAL subquery.
+    let cond_end = find_top_level_end_of_conditions(right_and_rest);
     let conditions = &right_and_rest[..cond_end].trim();
 
     let parts: Vec<&str> = conditions.split(" AND ").collect();
@@ -183,11 +187,24 @@ pub fn translate_asof(sql: &str) -> DfResult<String> {
     let before = strip_trailing_join_keyword(before);
 
     let after_on_and_conditions = &after_asof[on_pos + 4..];
-    let cond_end = after_on_and_conditions
-        .to_uppercase()
-        .find(" WHERE ")
-        .or_else(|| after_on_and_conditions.to_uppercase().find(" JOIN "))
-        .unwrap_or(after_on_and_conditions.len());
+    // Find the end of the ASOF ON conditions. We want the first
+    // top-level (paren-depth 0) `WHERE`, `JOIN`, or statement-end
+    // `;` — these mark the boundary between the ASOF conditions
+    // and the rest of the SQL. The naive `find(" WHERE ")` /
+    // `find(" JOIN ")` latches onto the FIRST occurrence
+    // anywhere, including inside a nested subquery that
+    // `preprocess_sql_v2`'s view-inlining step has expanded into
+    // the SQL, or onto a trailing `;` that is part of the
+    // statement terminator (not a condition). For example, with
+    // the inlined view:
+    //   ... FROM (SELECT ... FROM clicks c LEFT JOIN views v ON ...)
+    //   AS joined c LEFT ASOF JOIN views v ON c.id = v.id AND c.ts >= v.ts;
+    // the FIRST `JOIN` is inside the inlined `(SELECT ...)` body
+    // (chopping the conditions short), and the trailing `;`
+    // would land inside the LATERAL subquery's `ineq_right_col`
+    // if we didn't strip it. The fix is to track paren depth and
+    // only match at depth 0.
+    let cond_end = find_top_level_end_of_conditions(after_on_and_conditions);
     let after = &after_on_and_conditions[cond_end..];
 
     let translated = format!(
@@ -215,6 +232,61 @@ fn strip_trailing_join_keyword(before: &str) -> &str {
         }
     }
     before
+}
+
+/// Find the byte offset where the ASOF JOIN ON conditions end in
+/// `sql`. The conditions end at the first top-level
+/// (paren-depth 0) `WHERE`, `JOIN`, or statement-terminating `;`.
+/// Returns `sql.len()` if none is found (the conditions run to
+/// the end of the slice).
+///
+/// Nested parens are tracked, so a `WHERE` / `JOIN` / `;` inside
+/// a subquery is skipped. The pre-existing heuristic
+/// (`find(" WHERE ")`) latched onto the first nested `WHERE`
+/// (inside a subquery expanded by `preprocess_sql_v2`'s
+/// view-inlining) and chopped the conditions short; a trailing
+/// `;` was baked into the parsed `ineq_right_col` and ended up
+/// inside the LATERAL subquery.
+///
+/// We compare the uppercased input byte-by-byte against the
+/// keyword bytes (with a leading space, matching the original
+/// fragile heuristic's `" WHERE "` / `" JOIN "` pattern) to
+/// minimise the risk of false positives on column names like
+/// `mywhere` (which is not bordered by a leading space). String
+/// literals containing `WHERE` / `JOIN` are not a concern in
+/// ASOF JOIN ON conditions — the conditions are
+/// `<equi> AND <ineq>` (a 2-clause form) with no string
+/// literals.
+fn find_top_level_end_of_conditions(sql: &str) -> usize {
+    let upper = sql.to_ascii_uppercase();
+    let bytes = upper.as_bytes();
+    let where_kw = b" WHERE ";
+    let join_kw = b" JOIN ";
+    let mut depth: i32 = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        match c {
+            b'(' => depth += 1,
+            b')' => {
+                if depth > 0 {
+                    depth -= 1;
+                }
+            }
+            b';' if depth == 0 => return i,
+            _ if depth == 0 => {
+                if i + where_kw.len() <= bytes.len() && &bytes[i..i + where_kw.len()] == where_kw {
+                    return i;
+                }
+                if i + join_kw.len() <= bytes.len() && &bytes[i..i + join_kw.len()] == join_kw {
+                    return i;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    sql.len()
 }
 
 /// Split the right-side text of an ASOF JOIN into `(source, alias)`.
@@ -333,6 +405,75 @@ mod tests {
         assert!(
             translated.contains("LIMIT 1"),
             "expected LIMIT 1 in nearest-prior subquery, got: {translated}"
+        );
+    }
+
+    /// Regression: the ASOF translator's `cond_end` heuristic used
+    /// `find(" WHERE ")` (with `" JOIN "` as a fallback) on the
+    /// string after the `ON` clause. When the user's SQL contains
+    /// nested subqueries (e.g. a `CREATE VIEW` whose body has a
+    /// `WHERE` clause, inlined by `preprocess_sql_v2` BEFORE the
+    /// translator runs), the heuristic finds the FIRST `WHERE` /
+    /// `JOIN` — which is inside the nested subquery — and chops
+    /// the ASOF JOIN's tail off there, producing malformed output
+    /// like `... v.ts; <= c.ts ORDER BY v.ts; DESC LIMIT 1) v ON TRUE`.
+    ///
+    /// The fix is to make `cond_end` paren-aware: scan past nested
+    /// parens to find the first `WHERE` or `JOIN` at depth 0. This
+    /// test exercises the full `preprocess_sql_v2` pipeline (which
+    /// inlines the view body BEFORE invoking the ASOF translator)
+    /// to ensure the translator handles the resulting nested-subquery
+    /// form correctly.
+    #[test]
+    fn translate_asof_through_preprocess_v2_with_inlined_view() {
+        use crate::preprocess_sql_v2;
+        let sql = "CREATE VIEW joined AS \
+                   SELECT c.user_id AS c_user_id, c.ts AS c_ts, \
+                          v.user_id AS v_user_id, v.ts AS v_ts \
+                   FROM clicks c \
+                   LEFT JOIN views v ON c.user_id = v.user_id; \
+                   SELECT c_user_id FROM joined c \
+                   LEFT ASOF JOIN views v \
+                   ON c.user_id = v.user_id AND c.ts >= v.ts;";
+        let translated = preprocess_sql_v2(sql).unwrap();
+
+        // The LATERAL subquery must close correctly. Before the
+        // fix, the inlined view's `LEFT JOIN views v ON ...`
+        // contained a `JOIN` token that `cond_end` latched onto,
+        // and the output ended up with a stray `v.ts;` fragment
+        // glued to `<= c.ts`.
+        assert!(
+            !translated.contains("v.ts; <= c.ts"),
+            "cond_end heuristic latched onto a nested `JOIN` / `WHERE`; \
+             ASOF conditions were truncated. Got: {translated}"
+        );
+        assert!(
+            !translated.contains("v.ts; DESC"),
+            "ASOF ORDER BY tail was separated from its key by the \
+             wrong cond_end cutoff. Got: {translated}"
+        );
+        assert!(
+            translated.contains("LEFT JOIN LATERAL"),
+            "expected LEFT JOIN LATERAL in: {translated}"
+        );
+        assert!(
+            translated.contains("v.user_id = c.user_id"),
+            "expected equi condition in: {translated}"
+        );
+        assert!(
+            translated.contains("v.ts <= c.ts"),
+            "expected translated inequality in: {translated}"
+        );
+        assert!(
+            translated.contains("ORDER BY v.ts DESC"),
+            "expected nearest-prior ORDER BY in: {translated}"
+        );
+        assert!(
+            translated.ends_with("LIMIT 1) v ON TRUE")
+                || translated.ends_with("LIMIT 1) v ON TRUE;"),
+            "LATERAL subquery must close with `LIMIT 1) v ON TRUE` \
+             (with optional trailing `;`) at the end of the SQL. \
+             Got: {translated}"
         );
     }
 
