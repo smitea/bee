@@ -1899,7 +1899,12 @@ SELECT
     sum(p.amount) AS revenue
 FROM clicks c
 LEFT ASOF JOIN views v ON c.user_id = v.user_id AND c.ts >= v.ts
-LEFT ASOF JOIN purchases p ON c.user_id = p.user_id AND c.ts >= p.ts
+LEFT ASOF JOIN purchases p ON c.user_id = p.user_id AND c.ts >= v.ts
+
+-- **Note**: `LEFT ASOF JOIN` is a Bee-level extension (not DataFusion native).
+-- The translator added in Task 9b rewrites the SQL before passing to DataFusion.
+-- The user's SQL syntax above is preserved end-to-end.
+
 WINDOW TUMBLING (c.ts, INTERVAL '1' MINUTE)
 GROUP BY date_trunc('minute', to_timestamp(c.ts));
 
