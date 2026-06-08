@@ -11,6 +11,7 @@ mod compile;
 mod handlers;
 mod physical;
 pub mod preprocess;
+pub mod sinks;
 
 #[cfg(feature = "test-fixtures")]
 pub mod test_fixtures;
