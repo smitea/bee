@@ -7,7 +7,7 @@ publish = false
 description = "Bee performance showcase plugin: Fibonacci Handler UDFs (fib_seed + fib_step with KV-backed state)."
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 bee-plugin-sdk = { path = "../../crates/bee-plugin-sdk" }
