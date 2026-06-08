@@ -153,15 +153,15 @@ pub fn translate_asof(sql: &str) -> DfResult<String> {
     let lateral_subquery = format!(
         "(SELECT * FROM {right_table} \
          WHERE {equi_right_col} = {equi_left_col} \
-           AND {ineq_right_col} {translated_op} {ineq_left_col} \
-         ORDER BY {ineq_right_col} {direction} LIMIT 1)",
+           AND {ineq_right_col} {translated_ineq_op} {ineq_left_col} \
+         ORDER BY {ineq_right_col} {order_direction} LIMIT 1)",
         right_table = right_table,
         equi_right_col = equi_right_col,
         equi_left_col = equi_left_col,
         ineq_right_col = ineq_right_col,
-        translated_op = translated_ineq_op,
+        translated_ineq_op = translated_ineq_op,
         ineq_left_col = ineq_left_col,
-        direction = order_direction,
+        order_direction = order_direction,
     );
 
     let before = &sql[..asof_pos];
