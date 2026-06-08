@@ -147,7 +147,7 @@ The script **measures and prints** the numbers; the user reads off the row that 
 
 **Why this is in the product design (not just internal docs)**: it is the canonical "what does Bee do?" answer for an outsider. The Fibonacci demo is the smallest possible test of Bee's state-management path. The prime sieve is the smallest possible test of Bee's distributed-scheduling path. The multi-stream analytics is the smallest possible test of Bee's SQL runtime. Together they cover the three pillars (state / scheduling / SQL) of the system in 5 minutes and zero external dependencies.
 
-See [`scripts/demo-perf.sh`](../../scripts/demo-perf.sh) and [`examples/performance/README.md`](../../examples/performance/README.md). Implementation tracked as **S41** in [`docs/stories.md`](./stories.md).
+The demo is now runnable via [`scripts/demo-perf.sh`](../../scripts/demo-perf.sh); see [`examples/performance/README.md`](../../examples/performance/README.md) for the math, the Bee design choices, and the perf table. Implementation tracked as **S41** in [`docs/stories.md`](./stories.md).
 
 ### Scenario B: Real-time multi-source monitoring
 
