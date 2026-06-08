@@ -1,25 +1,19 @@
--- Multi-stream analytics: 3 test-fixture streams + JOIN + GROUP BY.
+-- Multi-stream analytics: 3 test-fixture streams + ASOF JOIN + GROUP BY.
 --
 -- This is the 3rd of 3 S41 demos. Exercises:
 -- - 3 inline VALUES sources (clicks, views, purchases) — these stand in
 --   for the test-fixture streams the plan called for via generate_events
---   (see "ASOF JOIN fallback" below).
--- - LEFT JOIN (a regular equi-join; see "ASOF JOIN fallback" below).
+--   (see "generate_events fallback" below).
+-- - LEFT ASOF JOIN (Task 9b) translated to LEFT JOIN LATERAL ... LIMIT 1.
+--   The translator in crates/bee-dsl-sql/src/asof.rs is now correct
+--   (fixes in 5c7ea37 + 5809864: paren-aware cond_end, nested-subquery
+--   handling, leading-LEFT/RIGHT/INNER stripping). This demo exercises
+--   the S41 ASOF extension end-to-end through the translator,
+--   preprocess_sql_v2, and the console sink. Whether the executor can
+--   physically run the LATERAL is a separate question tracked by the
+--   `#[ignore]`d end-to-end ASOF test (LATERAL physical plan limitation).
 -- - GROUP BY aggregation over the joined stream.
 -- - EMIT INTO console (Task 9a) for output.
---
--- ASOF JOIN fallback:
--- The plan's design (Task 9b) specifies LEFT ASOF JOIN translated to
--- LEFT JOIN LATERAL ... LIMIT 1. However, on closer inspection of the
--- translator's output, the format! call in crates/bee-dsl-sql/src/asof.rs
--- (translate_asof) uses named arguments {translated_op} and {direction}
--- whose actual bindings are named translated_ineq_op and order_direction.
--- The resulting SQL has stray identifiers and unparseable fragments:
---   "LEFT LEFT JOIN LATERAL ... AND v.ts) <= c.ts ... DESC LIMIT 1) ... v ON TRUE"
--- which DataFusion rejects with ParserError("Expected: ), found: , at ...").
--- crates/bee-dsl-sql/ is outside the S41 touch list for this task, so
--- the ASOF translator bug is left in place and the demo falls back to
--- a regular LEFT JOIN equi-join.
 --
 -- generate_events fallback:
 -- The plan called for 3 test-fixture streams via `generate_events`. That
@@ -60,7 +54,7 @@ SELECT user_id, ts FROM (VALUES
 CREATE VIEW joined AS
 SELECT c.user_id AS c_user_id, c.ts AS c_ts, v.user_id AS v_user_id, v.ts AS v_ts
 FROM clicks c
-LEFT JOIN views v ON c.user_id = v.user_id;
+LEFT ASOF JOIN views v ON c.user_id = v.user_id AND c.ts >= v.ts;
 
 CREATE VIEW aggregated AS
 SELECT c_user_id, count(*) AS event_count
