@@ -89,6 +89,11 @@ impl Default for RunConfig {
 /// input source registered as a CSV file at `csv_path` under the table
 /// name `stream` (the S13+ default; tests that use a different name
 /// should call `analyze_with` + `register_csv` themselves).
+///
+/// S41 (9b): the SQL is preprocessed via [`super::preprocess_sql_v2`]
+/// before reaching DataFusion. This rewrites Bee extensions
+/// (currently `ASOF JOIN`) into a form DataFusion's parser can
+/// accept.
 pub async fn compile_to_physical_plan(
     sql: &str,
     csv_path: &Path,
@@ -105,7 +110,8 @@ pub async fn compile_to_physical_plan(
     )
     .await?;
 
-    let logical = super::analyze_with_ctx(&ctx, sql).await?;
+    let preprocessed = super::preprocess_sql_v2(sql)?;
+    let logical = super::analyze_with_ctx(&ctx, &preprocessed).await?;
     ctx.state().create_physical_plan(&logical).await
 }
 
