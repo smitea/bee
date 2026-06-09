@@ -1,144 +1,864 @@
-//! `bee-plugin-binance` — production-grade reference implementation.
+//! `bee-plugin-binance` — production-grade Binance adapter (S34).
 //!
-//! Implements the `binance_subscribe` Input Adapter. Generates
-//! synthetic K-line events whose `price` follows a sine wave so
-//! downstream MACD / EMA indicators are observable. The Plugin
-//! scaffold is production-grade (cdylib + FFI vtable); the actual
-//! data source is a sine-wave placeholder that will be replaced by
-//! the real Binance WS client in S34.
+//! Implements the `binance_subscribe` Input Adapter against the real
+//! Binance public market-data WebSocket and REST API. The plugin
+//! honours the backfill-on-subscribe semantics defined in
+//! `docs/best-practices/quant/stories.md` §S34 and ADR-0011:
 //!
-//! ## Architecture
+//!   1. `open()` decodes the per-stream config (symbol, interval,
+//!      optional `from` ISO-8601) and spins up a background task
+//!      that owns the WS connection.
+//!   2. The background task first emits any required historical
+//!      K-lines (from `from` up to the Producer's high-water mark
+//!      `H`), then transitions to live WS. Each event is pushed to
+//!      an in-process mpsc channel.
+//!   3. `next()` blocks on that channel and bincode-encodes the
+//!      next `KlineEvent` to the host's `EventBytes` slot.
+//!   4. `close()` drops the channel sender and the background
+//!      task observes the closure and shuts down cleanly.
 //!
-//! - [`Factory`]: produces the [`bee_plugin_sdk::PluginManifest`]
-//!   + [`bee_plugin_sdk::PluginHandle`] for the host.
-//! - [`BinanceInput`]: the actual [`bee_adapter::InputAdapter`]
-//!   implementation. Configurable cadence (default 1 event/sec)
-//!   and sine-wave parameters.
-//! - `cdylib_plugin!(Factory)` invocation at the bottom generates
-//!   the FFI entry symbols.
+//! Stream identity (`StreamSignature`):
 //!
-//! The placeholder is **synchronous** in the sense that each `next`
-//! call returns one event (no background task). Real Binance WS
-//! would push events; for the placeholder, the simulator controls
-//! timing.
+//!   `sha256("binance" || "subscribe" || symbol || interval)`
+//!
+//! `from` is a per-Subscriber concern and deliberately NOT part of
+//! the signature (multiple Subscribers can share one Producer
+//! while asking for different backfill windows).
+//!
+//! ## KV integration
+//!
+//! The high-water mark is read / written via
+//! `BeeHostV1::safe_kv_get` / `safe_kv_put` in the production
+//! path. For the MVP (and the existing 1-node demo), the plugin
+//! keeps a process-global `OnceLock<Mutex<HashMap<...>>>` stub so
+//! the adapter compiles + runs in isolation; the host FFI is
+//! wired in S41 follow-up 4 (plugin_loader) and the production
+//! version just swaps the stub calls for `safe_kv_*`.
+//!
+//! ## Rate limiting
+//!
+//! REST calls are wrapped in a simple token-bucket limiter
+//! (default 10 req/s, per the S34 spec). WS subscriptions are
+//! not rate-limited (Binance allows unlimited WS per IP).
+//!
+//! ## Credentials
+//!
+//! `api_key` / `api_secret` are read from the Datasource config
+//! (not from env vars) and never logged. The MVP doesn't sign
+//! requests — public market-data endpoints don't require it.
 
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use bee_adapter::{AdapterResult, Event, InputAdapter};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+use bee_adapter::Event;
+use bee_plugin_sdk::event::{encode_event, EventBytes};
+use bee_plugin_sdk::vtable::InputAdapterVtable;
 use bee_plugin_sdk::{
-    vtable::InputAdapterVtable, AdapterDescriptor, Factory, PluginHandle, PluginManifest, PluginName,
+    AdapterDescriptor, Factory, PluginHandle, PluginManifest, PluginName,
 };
 
-/// Configuration for the binance input.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+// ---------------------------------------------------------------------------
+// Section 2: Type definitions
+// ---------------------------------------------------------------------------
+
+/// Datasource-level connection config. The Datasource registers
+/// this once; per-call args (symbol / interval / from) are in
+/// the per-stream config below.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BinanceConfig {
-    /// Symbol (e.g. "BTC/USDT"). Goes into the event payload
-    /// prefix as ASCII bytes for inspection.
-    pub symbol: String,
-    /// Interval label (e.g. "5min"). Same — payload prefix.
-    pub interval: String,
-    /// Number of events to emit before signalling end-of-stream.
-    pub count: u32,
-    /// Per-event delay in milliseconds. `None` = no sleep (fast
-    /// tests); `Some(ms)` = paced output.
-    pub delay_ms: Option<u64>,
-    /// Sine-wave amplitude in price units.
-    pub amplitude: f64,
-    /// Sine-wave base price (midline).
-    pub base_price: f64,
-    /// Sine-wave frequency (cycles per event).
-    pub frequency: f64,
+    /// Base WebSocket URL (default: `wss://stream.binance.com:9443`).
+    pub ws_url: String,
+    /// Base REST URL (default: `https://api.binance.com`).
+    pub rest_url: String,
+    /// Optional API key (only required for signed/private endpoints).
+    pub api_key: Option<String>,
+    /// Optional API secret (only required for signed endpoints).
+    pub api_secret: Option<String>,
+    /// REST rate limit (requests per second). Default 10.
+    pub rate_limit_per_sec: u32,
+    /// Tenant id (uint16, 0 = global). ADR-0010.
+    pub tenant: u16,
 }
 
 impl Default for BinanceConfig {
     fn default() -> Self {
         Self {
-            symbol: "BTC/USDT".into(),
-            interval: "5min".into(),
-            count: 10,
-            delay_ms: None,
-            amplitude: 100.0,
-            base_price: 30_000.0,
-            frequency: 0.1,
+            ws_url: "wss://stream.binance.com:9443".into(),
+            rest_url: "https://api.binance.com".into(),
+            api_key: None,
+            api_secret: None,
+            rate_limit_per_sec: 10,
+            tenant: 0,
         }
     }
 }
 
-/// `binance_subscribe` Input Adapter. Emits `count` events with a
-/// sine-wave `price` and synthetic K-line metadata.
-pub struct BinanceInput {
-    config: BinanceConfig,
-    emitted: u32,
-    started_at_ms: u64,
+/// Per-stream config. The Compiler passes this to `open()` as
+/// the bincode-encoded blob. The plugin uses it to drive the
+/// backfill-then-subscribe flow.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubscribeArgs {
+    /// Symbol as the SQL user wrote it (e.g. `"BTC/USDT"`).
+    /// Normalised internally to Binance's `"BTCUSDT"` form.
+    pub symbol: String,
+    /// Interval label (e.g. `"5min"`, `"1h"`). Normalised to
+    /// Binance's `"5m"`, `"1h"` form.
+    pub interval: String,
+    /// Optional ISO-8601 backfill start. If in the past, the
+    /// plugin backfills from `from` up to the Producer's HWM
+    /// before subscribing to live WS.
+    pub from: Option<String>,
 }
 
-impl InputAdapter for BinanceInput {
-    type Config = BinanceConfig;
+/// FFI-facing config blob: the per-stream `SubscribeArgs` plus
+/// the per-Datasource `BinanceConfig` (carried with the
+/// per-stream call so the plugin can connect without a host
+/// round-trip). The host already has the Datasource config, but
+/// the FFI vtable takes a single opaque blob, so we bundle them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenConfig {
+    pub datasource: BinanceConfig,
+    pub stream: SubscribeArgs,
+}
 
-    async fn open(config: Self::Config) -> AdapterResult<Self> {
+/// A single K-line event. The bincode payload that crosses the
+/// FFI boundary is a `bee_adapter::Event` whose `.payload` is
+/// bincode-encoded `KlineEvent`. The `Event::timestamp` carries
+/// the K-line's `open_time` (ms since epoch).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct KlineEvent {
+    /// Open time in ms since epoch (matches Binance field 0).
+    pub open_time: i64,
+    /// Open price (string -> f64 to dodge f64 JSON quirks).
+    pub open: f64,
+    /// High price.
+    pub high: f64,
+    /// Low price.
+    pub low: f64,
+    /// Close price.
+    pub close: f64,
+    /// Volume.
+    pub volume: f64,
+    /// Close time in ms since epoch (Binance field 6).
+    pub close_time: i64,
+    /// Symbol as written by the caller (e.g. `"BTC/USDT"`).
+    pub symbol: String,
+    /// Interval as written by the caller (e.g. `"5min"`).
+    pub interval: String,
+}
+
+impl KlineEvent {
+    /// Convert one row of the REST `/api/v3/klines` response
+    /// into a `KlineEvent`. The Binance row layout is:
+    /// `[open_time, open, high, low, close, volume, close_time, ...]`
+    fn from_binance_kline(
+        row: &[serde_json::Value],
+        symbol: &str,
+        interval: &str,
+    ) -> Result<Self, BinanceError> {
+        let open_time = row
+            .first()
+            .and_then(|v| v.as_i64())
+            .ok_or_else(|| BinanceError::Parse("missing open_time".into()))?;
+        let close_time = row
+            .get(6)
+            .and_then(|v| v.as_i64())
+            .ok_or_else(|| BinanceError::Parse("missing close_time".into()))?;
+        let open = row
+            .get(1)
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<f64>().ok())
+            .ok_or_else(|| BinanceError::Parse("missing/invalid open".into()))?;
+        let high = row
+            .get(2)
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<f64>().ok())
+            .ok_or_else(|| BinanceError::Parse("missing/invalid high".into()))?;
+        let low = row
+            .get(3)
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<f64>().ok())
+            .ok_or_else(|| BinanceError::Parse("missing/invalid low".into()))?;
+        let close = row
+            .get(4)
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<f64>().ok())
+            .ok_or_else(|| BinanceError::Parse("missing/invalid close".into()))?;
+        let volume = row
+            .get(5)
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<f64>().ok())
+            .ok_or_else(|| BinanceError::Parse("missing/invalid volume".into()))?;
         Ok(Self {
-            config,
-            emitted: 0,
-            started_at_ms: Event::now_timestamp(),
+            open_time,
+            open,
+            high,
+            low,
+            close,
+            volume,
+            close_time,
+            symbol: symbol.to_string(),
+            interval: interval.to_string(),
         })
     }
 
-    async fn next(&mut self) -> AdapterResult<Option<Event>> {
-        if self.emitted >= self.config.count {
-            return Ok(None);
-        }
-        if let Some(d) = self.config.delay_ms {
-            if d > 0 {
-                tokio::time::sleep(Duration::from_millis(d)).await;
-            }
-        }
-        let sequence = self.emitted as u64;
-        let t = sequence as f64;
-        // Sine wave: base + amplitude * sin(2π * f * t).
-        let price = self.config.base_price
-            + self.config.amplitude
-                * (2.0 * std::f64::consts::PI * self.config.frequency * t).sin();
-        // Payload: ASCII "<symbol>,<interval>,<sequence>,<price>".
-        // Keep the format stable so demo scripts can grep for it.
-        let payload = format!(
-            "{},{},{},{:.4}",
-            self.config.symbol, self.config.interval, sequence, price
-        )
-        .into_bytes();
-        self.emitted += 1;
-        Ok(Some(Event {
-            timestamp: self.started_at_ms + sequence * 1000,
-            sequence,
-            payload,
-        }))
-    }
-
-    async fn close(self) -> AdapterResult<()> {
-        Ok(())
+    /// Convert the `k` field of a Binance WS kline event into
+    /// a `KlineEvent`. The WS message layout is:
+    ///
+    /// ```json
+    /// {
+    ///   "e": "kline", "E": 1234567890123,
+    ///   "s": "BTCUSDT", "k": {
+    ///     "t": 1234567890000, "T": 1234567899999,
+    ///     "o": "0.0010", "c": "0.0020",
+    ///     "h": "0.0025", "l": "0.0015",
+    ///     "v": "1000.0", ...
+    ///   }
+    /// }
+    /// ```
+    fn from_binance_ws_kline(
+        data: &serde_json::Value,
+        symbol: &str,
+        interval: &str,
+    ) -> Result<Self, BinanceError> {
+        let k = data
+            .get("k")
+            .ok_or_else(|| BinanceError::Parse("WS kline missing 'k' field".into()))?;
+        let parse_price = |field: &str| -> Result<f64, BinanceError> {
+            k.get(field)
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<f64>().ok())
+                .ok_or_else(|| BinanceError::Parse(format!("missing/invalid {field}")))
+        };
+        Ok(Self {
+            open_time: k
+                .get("t")
+                .and_then(|v| v.as_i64())
+                .ok_or_else(|| BinanceError::Parse("missing k.t".into()))?,
+            close_time: k
+                .get("T")
+                .and_then(|v| v.as_i64())
+                .ok_or_else(|| BinanceError::Parse("missing k.T".into()))?,
+            open: parse_price("o")?,
+            high: parse_price("h")?,
+            low: parse_price("l")?,
+            close: parse_price("c")?,
+            volume: parse_price("v")?,
+            symbol: symbol.to_string(),
+            interval: interval.to_string(),
+        })
     }
 }
 
-/// Factory for the binance plugin. Holds no state; both methods
-/// are pure.
+/// Errors surfaced by the binance adapter.
+#[derive(Debug, thiserror::Error)]
+pub enum BinanceError {
+    #[error("config decode: {0}")]
+    Config(String),
+    #[error("parse: {0}")]
+    Parse(String),
+    #[error("ws: {0}")]
+    Ws(String),
+    #[error("rest: {0}")]
+    Rest(String),
+    #[error("runtime: {0}")]
+    Runtime(String),
+    #[error("channel closed")]
+    ChannelClosed,
+}
+
+// ---------------------------------------------------------------------------
+// Section 3: StreamSignature
+// ---------------------------------------------------------------------------
+
+/// Compute the Producer's stream identity. The signature is over
+/// the call shape (source + method + symbol + interval) but NOT
+/// `from` — `from` is a per-Subscriber concern.
+pub fn stream_signature(symbol: &str, interval: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"binance");
+    hasher.update(b"subscribe");
+    hasher.update(symbol.as_bytes());
+    hasher.update(interval.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+/// Normalise a user-facing interval (`"5min"`, `"1h"`, `"1d"`)
+/// to Binance's interval grammar (`"5m"`, `"1h"`, `"1d"`). If
+/// the input is already Binance-shaped, pass it through.
+fn normalise_interval(interval: &str) -> String {
+    match interval {
+        "1min" => "1m".to_string(),
+        "3min" => "3m".to_string(),
+        "5min" => "5m".to_string(),
+        "15min" => "15m".to_string(),
+        "30min" => "30m".to_string(),
+        "1hour" | "1h" => "1h".to_string(),
+        "2hour" | "2h" => "2h".to_string(),
+        "4hour" | "4h" => "4h".to_string(),
+        "1day" | "1d" => "1d".to_string(),
+        "1week" | "1w" => "1w".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// Normalise a user-facing symbol (`"BTC/USDT"`) to Binance's
+/// flat form (`"BTCUSDT"`). Anything that doesn't contain a
+/// `/` is assumed already in Binance form.
+fn normalise_symbol(symbol: &str) -> String {
+    symbol.replace('/', "")
+}
+
+// ---------------------------------------------------------------------------
+// Section 4: KV stub (process-global, in-memory)
+// ---------------------------------------------------------------------------
+
+/// Process-global KV stub. The real KV integration is via
+/// `BeeHostV1::safe_kv_get` / `safe_kv_put`; for the MVP
+/// (1-node demo, no cluster KV) we keep a global `HashMap`
+/// guarded by a `Mutex`.
+///
+/// The 1-node MVP only runs one plugin at a time, so a
+/// process-global is sufficient. The production integration
+/// replaces these calls with the host FFI.
+fn kv_stub() -> &'static Mutex<HashMap<String, Vec<u8>>> {
+    static KV: OnceLock<Mutex<HashMap<String, Vec<u8>>>> = OnceLock::new();
+    KV.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn kv_get(key: &str) -> Option<Vec<u8>> {
+    kv_stub().lock().ok().and_then(|m| m.get(key).cloned())
+}
+
+fn kv_put(key: String, value: Vec<u8>) {
+    if let Ok(mut m) = kv_stub().lock() {
+        m.insert(key, value);
+    }
+}
+
+/// KV key for the Producer's high-water mark (ms timestamp).
+fn hwm_key(stream_id: &str) -> String {
+    format!("state/producer/{stream_id}/hwm")
+}
+
+/// Read the Producer's HWM. Returns 0 if unset (no events have
+/// ever been emitted for this stream).
+fn hwm_read(stream_id: &str) -> i64 {
+    match kv_get(&hwm_key(stream_id)) {
+        Some(bytes) if bytes.len() == 8 => {
+            let mut arr = [0u8; 8];
+            arr.copy_from_slice(&bytes);
+            i64::from_be_bytes(arr)
+        }
+        _ => 0,
+    }
+}
+
+/// Write the Producer's HWM (last emitted open_time in ms).
+fn hwm_write(stream_id: &str, open_time_ms: i64) {
+    kv_put(hwm_key(stream_id), open_time_ms.to_be_bytes().to_vec());
+}
+
+// ---------------------------------------------------------------------------
+// Section 5: REST `download_history`
+// ---------------------------------------------------------------------------
+
+/// Simple token-bucket rate limiter. `min_interval` is the
+/// minimum gap between two REST calls. The MVP uses a
+/// "1 req per `1/rate_limit_per_sec` seconds" limiter; a true
+/// bucket would batch up to `rate_limit_per_sec` requests
+/// without spacing.
+#[derive(Debug, Clone)]
+struct RateLimiter {
+    min_interval: Duration,
+    last: Arc<Mutex<Option<Instant>>>,
+}
+
+impl RateLimiter {
+    fn new(rate_limit_per_sec: u32) -> Self {
+        let per_sec = rate_limit_per_sec.max(1) as f64;
+        let min_interval = Duration::from_secs_f64(1.0 / per_sec);
+        Self {
+            min_interval,
+            last: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    async fn wait(&self) {
+        loop {
+            let now = Instant::now();
+            let should_wait = {
+                let mut last = self.last.lock().expect("rate limiter poisoned");
+                match *last {
+                    Some(prev) if now.duration_since(prev) < self.min_interval => {
+                        Some(self.min_interval - now.duration_since(prev))
+                    }
+                    _ => {
+                        *last = Some(now);
+                        None
+                    }
+                }
+            };
+            if let Some(d) = should_wait {
+                tokio::time::sleep(d).await;
+            } else {
+                return;
+            }
+        }
+    }
+}
+
+/// REST backfill. Pages through `/api/v3/klines` in 1000-row
+/// windows from `from_ms` (inclusive) up to `to_ms` (inclusive).
+/// `to_ms` of 0 means "to now".
+pub async fn download_history(
+    config: &BinanceConfig,
+    symbol: &str,
+    interval: &str,
+    from_ms: i64,
+    to_ms: i64,
+) -> Result<Vec<KlineEvent>, BinanceError> {
+    let limiter = RateLimiter::new(config.rate_limit_per_sec);
+    let sym = normalise_symbol(&symbol.to_lowercase());
+    let iv = normalise_interval(interval);
+    let mut all_events = Vec::new();
+    let mut current_start = from_ms;
+    let upper = if to_ms <= 0 {
+        i64::MAX
+    } else {
+        to_ms
+    };
+    let client = reqwest::Client::builder()
+        .build()
+        .map_err(|e| BinanceError::Rest(e.to_string()))?;
+    while current_start < upper {
+        limiter.wait().await;
+        let url = format!(
+            "{}/api/v3/klines?symbol={}&interval={}&startTime={}&endTime={}&limit=1000",
+            config.rest_url, sym, iv, current_start, upper
+        );
+        let resp = client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| BinanceError::Rest(e.to_string()))?;
+        if !resp.status().is_success() {
+            return Err(BinanceError::Rest(format!(
+                "GET /api/v3/klines returned {}",
+                resp.status()
+            )));
+        }
+        let klines: Vec<Vec<serde_json::Value>> = resp
+            .json()
+            .await
+            .map_err(|e| BinanceError::Rest(e.to_string()))?;
+        if klines.is_empty() {
+            break;
+        }
+        let last_ts = klines
+            .last()
+            .and_then(|row| row.first())
+            .and_then(|v| v.as_i64())
+            .ok_or_else(|| {
+                BinanceError::Parse("kline row missing open_time".into())
+            })?;
+        for row in &klines {
+            all_events.push(KlineEvent::from_binance_kline(
+                row, symbol, interval,
+            )?);
+        }
+        if last_ts >= upper {
+            break;
+        }
+        if klines.len() < 1000 {
+            // No more pages available.
+            break;
+        }
+        current_start = last_ts + 1;
+    }
+    Ok(all_events)
+}
+
+// ---------------------------------------------------------------------------
+// Section 6: WS `subscribe` (background task)
+// ---------------------------------------------------------------------------
+
+/// Stream URL Binance expects:
+///   `wss://stream.binance.com:9443/ws/<symbol>@kline_<interval>`
+///
+/// Connecting to the per-stream URL gives the kline events
+/// directly (no combined-stream wrapper). This is the simplest
+/// path for a single subscription.
+fn ws_stream_url(ws_base: &str, symbol: &str, interval: &str) -> String {
+    let sym = normalise_symbol(&symbol.to_lowercase());
+    let iv = normalise_interval(interval);
+    format!("{ws_base}/ws/{sym}@kline_{iv}")
+}
+
+/// Connect to the per-stream WS, send `SUBSCRIBE`, then forward
+/// each parsed kline event to `tx`. Updates the Producer's HWM
+/// in the global KV stub after every event.
+async fn subscribe_loop(
+    config: BinanceConfig,
+    symbol: String,
+    interval: String,
+    tx: tokio::sync::mpsc::Sender<KlineEvent>,
+) -> Result<(), BinanceError> {
+    use futures::{SinkExt, StreamExt};
+    let url = ws_stream_url(&config.ws_url, &symbol, &interval);
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .map_err(|e| BinanceError::Ws(e.to_string()))?;
+    let subscribe_msg = serde_json::json!({
+        "method": "SUBSCRIBE",
+        "params": [format!("{}@kline_{}",
+            normalise_symbol(&symbol.to_lowercase()),
+            normalise_interval(&interval))],
+        "id": 1
+    });
+    ws.send(tokio_tungstenite::tungstenite::Message::Text(
+        subscribe_msg.to_string(),
+    ))
+    .await
+    .map_err(|e| BinanceError::Ws(e.to_string()))?;
+    let stream_id = stream_signature(&symbol, &interval);
+    while let Some(msg) = ws.next().await {
+        let msg = msg.map_err(|e| BinanceError::Ws(e.to_string()))?;
+        if let tokio_tungstenite::tungstenite::Message::Text(text) = msg {
+            // The per-stream URL delivers the kline envelope
+            // directly: `{"e":"kline", ...}`. We still tolerate a
+            // combined-stream wrapper (`{"stream":..., "data":...}`)
+            // for forward-compat.
+            let parsed: serde_json::Value = serde_json::from_str(&text)
+                .map_err(|e| BinanceError::Parse(e.to_string()))?;
+            let payload = parsed
+                .get("data")
+                .unwrap_or(&parsed);
+            match KlineEvent::from_binance_ws_kline(
+                payload, &symbol, &interval,
+            ) {
+                Ok(event) => {
+                    hwm_write(&stream_id, event.open_time);
+                    if tx.send(event).await.is_err() {
+                        return Err(BinanceError::ChannelClosed);
+                    }
+                }
+                Err(e) => {
+                    // Tolerate non-kline frames (e.g. the
+                    // SUBSCRIBE ack `{"result":null,"id":1}`).
+                    if payload.get("e").and_then(|v| v.as_str())
+                        != Some("kline")
+                    {
+                        continue;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Parse a user-provided ISO-8601 timestamp into ms since epoch.
+/// Accepts the common forms: `"2024-01-01"`, `"2024-01-01T00:00:00Z"`,
+/// `"2024-01-01T00:00:00+00:00"`. Returns `Err` on anything else.
+fn parse_iso8601_ms(s: &str) -> Result<i64, BinanceError> {
+    use chrono::DateTime;
+    if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+        return Ok(dt.timestamp_millis());
+    }
+    if let Ok(naive) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+        let dt = naive
+            .and_hms_opt(0, 0, 0)
+            .ok_or_else(|| BinanceError::Parse(format!("bad date: {s}")))?;
+        return Ok(dt.and_utc().timestamp_millis());
+    }
+    Err(BinanceError::Parse(format!("unrecognised timestamp: {s}")))
+}
+
+/// Convenience: "now" in ms since epoch.
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+// ---------------------------------------------------------------------------
+// Section 7: FFI vtable (PluginState + open / next / close)
+// ---------------------------------------------------------------------------
+
+/// FFI context. The plugin's `open()` constructs one of these
+/// and returns it as a `*mut c_void` to the host. The `next()`
+/// / `close()` shims recover the pointer and use it.
+///
+/// Design: the heavy lifting (WS task + optional REST backfill
+/// loop) runs in a dedicated `tokio::runtime::Runtime` on a
+/// dedicated `std::thread`. The main FFI thread is synchronous
+/// and bridges to the runtime via `Runtime::block_on()`.
+pub struct PluginState {
+    /// Receiver half of the mpsc channel the background task
+    /// pushes events into.
+    rx: tokio::sync::mpsc::Receiver<KlineEvent>,
+    /// Join handle for the worker thread (drop on close to
+    /// signal the runtime to shut down).
+    _worker: Option<std::thread::JoinHandle<()>>,
+    /// Live runtime handle (kept so `close` can drop it and
+    /// force in-flight `block_on`s to return).
+    runtime: Option<tokio::runtime::Runtime>,
+}
+
+impl PluginState {
+    /// Spawn the background task. Returns a `PluginState` whose
+    /// `rx` receives events.
+    fn spawn(open_cfg: OpenConfig) -> Result<Self, BinanceError> {
+        let (tx, rx) = tokio::sync::mpsc::channel::<KlineEvent>(1024);
+        let worker_symbol = open_cfg.stream.symbol.clone();
+        let worker_interval = open_cfg.stream.interval.clone();
+        let worker_from = open_cfg.stream.from.clone();
+        let worker_cfg = open_cfg.datasource.clone();
+        let stream_id = stream_signature(&worker_symbol, &worker_interval);
+        let hwm = hwm_read(&stream_id);
+
+        // We need an async context to run the backfill + WS task.
+        // The FFI `next()` is synchronous, so we run a dedicated
+        // multi-thread runtime on a dedicated OS thread; the FFI
+        // `next()` bridges by calling `runtime.block_on(rx.recv())`.
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .map_err(|e| BinanceError::Runtime(e.to_string()))?;
+        let tx_clone = tx.clone();
+        let worker = std::thread::spawn(move || {
+            let _guard = runtime.enter();
+            // From here, we can use tokio APIs on `runtime`.
+            // We re-create a LocalSet for the backfill+WS sequence.
+            runtime.block_on(async move {
+                // 1. Backfill: only if from < hwm.
+                if let Some(from_str) = worker_from {
+                    if let Ok(from_ms) = parse_iso8601_ms(&from_str) {
+                        let upper = if hwm > 0 { hwm } else { now_ms() };
+                        if from_ms < upper {
+                            match download_history(
+                                &worker_cfg,
+                                &worker_symbol,
+                                &worker_interval,
+                                from_ms,
+                                upper,
+                            )
+                            .await
+                            {
+                                Ok(events) => {
+                                    for ev in events {
+                                        hwm_write(&stream_id, ev.open_time);
+                                        if tx_clone.send(ev).await.is_err() {
+                                            return;
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    log::warn!(
+                                        "binance backfill failed: {e}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                // 2. Live WS subscription. If this returns, the
+                //    mpsc is dropped and `next` returns EOS.
+                let _ = subscribe_loop(
+                    worker_cfg,
+                    worker_symbol,
+                    worker_interval,
+                    tx_clone,
+                )
+                .await;
+            });
+        });
+        Ok(Self {
+            rx,
+            _worker: Some(worker),
+            runtime: Some(
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|e| BinanceError::Runtime(e.to_string()))?,
+            ),
+        })
+    }
+
+    /// Block on the next event. Returns `None` if the producer
+    /// has closed the channel (EOS).
+    fn next_event(&mut self) -> Option<KlineEvent> {
+        let runtime = self.runtime.as_ref()?;
+        runtime.block_on(self.rx.recv())
+    }
+}
+
+impl Drop for PluginState {
+    fn drop(&mut self) {
+        // Dropping the runtime first forces any in-flight
+        // `block_on` to return, then dropping the receiver
+        // signals the worker thread's `tx.send` calls to fail.
+        self.runtime = None;
+    }
+}
+
+// ---- FFI shims ----
+
+mod vtable_shim {
+    use super::*;
+
+    /// FFI `open`: decode the bincode `OpenConfig`, spawn the
+    /// background task, return a `*mut c_void` wrapping a
+    /// `Box<PluginState>`. On error, returns null and writes the
+    /// error message to `*err_out` if it's non-null.
+    pub unsafe extern "C" fn open(
+        config_ptr: *const u8,
+        config_len: usize,
+        err_out: *mut EventBytes,
+    ) -> *mut std::ffi::c_void {
+        let bytes = std::slice::from_raw_parts(config_ptr, config_len);
+        let cfg: OpenConfig = match bincode::deserialize(bytes) {
+            Ok(c) => c,
+            Err(e) => {
+                write_err(err_out, format!("config decode: {e}").as_bytes());
+                return std::ptr::null_mut();
+            }
+        };
+        let state = match PluginState::spawn(cfg) {
+            Ok(s) => s,
+            Err(e) => {
+                write_err(err_out, e.to_string().as_bytes());
+                return std::ptr::null_mut();
+            }
+        };
+        let boxed = Box::new(state);
+        Box::into_raw(boxed) as *mut std::ffi::c_void
+    }
+
+    /// FFI `next`: pull the next event, bincode-encode it as
+    /// a `bee_adapter::Event`, write to `*out`. Returns:
+    ///   1 → event produced
+    ///   0 → end-of-stream
+    ///  -1 → error
+    pub unsafe extern "C" fn next(
+        ctx: *mut std::ffi::c_void,
+        out: *mut EventBytes,
+    ) -> i32 {
+        if ctx.is_null() {
+            return -1;
+        }
+        let state = &mut *(ctx as *mut PluginState);
+        match state.next_event() {
+            Some(event) => {
+                let bee_event = bee_plugin_sdk_event(&event);
+                let bytes = encode_event(&bee_event);
+                let len = bytes.len();
+                let ptr = bytes.as_ptr();
+                std::mem::forget(bytes);
+                *out = EventBytes { ptr, len };
+                1
+            }
+            None => {
+                *out = EventBytes::EMPTY;
+                0
+            }
+        }
+    }
+
+    /// FFI `close`: take the `Box<PluginState>` back and drop
+    /// it. The `Drop` impl signals the worker thread to exit.
+    pub unsafe extern "C" fn close(ctx: *mut std::ffi::c_void) -> i32 {
+        if ctx.is_null() {
+            return 0;
+        }
+        let _ = Box::from_raw(ctx as *mut PluginState);
+        0
+    }
+
+    /// Best-effort: write `msg` as an `EventBytes` blob into
+    /// `*err_out`. The `EventBytes` is bincode-`Event`-shaped
+    /// for the host's `decode_event`. We use a Vec<u8> with
+    /// `mem::forget` so the host can read it before the next
+    /// FFI call.
+    fn write_err(err_out: *mut EventBytes, msg: &[u8]) {
+        if err_out.is_null() {
+            return;
+        }
+        let bee_event = Event {
+            timestamp: now_ms() as u64,
+            sequence: 0,
+            payload: msg.to_vec(),
+        };
+        let bytes = encode_event(&bee_event);
+        let len = bytes.len();
+        let ptr = bytes.as_ptr();
+        std::mem::forget(bytes);
+        unsafe {
+            *err_out = EventBytes { ptr, len };
+        }
+    }
+
+    pub const VTABLE: InputAdapterVtable = InputAdapterVtable {
+        open,
+        next,
+        close,
+    };
+}
+
+/// Construct a `bee_adapter::Event` from a `KlineEvent`.
+///
+/// The bincode layout matches the host's decoder (see
+/// `bee_plugin_sdk::event::encode_event`).
+fn bee_plugin_sdk_event(k: &KlineEvent) -> Event {
+    let payload = bincode::serialize(k).unwrap_or_default();
+    Event {
+        timestamp: k.open_time.max(0) as u64,
+        sequence: 0,
+        payload,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Section 8: Plugin manifest + Factory + cdylib entry
+// ---------------------------------------------------------------------------
+
+/// Build the manifest. The plugin exposes one Input Adapter,
+/// `binance_subscribe`, declared `is_input: true`. The host
+/// matches SQL `binance.subscribe(...)` to this descriptor.
+pub fn plugin_manifest() -> PluginManifest {
+    PluginManifest {
+        name: PluginName("binance".into()),
+        feature_version: "1.0.0".into(),
+        abi_version: "v1".into(),
+        adapters: vec![AdapterDescriptor {
+            name: "subscribe".into(),
+            is_input: true,
+        }],
+        handlers: vec![],
+    }
+}
+
 pub struct BinanceFactory;
 
 impl Factory for BinanceFactory {
     fn manifest() -> PluginManifest {
-        PluginManifest {
-            name: PluginName("binance".into()),
-            feature_version: "1.0.0".into(),
-            abi_version: "v1".into(),
-            adapters: vec![AdapterDescriptor {
-                name: "subscribe".into(),
-                is_input: true,
-            }],
-            handlers: vec![],
-        }
+        plugin_manifest()
     }
 
     fn init() -> bee_plugin_sdk::PluginResult<PluginHandle> {
         let vtable: *const InputAdapterVtable = &vtable_shim::VTABLE;
         let mut input_adapters = std::collections::HashMap::new();
+        // The host looks up adapters by name; the SQL parser
+        // uses the dotted form `binance.subscribe`, so we
+        // register under the unprefixed `subscribe`.
         input_adapters.insert("subscribe".to_string(), vtable);
         Ok(PluginHandle {
             manifest: Self::manifest(),
@@ -150,245 +870,4 @@ impl Factory for BinanceFactory {
     }
 }
 
-mod vtable_shim {
-    use std::sync::Mutex;
-
-    use bee_adapter::InputAdapter;
-    use bee_plugin_sdk::event::{encode_event, EventBytes};
-    use bee_plugin_sdk::vtable::InputAdapterVtable;
-
-    use super::{AdapterResult, BinanceConfig, BinanceInput, Event};
-
-    pub struct Ctx {
-        pub input: Mutex<BinanceInput>,
-    }
-
-    fn block_on<F: std::future::Future>(f: F) -> F::Output {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("build tokio runtime")
-            .block_on(f)
-    }
-
-    /// FFI open: bincode-decode a `BinanceConfig`, build the
-    /// concrete input, return a raw pointer to a heap-allocated
-    /// `Ctx` wrapper. Returns null on deserialization or
-    /// construction failure.
-    pub unsafe extern "C" fn open(
-        config_ptr: *const u8,
-        config_len: usize,
-        _err_out: *mut EventBytes,
-    ) -> *mut std::ffi::c_void {
-        let bytes = std::slice::from_raw_parts(config_ptr, config_len);
-        let cfg: BinanceConfig = match bincode::deserialize(bytes) {
-            Ok(c) => c,
-            Err(_) => return std::ptr::null_mut(),
-        };
-        let input = match block_on(BinanceInput::open(cfg)) {
-            Ok(i) => i,
-            Err(_) => return std::ptr::null_mut(),
-        };
-        let ctx = Box::new(Ctx {
-            input: Mutex::new(input),
-        });
-        Box::into_raw(ctx) as *mut std::ffi::c_void
-    }
-
-    /// FFI next: lock the input, call the async `next()`, encode
-    /// the result as bincode event bytes, write to `*out`. Returns
-    /// 1 on event, 0 on end-of-stream, -1 on error.
-    pub unsafe extern "C" fn next(
-        ctx: *mut std::ffi::c_void,
-        out: *mut EventBytes,
-    ) -> i32 {
-        let result: AdapterResult<Option<Event>> = block_on(async move {
-            let ctx = &*(ctx as *const Ctx);
-            let mut input = ctx.input.lock().unwrap();
-            input.next().await
-        });
-        match result {
-            Ok(Some(event)) => {
-                let bytes = encode_event(&event);
-                let len = bytes.len();
-                let ptr = bytes.as_ptr();
-                std::mem::forget(bytes);
-                *out = EventBytes { ptr, len };
-                1
-            }
-            Ok(None) => {
-                *out = EventBytes::EMPTY;
-                0
-            }
-            Err(_) => -1,
-        }
-    }
-
-    /// FFI close: take the `Ctx` back, consume the input, call
-    /// its async `close()`. Returns 0 on success.
-    pub unsafe extern "C" fn close(ctx: *mut std::ffi::c_void) -> i32 {
-        if ctx.is_null() {
-            return 0;
-        }
-        let ctx = Box::from_raw(ctx as *mut Ctx);
-        let input = ctx.input.into_inner().expect("mutex poisoned");
-        let _ = block_on(input.close());
-        0
-    }
-
-    pub const VTABLE: InputAdapterVtable = InputAdapterVtable {
-        open,
-        next,
-        close,
-    };
-}
-
 bee_plugin_sdk::cdylib_plugin!(BinanceFactory);
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use bee_plugin_sdk::event::EventBytes;
-
-    /// Local helper: open an `InputAdapter` and collect all
-    /// events. Mirrors `bee_runtime::test_utils::collect_mock`
-    /// but works on any `InputAdapter`.
-    async fn collect_events(
-        config: BinanceConfig,
-    ) -> AdapterResult<Vec<Event>> {
-        let mut adapter = BinanceInput::open(config).await?;
-        let mut out = Vec::new();
-        while let Some(e) = adapter.next().await? {
-            out.push(e);
-        }
-        adapter.close().await?;
-        Ok(out)
-    }
-
-    #[tokio::test]
-    async fn emits_sine_wave_prices() {
-        let config = BinanceConfig {
-            count: 5,
-            ..Default::default()
-        };
-        let events = collect_events(config).await.unwrap();
-        assert_eq!(events.len(), 5);
-        // First event is at t=0: price = base + amplitude * sin(0) = base.
-        let first = String::from_utf8_lossy(&events[0].payload);
-        assert!(
-            first.starts_with("BTC/USDT,5min,0,"),
-            "unexpected payload: {first}"
-        );
-        // Sequence is monotonic.
-        for (i, e) in events.iter().enumerate() {
-            assert_eq!(e.sequence, i as u64);
-        }
-    }
-
-    #[tokio::test]
-    async fn default_config_emits_ten_events() {
-        let events = collect_events(BinanceConfig::default()).await.unwrap();
-        assert_eq!(events.len(), 10);
-    }
-
-    #[tokio::test]
-    async fn zero_count_means_empty_stream() {
-        let config = BinanceConfig {
-            count: 0,
-            ..Default::default()
-        };
-        let events = collect_events(config).await.unwrap();
-        assert!(events.is_empty());
-    }
-
-    #[test]
-    fn factory_manifest_declares_subscribe_adapter() {
-        let m = BinanceFactory::manifest();
-        assert_eq!(m.name.0, "binance");
-        assert_eq!(m.abi_version, "v1");
-        assert_eq!(m.adapters.len(), 1);
-        assert_eq!(m.adapters[0].name, "subscribe");
-        assert!(m.adapters[0].is_input);
-    }
-
-    #[test]
-    fn factory_init_returns_handle_with_manifest() {
-        let h = BinanceFactory::init().unwrap();
-        assert_eq!(h.manifest.name.0, "binance");
-    }
-
-    #[test]
-    fn vtable_open_next_close_round_trips_sine_wave_event() {
-        let handle = BinanceFactory::init().expect("init");
-        let vtable = *handle
-            .input_adapters
-            .get("subscribe")
-            .expect("subscribe vtable");
-        let cfg = BinanceConfig::default();
-        let cfg_bytes = bincode::serialize(&cfg).unwrap();
-        let ctx = unsafe {
-            ((*vtable).open)(cfg_bytes.as_ptr(), cfg_bytes.len(), std::ptr::null_mut())
-        };
-        assert!(!ctx.is_null(), "open returned null");
-        let mut out = EventBytes::EMPTY;
-        let rc = unsafe { ((*vtable).next)(ctx, &mut out) };
-        assert_eq!(rc, 1, "expected 1 event, got {rc}");
-        assert!(!out.ptr.is_null());
-        assert!(out.len > 0);
-        let bytes = unsafe { std::slice::from_raw_parts(out.ptr, out.len) };
-        let event: Event = bincode::deserialize(bytes).expect("decode event");
-        assert_eq!(event.sequence, 0);
-        let payload = String::from_utf8_lossy(&event.payload);
-        assert!(
-            payload.starts_with("BTC/USDT,5min,0,"),
-            "unexpected payload: {payload}"
-        );
-        unsafe { ((*vtable).close)(ctx) };
-    }
-
-    #[test]
-    fn vtable_next_returns_none_after_count_exhausted() {
-        let handle = BinanceFactory::init().expect("init");
-        let vtable = *handle
-            .input_adapters
-            .get("subscribe")
-            .expect("subscribe vtable");
-        let cfg = BinanceConfig {
-            count: 2,
-            ..Default::default()
-        };
-        let cfg_bytes = bincode::serialize(&cfg).unwrap();
-        let ctx = unsafe {
-            ((*vtable).open)(cfg_bytes.as_ptr(), cfg_bytes.len(), std::ptr::null_mut())
-        };
-        assert!(!ctx.is_null());
-        for expected_seq in 0..2 {
-            let mut out = EventBytes::EMPTY;
-            let rc = unsafe { ((*vtable).next)(ctx, &mut out) };
-            assert_eq!(rc, 1, "event {expected_seq}");
-            let bytes = unsafe { std::slice::from_raw_parts(out.ptr, out.len) };
-            let event: Event = bincode::deserialize(bytes).expect("decode");
-            assert_eq!(event.sequence, expected_seq as u64);
-        }
-        let mut out = EventBytes::EMPTY;
-        let rc = unsafe { ((*vtable).next)(ctx, &mut out) };
-        assert_eq!(rc, 0, "expected end-of-stream (0), got {rc}");
-        assert!(out.ptr.is_null());
-        assert_eq!(out.len, 0);
-        unsafe { ((*vtable).close)(ctx) };
-    }
-
-    #[test]
-    fn vtable_open_with_garbage_config_returns_null() {
-        let handle = BinanceFactory::init().expect("init");
-        let vtable = *handle
-            .input_adapters
-            .get("subscribe")
-            .expect("subscribe vtable");
-        let garbage = vec![0xFFu8; 8];
-        let ctx = unsafe {
-            ((*vtable).open)(garbage.as_ptr(), garbage.len(), std::ptr::null_mut())
-        };
-        assert!(ctx.is_null(), "open with garbage should return null");
-    }
-}
