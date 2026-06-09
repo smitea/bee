@@ -14,6 +14,7 @@ members = [
     "crates/bee-kv-test",
     "bee",
     "plugins/bee-plugin-perf-fib",
+    "plugins/bee-plugin-onnx-ml",
     "plugins/quant/bee-plugin-binance",
     "plugins/quant/bee-plugin-google-news",
     "plugins/quant/bee-plugin-influxdb",
