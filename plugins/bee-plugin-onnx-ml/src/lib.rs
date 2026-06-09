@@ -595,3 +595,295 @@ impl Factory for OnnxMlFactory {
 }
 
 bee_plugin_sdk::cdylib_plugin!(OnnxMlFactory);
+
+// ---------------------------------------------------------------------------
+// Section 8: unit tests — S39 (c) skeleton coverage
+// ---------------------------------------------------------------------------
+//
+// These tests exercise the *skeleton* API only: config parsing,
+// dummy handler return values, FFI vtable shims (init_state + result
+// shape), enum bincode round-trips, and the manifest. They do NOT
+// touch real `tract-onnx` runtime or FinBERT model files; those land
+// in a follow-up session that will replace `sentiment_score_dummy` et
+// al. with real implementations (and extend this test module
+// accordingly).
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::mem::MaybeUninit;
+
+    // -----------------------------------------------------------------------
+    // FFI helpers
+    // -----------------------------------------------------------------------
+
+    /// Call `init_state` on the given shim and return the bytes the
+    /// shim wrote (via the SDK allocator). The shim `forget`s the
+    /// `Vec<u8>` it produced, so the test reconstructs a `Vec` to
+    /// own the allocation and drop it on scope exit. Mirrors the
+    /// S38 `call_init_state` pattern.
+    fn call_init_state(
+        init_fn: unsafe extern "C" fn(*mut EventBytes) -> i32,
+    ) -> Vec<u8> {
+        let mut state_eb = MaybeUninit::<EventBytes>::zeroed();
+        let rc = unsafe { init_fn(state_eb.as_mut_ptr()) };
+        assert_eq!(rc, 0, "init_state shim returned non-zero status: {rc}");
+        let state_eb = unsafe { state_eb.assume_init() };
+        assert!(
+            !state_eb.ptr.is_null() && state_eb.len > 0,
+            "init_state produced empty EventBytes"
+        );
+        // SAFETY: the shim wrote a bincode `Vec<u8>` and `forget`ed
+        // it; reconstructing as a `Vec<u8>` transfers ownership
+        // back and lets the test free the allocation when the
+        // returned `Vec` drops.
+        let bytes = unsafe {
+            Vec::from_raw_parts(state_eb.ptr as *mut u8, state_eb.len, state_eb.len)
+        };
+        bytes
+    }
+
+    // -----------------------------------------------------------------------
+    // 1. config_default
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn config_default() {
+        let cfg = OnnxConfig::default();
+        assert_eq!(cfg.sentiment_model_path, "./models/finbert-quant.onnx");
+        assert_eq!(cfg.decision_model_path, "./models/btc-direction-1h.onnx");
+        assert_eq!(cfg.max_batch_size, 32);
+        assert_eq!(cfg.device, "cpu");
+    }
+
+    // -----------------------------------------------------------------------
+    // 2. config_bincode_roundtrip
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn config_bincode_roundtrip() {
+        let cfg = OnnxConfig {
+            sentiment_model_path: "/opt/models/sentiment-v2.onnx".to_string(),
+            decision_model_path: "/opt/models/decision-btc.onnx".to_string(),
+            max_batch_size: 64,
+            device: "cpu".to_string(),
+        };
+        let bytes = bincode::serialize(&cfg).expect("serialize cfg");
+        let back: OnnxConfig = bincode::deserialize(&bytes).expect("deserialize cfg");
+        assert_eq!(cfg, back);
+    }
+
+    // -----------------------------------------------------------------------
+    // 3. config_from_empty_bytes_uses_default
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn config_from_empty_bytes_uses_default() {
+        let cfg = OnnxConfig::from_bytes(&[]).expect("empty bytes should yield default");
+        assert_eq!(cfg, OnnxConfig::default());
+        // Also pin the field values explicitly so a regression that
+        // changes `default()` doesn't silently pass.
+        assert_eq!(cfg.sentiment_model_path, "./models/finbert-quant.onnx");
+        assert_eq!(cfg.decision_model_path, "./models/btc-direction-1h.onnx");
+        assert_eq!(cfg.max_batch_size, 32);
+        assert_eq!(cfg.device, "cpu");
+    }
+
+    // -----------------------------------------------------------------------
+    // 4. config_from_invalid_bytes_returns_err
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn config_from_invalid_bytes_returns_err() {
+        // 4 random bytes: cannot bincode-decode as a `OnnxConfig`
+        // (which expects at least a u64 length prefix for the
+        // first `String` field).
+        let garbage: [u8; 4] = [0, 1, 2, 3];
+        let res = OnnxConfig::from_bytes(&garbage);
+        assert!(res.is_err(), "garbage bytes must not decode as OnnxConfig");
+    }
+
+    // -----------------------------------------------------------------------
+    // 5. sentiment_score_dummy_returns_neutral
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sentiment_score_dummy_returns_neutral() {
+        let r = sentiment_score_dummy(b"any input bytes");
+        assert_eq!(r.score, 0.0);
+        assert_eq!(r.class, SentimentClass::Neutral);
+    }
+
+    // -----------------------------------------------------------------------
+    // 6. sentiment_class_dummy_returns_neutral
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sentiment_class_dummy_returns_neutral() {
+        let c = sentiment_class_dummy(b"any input bytes");
+        assert_eq!(c, SentimentClass::Neutral);
+    }
+
+    // -----------------------------------------------------------------------
+    // 7. price_direction_dummy_returns_flat
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn price_direction_dummy_returns_flat() {
+        let r = price_direction_dummy(&[0xDE, 0xAD, 0xBE, 0xEF]);
+        assert_eq!(r.direction, Direction::Flat);
+    }
+
+    // -----------------------------------------------------------------------
+    // 8. model_score_dummy_returns_zero
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn model_score_dummy_returns_zero() {
+        let r = model_score_dummy(b"any input bytes");
+        assert_eq!(r.score, 0.0);
+    }
+
+    // -----------------------------------------------------------------------
+    // 9. sentiment_result_bincode_roundtrip
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sentiment_result_bincode_roundtrip() {
+        let r = SentimentResult {
+            score: 0.42,
+            class: SentimentClass::Positive,
+        };
+        let bytes = bincode::serialize(&r).expect("serialize sentiment result");
+        let back: SentimentResult =
+            bincode::deserialize(&bytes).expect("deserialize sentiment result");
+        assert_eq!(r, back);
+    }
+
+    // -----------------------------------------------------------------------
+    // 10. direction_result_bincode_roundtrip
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn direction_result_bincode_roundtrip() {
+        let r = DirectionResult {
+            direction: Direction::Up,
+        };
+        let bytes = bincode::serialize(&r).expect("serialize direction result");
+        let back: DirectionResult =
+            bincode::deserialize(&bytes).expect("deserialize direction result");
+        assert_eq!(r, back);
+    }
+
+    // -----------------------------------------------------------------------
+    // 11. model_score_result_bincode_roundtrip
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn model_score_result_bincode_roundtrip() {
+        let r = ModelScoreResult { score: -1.5 };
+        let bytes = bincode::serialize(&r).expect("serialize model score result");
+        let back: ModelScoreResult =
+            bincode::deserialize(&bytes).expect("deserialize model score result");
+        assert_eq!(r, back);
+    }
+
+    // -----------------------------------------------------------------------
+    // 12. plugin_manifest_lists_4_handlers
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn plugin_manifest_lists_4_handlers() {
+        let m = OnnxMlFactory::manifest();
+        assert_eq!(m.handlers.len(), 4, "expected 4 handlers in manifest");
+        let names: Vec<&str> = m.handlers.iter().map(|h| h.name.as_str()).collect();
+        assert!(names.contains(&"sentiment_score"), "missing sentiment_score");
+        assert!(names.contains(&"sentiment_class"), "missing sentiment_class");
+        assert!(names.contains(&"price_direction"), "missing price_direction");
+        assert!(names.contains(&"model_score"), "missing model_score");
+    }
+
+    // -----------------------------------------------------------------------
+    // 13. plugin_manifest_no_adapters
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn plugin_manifest_no_adapters() {
+        let m = OnnxMlFactory::manifest();
+        assert!(
+            m.adapters.is_empty(),
+            "onnx-ml is a Handler-only plugin; manifest.adapters must be empty, got {}",
+            m.adapters.len()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 14. init_state_handler_returns_empty
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn init_state_handler_returns_empty() {
+        // For each of the 4 shims, call `init_state` and verify the
+        // decoded `OnnxHandlerState` has an empty `_reserved` field.
+        // Handlers have no inherent state; the per-stream state is
+        // just the default `OnnxHandlerState` (empty reserved).
+        let shims: [(&str, unsafe extern "C" fn(*mut EventBytes) -> i32); 4] = [
+            ("sentiment_score", sentiment_score_shim::init_state),
+            ("sentiment_class", sentiment_class_shim::init_state),
+            ("price_direction", price_direction_shim::init_state),
+            ("model_score", model_score_shim::init_state),
+        ];
+        for (name, init_fn) in shims {
+            let state_bytes = call_init_state(init_fn);
+            let state: OnnxHandlerState =
+                bincode::deserialize(&state_bytes).expect("decode handler state");
+            assert!(
+                state._reserved.is_empty(),
+                "{name}: handler state must be empty, got {} bytes",
+                state._reserved.len()
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // 15. sentiment_class_enum_variants_distinct
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sentiment_class_enum_variants_distinct() {
+        let pos = bincode::serialize(&SentimentClass::Positive).expect("ser positive");
+        let neu = bincode::serialize(&SentimentClass::Neutral).expect("ser neutral");
+        let neg = bincode::serialize(&SentimentClass::Negative).expect("ser negative");
+        // Bincode encodes a unit variant as a u32 discriminant
+        // (little-endian on the default config). The 3 variants
+        // must produce 3 distinct byte strings — and they do, since
+        // the order in the enum is `Positive=0, Neutral=1, Negative=2`.
+        assert_ne!(pos, neu, "positive and neutral must bincode distinctly");
+        assert_ne!(pos, neg, "positive and negative must bincode distinctly");
+        assert_ne!(neu, neg, "neutral and negative must bincode distinctly");
+        // Sanity-check the discriminant ordering (positive < neutral
+        // < negative by declaration order).
+        assert_eq!(pos, vec![0, 0, 0, 0], "Positive discriminant is 0");
+        assert_eq!(neu, vec![1, 0, 0, 0], "Neutral discriminant is 1");
+        assert_eq!(neg, vec![2, 0, 0, 0], "Negative discriminant is 2");
+    }
+
+    // -----------------------------------------------------------------------
+    // 16. direction_enum_variants_distinct
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn direction_enum_variants_distinct() {
+        let up = bincode::serialize(&Direction::Up).expect("ser up");
+        let down = bincode::serialize(&Direction::Down).expect("ser down");
+        let flat = bincode::serialize(&Direction::Flat).expect("ser flat");
+        assert_ne!(up, down, "up and down must bincode distinctly");
+        assert_ne!(up, flat, "up and flat must bincode distinctly");
+        assert_ne!(down, flat, "down and flat must bincode distinctly");
+        // Sanity-check the discriminant ordering (Up=0, Down=1,
+        // Flat=2 by declaration order).
+        assert_eq!(up, vec![0, 0, 0, 0], "Up discriminant is 0");
+        assert_eq!(down, vec![1, 0, 0, 0], "Down discriminant is 1");
+        assert_eq!(flat, vec![2, 0, 0, 0], "Flat discriminant is 2");
+    }
+}
