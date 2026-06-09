@@ -1,21 +1,23 @@
 [package]
-name = "bee-plugin-ta-lib"
+name = "bee-plugin-ta-indicators"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "Bee 量化交易参考实现:技术分析 Handler 集合 (MACD/EMA/decision_tree/sentiment_analyzer)。Plugin 结构是 production-grade;实际计算是简化版占位。"
+description = "Bee production-grade technical-analysis Handlers (S38): real yata indicators (MACD, EMA, RSI, BBANDS, ATR, VWAP)"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 bee-plugin-sdk = { path = "../../../crates/bee-plugin-sdk" }
-bee-adapter = { path = "../../../crates/bee-adapter" }
-tokio = { workspace = true }
-thiserror = "2"
-bincode = "1"
+yata = "0.3"
 serde = { version = "1", features = ["derive"] }
+bincode = "1"
+thiserror = "2"
+log = "0.4"
+
+[dev-dependencies]
 
 [lints]
 workspace = true
