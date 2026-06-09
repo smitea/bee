@@ -29,6 +29,7 @@ hex = "0.4"
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
 mockito = "1"
+bee-registry = { path = "../../../crates/bee-registry" }
 
 [lints]
 workspace = true
