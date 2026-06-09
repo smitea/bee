@@ -34,7 +34,7 @@
 > - **`scripts/demo-perf.sh`** — the **5-minute performance showcase**: Fibonacci streaming + distributed prime sieve + multi-stream analytics, with a measured performance table across 1 / 3 / 5 Nodes. This is the demo a new evaluator can run to see "what does Bee actually do, fast?" — independent of any third-party service. See [examples/performance/README.md](examples/performance/README.md) and [docs/product-design.md §4.1](docs/product-design.md#41-performance-showcase)
 > - The canonical 5-minute end-to-end demo will land as
 >   `scripts/demo-perf-prod.sh` (S41 performance showcase, in flight).
-> - The quant-trading reference implementation lives separately at [docs/best-practices/quant/](docs/best-practices/quant/); see [docs/best-practices/quant/scripts/demo-quant-prod.sh](docs/best-practices/quant/scripts/demo-quant-prod.sh) for the equivalent demo against real Binance WS / NewsAPI / InfluxDB v2 / MongoDB.
+> - The quant-trading reference implementation lives separately at [docs/best-practices/quant/](docs/best-practices/quant/); the production e2e demo is [`scripts/demo-quant-prod.sh`](scripts/demo-quant-prod.sh) (real Binance WS / NewsAPI / InfluxDB v2 / MongoDB; requires credentials in `scripts/.env`).
 
 ## Design Goals
 
@@ -80,7 +80,7 @@ Bee compiles user-authored SQL / Lua Pipelines into Phase DAGs; the Control Plan
 ```
 
 > Examples live under `examples/` and `docs/best-practices/quant/examples/`:
-> - `docs/best-practices/quant/examples/quant_btc_macd.sql` + `quant_btc_sentiment.sql` — the quant-trading reference pipelines (S40)
+> - `docs/best-practices/quant/examples/quant_btc_strategy.sql` + `quant_btc_strategy_backfill.sql` + `quant_btc_strategy_v2.sql` — the production quant-trading reference pipelines (S40)
 > - `examples/performance/` — the Fibonacci + prime sieve + multi-stream analytics demos (S41)
 >
 > Example plugins under [plugins/quant/](plugins/quant/) are
@@ -144,6 +144,24 @@ example. It lives in its own documentation section:
 - [docs/best-practices/quant/](docs/best-practices/quant/) — stories,
   ADRs, examples, demo scripts, design specs.
 
-The 5 reference plugin crates are at
-[plugins/quant/](plugins/quant/) and are part of the workspace
-members.
+The three production SQL pipelines (S40) are at:
+
+- [`docs/best-practices/quant/examples/quant_btc_strategy.sql`](docs/best-practices/quant/examples/quant_btc_strategy.sql) — the canonical e2e pipeline (binance WS + Google News + MACD/EMA/RSI + price_direction + InfluxDB + MongoDB)
+- [`docs/best-practices/quant/examples/quant_btc_strategy_backfill.sql`](docs/best-practices/quant/examples/quant_btc_strategy_backfill.sql) — backfill warmup variant (`from => '2024-06-01'`)
+- [`docs/best-practices/quant/examples/quant_btc_strategy_v2.sql`](docs/best-practices/quant/examples/quant_btc_strategy_v2.sql) — a second strategy on the SAME binance Stream (demonstrates Producer sharing)
+
+The end-to-end runner is at
+[`scripts/demo-quant-prod.sh`](scripts/demo-quant-prod.sh). It
+builds the 6 production plugins (S34–S39), registers 4 Datasources
+(binance, google_news, influxdb, mongodb) with **connection-level**
+config only, and deploys the 3 pipelines above. **Requires real
+credentials in `scripts/.env`** (see
+[`scripts/.env.example`](scripts/.env.example)) and local InfluxDB
+v2 + MongoDB.
+
+The 6 production plugin crates are at:
+
+- [`plugins/quant/`](plugins/quant/) — S34 binance, S35 google-news, S36 influxdb, S37 mongodb, S38 ta-indicators
+- [`plugins/bee-plugin-onnx-ml/`](plugins/bee-plugin-onnx-ml/) — S39 onnx-ml (FinBERT + tract)
+
+All are part of the workspace members.

@@ -12,6 +12,10 @@
 2. [Target users](#2-target-users)
 3. [Pain points and opportunities](#3-pain-points-and-opportunities)
 4. [Core scenarios](#4-core-scenarios)
+   - [Scenario A: Performance showcase](#scenario-a-performance-showcase)
+   - [Scenario B: Real-time multi-source monitoring](#scenario-b-real-time-multi-source-monitoring)
+   - [Scenario C: Cross-team data sharing](#scenario-c-cross-team-data-sharing)
+   - [Scenario D: Quant trading reference (S40)](#scenario-d-quant-trading-reference-s40)
 5. [Product capabilities](#5-product-capabilities)
 6. [User workflows](#6-user-workflows)
 7. [User interface and tools](#7-user-interface-and-tools)
@@ -116,7 +120,7 @@ Pipeline Author ──writes SQL/Lua──▶ Bee Cluster
 | Demo | What it shows | Why it matters |
 | --- | --- | --- |
 | **Fibonacci (1M values)** | Stateful Handler UDF + KV-stored sliding state | Smallest possible streaming-compute surface; correctness is trivially checkable (compare to known sequence `0, 1, 1, 2, 3, 5, 8, 13, 21, 34, …`); same code path the quant strategy uses |
-| **Prime sieve (≤ 10^8)** | Distributed cross-Node pipelines + parallel scheduling + Work-Stealing | Each sieve pass is a self-contained Phase that the runtime can place on a different Node; tests cross-Node data channels and recovery. Hard correctness check: there are exactly **5,761,455** primes below 10^8 |
+| **Prime sieve (≤ 10^8)** | Distributed cross-Node pipelines + parallel scheduling + Work-Stealing | Each sieve pass is a self-contained Phase that the runtime can place on a different Node; tests cross-Node data channels and recovery. Hard correctness check: with 20 sieving phases the output is `count = 12,779,448` (a deterministic Legendre-style residual, **not** the true prime count of 5,761,455 — a full Eratosthenes sieve to 10^8 would need 1229 phases; see the SQL header for the math) |
 | **Multi-stream analytics (160K events)** | `ASOF JOIN` + `WINDOW TUMBLING` + multi-sink `EMIT INTO` | The "real Bee user" shape; closest to a production workload (clicks / views / purchases per user) |
 
 **How to run it**
@@ -169,6 +173,29 @@ The demo is now runnable via [`scripts/demo-perf.sh`](../../scripts/demo-perf.sh
 - 4 downstream Pipelines each subscribe and compute different metrics.
 - Any downstream Pipeline going down doesn't affect the others.
 - Upstream rate limit / quota is managed centrally on the Producer side.
+
+### Scenario D: Quant trading reference (S40)
+
+**User story**: As a quant researcher, I want a real Binance K-line feed, real Google News sentiment, technical indicators (MACD/EMA/RSI), an ML-based direction model, and dual sinks (InfluxDB time-series + MongoDB trade log) wired into a single deployable Pipeline. I want a second strategy to share the same Binance connection (no rate-limit collision) and I want to be able to backtest the warmup from a fixed date.
+
+**How Bee supports it**: the quant trading reference implementation is a large, real-world business example that lives in its own documentation section — [docs/best-practices/quant/](../best-practices/quant/). The end-to-end demo is:
+
+```bash
+# 1. Supply credentials
+cp scripts/.env.example scripts/.env
+$EDITOR scripts/.env  # fill in NEWSAPI_KEY, INFLUXDB_TOKEN, INFLUXDB_ORG
+
+# 2. Run the demo
+scripts/demo-quant-prod.sh
+```
+
+The demo builds the 6 production plugins (S34–S39), registers 4 Datasources (binance, google_news, influxdb, mongodb) with **connection-level** config only, and deploys 3 SQL pipelines:
+
+- `docs/best-practices/quant/examples/quant_btc_strategy_backfill.sql` — backfill warmup from 2024-06-01
+- `docs/best-practices/quant/examples/quant_btc_strategy.sql` — canonical strategy (technical + sentiment + decision tree)
+- `docs/best-practices/quant/examples/quant_btc_strategy_v2.sql` — second strategy on the SAME `binance` Stream (Producer sharing: exactly 1 binance Producer in the cluster)
+
+This scenario exercises every Bee feature: Datasource management, Producer sharing, plugin FFI, SQL pipelines, ASOF JOIN, EMIT INTO, deployment, and per-call-arg vs connection-level-config separation. The S33 HITL milestone and the S40 acceptance criteria track the full spec; see [docs/best-practices/quant/stories.md §S40](../best-practices/quant/stories.md#s40).
 
 ---
 
