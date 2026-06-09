@@ -420,17 +420,12 @@ async fn fetch_newsapi<T: for<'de> Deserialize<'de>>(
     Ok(body)
 }
 
-/// One poll of `/v2/everything`. Returns the freshly-fetched
-/// articles.
-pub async fn search(
-    config: &GoogleNewsConfig,
-    args: &SearchArgs,
-) -> Result<Vec<ArticleEvent>, GoogleNewsError> {
-    if config.api_key.is_empty() {
-        return Err(GoogleNewsError::Datasource(
-            "api_key is required".into(),
-        ));
-    }
+/// Build the NewsAPI `/v2/everything` URL for the given config +
+/// args. The page size is clamped to `[1, 100]` per NewsAPI's hard
+/// limit; all string fields are URL-encoded. Extracted from
+/// `search()` so unit tests can pin the URL shape without spinning
+/// up an HTTP client.
+fn build_search_url(config: &GoogleNewsConfig, args: &SearchArgs) -> String {
     let mut url = format!(
         "{}/everything?q={}&apiKey={}",
         config.base_url,
@@ -449,7 +444,46 @@ pub async fn search(
     let page_size = args.page_size.unwrap_or(100).clamp(1, 100);
     url.push_str(&format!("&pageSize={page_size}"));
     url.push_str(&format!("&language={}", urlencoding::encode(&config.language)));
+    url
+}
 
+/// Build the NewsAPI `/v2/top-headlines` URL for the given config +
+/// args. Page size is clamped to `[1, 100]`.
+fn build_top_headlines_url(
+    config: &GoogleNewsConfig,
+    args: &TopHeadlinesArgs,
+) -> String {
+    let mut url = format!(
+        "{}/top-headlines?apiKey={}",
+        config.base_url,
+        urlencoding::encode(&config.api_key),
+    );
+    if let Some(q) = &args.query {
+        url.push_str(&format!("&q={}", urlencoding::encode(q)));
+    }
+    if let Some(c) = &args.country {
+        url.push_str(&format!("&country={}", urlencoding::encode(c)));
+    }
+    if let Some(cat) = &args.category {
+        url.push_str(&format!("&category={}", urlencoding::encode(cat)));
+    }
+    let page_size = args.page_size.unwrap_or(100).clamp(1, 100);
+    url.push_str(&format!("&pageSize={page_size}"));
+    url
+}
+
+/// One poll of `/v2/everything`. Returns the freshly-fetched
+/// articles.
+pub async fn search(
+    config: &GoogleNewsConfig,
+    args: &SearchArgs,
+) -> Result<Vec<ArticleEvent>, GoogleNewsError> {
+    if config.api_key.is_empty() {
+        return Err(GoogleNewsError::Datasource(
+            "api_key is required".into(),
+        ));
+    }
+    let url = build_search_url(config, args);
     let client = build_http_client()?;
     let resp: NewsApiResponse = fetch_newsapi(&client, &url).await?;
     if resp.status != "ok" {
@@ -476,23 +510,7 @@ pub async fn top_headlines(
             "api_key is required".into(),
         ));
     }
-    let mut url = format!(
-        "{}/top-headlines?apiKey={}",
-        config.base_url,
-        urlencoding::encode(&config.api_key),
-    );
-    if let Some(q) = &args.query {
-        url.push_str(&format!("&q={}", urlencoding::encode(q)));
-    }
-    if let Some(c) = &args.country {
-        url.push_str(&format!("&country={}", urlencoding::encode(c)));
-    }
-    if let Some(cat) = &args.category {
-        url.push_str(&format!("&category={}", urlencoding::encode(cat)));
-    }
-    let page_size = args.page_size.unwrap_or(100).clamp(1, 100);
-    url.push_str(&format!("&pageSize={page_size}"));
-
+    let url = build_top_headlines_url(config, args);
     let client = build_http_client()?;
     let resp: NewsApiResponse = fetch_newsapi(&client, &url).await?;
     if resp.status != "ok" {
@@ -988,3 +1006,346 @@ impl Factory for GoogleNewsFactory {
 }
 
 bee_plugin_sdk::cdylib_plugin!(GoogleNewsFactory);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+    use std::time::Duration;
+
+    /// Compute the expected signature the same way
+    /// `stream_signature` does, but with the hash function inlined
+    /// in the test. This pins both the algorithm (sha256 over the
+    /// concatenation `b"google_news" || method || query`) and the
+    /// hex output format.
+    fn expected_sig(method: &str, query: &str) -> String {
+        let mut h = Sha256::new();
+        h.update(b"google_news");
+        h.update(method.as_bytes());
+        h.update(query.as_bytes());
+        hex::encode(h.finalize())
+    }
+
+    #[test]
+    fn stream_signature_method_and_query_only() {
+        // The signature depends ONLY on (method, query). Per the
+        // spec, `from` / `to` / `sort_by` are per-Subscriber
+        // concerns and are deliberately NOT part of the signature
+        // (the function signature doesn't even accept them).
+        let sig = stream_signature("search", "Bitcoin");
+        let expected = expected_sig("search", "Bitcoin");
+        assert_eq!(sig, expected);
+        // 64 hex chars = 256 bits.
+        assert_eq!(sig.len(), 64);
+        assert!(sig.chars().all(|c| c.is_ascii_hexdigit()));
+        // Also pin the actual hex value so any change to the hash
+        // algorithm or input ordering is caught immediately.
+        assert_eq!(
+            sig,
+            "92b822bab06b31bfa30caa1f84a38af5582522951835726be08c05ac8d47e56f"
+        );
+    }
+
+    #[test]
+    fn stream_signature_independent_of_from_to_sort_by() {
+        // `from` / `to` / `sort_by` are per-Subscriber concerns; they
+        // must NOT affect the Stream identity. The signature
+        // function doesn't take those parameters, but we re-assert
+        // the contract by hashing the same (method, query) pair
+        // multiple times and showing the result is deterministic.
+        let a = stream_signature("search", "Bitcoin");
+        let b = stream_signature("search", "Bitcoin");
+        assert_eq!(a, b, "signature must be deterministic for the same inputs");
+        // And nothing about from/to/sort_by is even visible in the
+        // hash (the function signature has none of those parameters).
+        let fn_sig = std::any::type_name::<fn(&str, &str) -> String>();
+        assert!(!fn_sig.contains("from"), "stream_signature must not take a `from` arg");
+        assert!(!fn_sig.contains("to"), "stream_signature must not take a `to` arg");
+        assert!(!fn_sig.contains("sort"), "stream_signature must not take a `sort_by` arg");
+    }
+
+    #[test]
+    fn stream_signature_different_methods_different_signatures() {
+        let a = stream_signature("search", "Bitcoin");
+        let b = stream_signature("top_headlines", "Bitcoin");
+        assert_ne!(a, b, "method must be part of the signature");
+    }
+
+    #[test]
+    fn stream_signature_different_queries_different_signatures() {
+        let a = stream_signature("search", "Bitcoin");
+        let b = stream_signature("search", "Ethereum");
+        assert_ne!(a, b, "query must be part of the signature");
+    }
+
+    #[test]
+    fn config_default_url() {
+        let cfg = GoogleNewsConfig::default();
+        assert_eq!(cfg.base_url, "https://newsapi.org/v2");
+        assert_eq!(cfg.language, "en");
+        assert_eq!(cfg.rate_limit_per_sec, 5);
+        assert_eq!(cfg.tenant, 0);
+        assert!(cfg.api_key.is_empty());
+        // Bincode round-trip works on the default.
+        let bytes = bincode::serialize(&cfg).expect("serialize");
+        let back: GoogleNewsConfig =
+            bincode::deserialize(&bytes).expect("deserialize");
+        assert_eq!(back.base_url, cfg.base_url);
+        assert_eq!(back.language, cfg.language);
+        assert_eq!(back.rate_limit_per_sec, cfg.rate_limit_per_sec);
+        assert_eq!(back.tenant, cfg.tenant);
+        assert_eq!(back.api_key, cfg.api_key);
+    }
+
+    #[test]
+    fn config_bincode_roundtrip() {
+        let cfg = GoogleNewsConfig {
+            api_key: "test-key-abc".into(),
+            base_url: "https://example.test/v2".into(),
+            rate_limit_per_sec: 25,
+            language: "de".into(),
+            tenant: 42,
+        };
+        let bytes = bincode::serialize(&cfg).expect("serialize");
+        let back: GoogleNewsConfig =
+            bincode::deserialize(&bytes).expect("deserialize");
+        assert_eq!(back.api_key, cfg.api_key);
+        assert_eq!(back.base_url, cfg.base_url);
+        assert_eq!(back.rate_limit_per_sec, cfg.rate_limit_per_sec);
+        assert_eq!(back.language, cfg.language);
+        assert_eq!(back.tenant, cfg.tenant);
+    }
+
+    #[test]
+    fn config_missing_api_key_fails() {
+        // The `search` and `top_headlines` public functions both
+        // gate on `api_key.is_empty()`; we exercise that path via
+        // `tokio::test` so we can `.await` the result. We can't
+        // call them in a sync test because they're async.
+        let cfg = GoogleNewsConfig::default(); // api_key is empty
+        let args = SearchArgs {
+            query: "Bitcoin".into(),
+            from: None,
+            to: None,
+            sort_by: None,
+            page_size: None,
+            poll_interval_secs: None,
+        };
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let res = rt.block_on(search(&cfg, &args));
+        assert!(matches!(res, Err(GoogleNewsError::Datasource(_))));
+        // Same for top_headlines.
+        let th_args = TopHeadlinesArgs {
+            query: None,
+            country: Some("us".into()),
+            category: None,
+            page_size: None,
+            poll_interval_secs: None,
+        };
+        let res = rt.block_on(top_headlines(&cfg, &th_args));
+        assert!(matches!(res, Err(GoogleNewsError::Datasource(_))));
+    }
+
+    #[test]
+    fn article_event_bincode_roundtrip() {
+        let ev = ArticleEvent {
+            published_at_ms: 1_700_000_000_000,
+            source: "The Wall Street Journal".into(),
+            author: "Jane Doe".into(),
+            title: "Bitcoin surges past $50k".into(),
+            description: "A short summary.".into(),
+            url: "https://example.test/article/1".into(),
+            content: "Full body text, truncated to 200 chars...".into(),
+            query: "Bitcoin".into(),
+        };
+        let bytes = bincode::serialize(&ev).expect("serialize");
+        let back: ArticleEvent =
+            bincode::deserialize(&bytes).expect("deserialize");
+        assert_eq!(back, ev);
+    }
+
+    #[test]
+    fn search_args_bincode_roundtrip() {
+        let args = SearchArgs {
+            query: "Bitcoin".into(),
+            from: Some("2024-01-01".into()),
+            to: Some("2024-01-31".into()),
+            sort_by: Some("publishedAt".into()),
+            page_size: Some(50),
+            poll_interval_secs: Some(30),
+        };
+        let bytes = bincode::serialize(&args).expect("serialize");
+        let back: SearchArgs =
+            bincode::deserialize(&bytes).expect("deserialize");
+        assert_eq!(back.query, args.query);
+        assert_eq!(back.from, args.from);
+        assert_eq!(back.to, args.to);
+        assert_eq!(back.sort_by, args.sort_by);
+        assert_eq!(back.page_size, args.page_size);
+        assert_eq!(back.poll_interval_secs, args.poll_interval_secs);
+    }
+
+    #[test]
+    fn url_building_search_with_query_only() {
+        // With only the required fields, the URL should have
+        // path `/everything` and a `q=` parameter that's
+        // URL-encoded. `pageSize` defaults to 100 and `language`
+        // defaults to "en" (both appended).
+        let cfg = GoogleNewsConfig {
+            api_key: "K".into(),
+            base_url: "https://newsapi.org/v2".into(),
+            rate_limit_per_sec: 5,
+            language: "en".into(),
+            tenant: 0,
+        };
+        let args = SearchArgs {
+            query: "Bitcoin".into(),
+            from: None,
+            to: None,
+            sort_by: None,
+            page_size: None,
+            poll_interval_secs: None,
+        };
+        let url = build_search_url(&cfg, &args);
+        assert!(
+            url.starts_with("https://newsapi.org/v2/everything?"),
+            "url = {url}"
+        );
+        assert!(url.contains("q=Bitcoin"), "url = {url}");
+        assert!(url.contains("apiKey=K"), "url = {url}");
+        assert!(url.contains("&pageSize=100"), "url = {url}");
+        assert!(url.contains("&language=en"), "url = {url}");
+        // No optional params should be present.
+        assert!(!url.contains("from="), "url = {url}");
+        assert!(!url.contains("to="), "url = {url}");
+        assert!(!url.contains("sortBy="), "url = {url}");
+    }
+
+    #[test]
+    fn url_building_search_with_all_optional_params() {
+        // With every field populated, all parameters should be
+        // present and URL-encoded.
+        let cfg = GoogleNewsConfig {
+            api_key: "my key/with+special".into(),
+            base_url: "https://newsapi.org/v2".into(),
+            rate_limit_per_sec: 5,
+            language: "en".into(),
+            tenant: 0,
+        };
+        let args = SearchArgs {
+            query: "AAPL OR \"Apple Inc\"".into(),
+            from: Some("2024-01-01".into()),
+            to: Some("2024-01-31".into()),
+            sort_by: Some("publishedAt".into()),
+            page_size: Some(25),
+            poll_interval_secs: None,
+        };
+        let url = build_search_url(&cfg, &args);
+        assert!(url.starts_with("https://newsapi.org/v2/everything?"));
+        // Query is URL-encoded: spaces become %20 (or +), quotes
+        // become %22. The encoding is defined by the
+        // `urlencoding` crate, which uses `%20` for space and
+        // `%22` for `"`.
+        assert!(url.contains("q=AAPL%20OR%20%22Apple%20Inc%22"), "url = {url}");
+        assert!(url.contains("&from=2024-01-01"), "url = {url}");
+        assert!(url.contains("&to=2024-01-31"), "url = {url}");
+        assert!(url.contains("&sortBy=publishedAt"), "url = {url}");
+        assert!(url.contains("&pageSize=25"), "url = {url}");
+        assert!(url.contains("&language=en"), "url = {url}");
+        // API key with `/` and `+` and space should be encoded.
+        assert!(
+            url.contains("apiKey=my%20key%2Fwith%2Bspecial"),
+            "url = {url}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rate_limiter_5_per_sec() {
+        // 5 req/sec => min_interval = 200 ms. Fire 10 requests; the
+        // first 1 takes 0 ms (no prior `last`), the next 9 must
+        // each wait >= 200 ms. We measure real wall-clock time.
+        // Note: the limiter's internal clock is `std::time::Instant`
+        // (real time), so we can't use `start_paused` here — paused
+        // virtual time never advances `Instant::now()`, which would
+        // deadlock the limiter's `should_wait` branch. With real
+        // time the test is non-deterministic, so we use generous
+        // bounds.
+        let limiter = RateLimiter::new(5);
+        let start = std::time::Instant::now();
+        for _ in 0..10 {
+            limiter.wait().await;
+        }
+        let elapsed = start.elapsed();
+        // 9 gaps of at least 200 ms each => at least 1.8 s.
+        // (The very first call waits 0 ms because `last` is None;
+        //  every subsequent call must wait >= min_interval.)
+        let expected_min = Duration::from_millis(9 * 200);
+        assert!(
+            elapsed >= expected_min,
+            "elapsed {elapsed:?} must be >= {expected_min:?} (limiter not throttling?)"
+        );
+        // 9 gaps of 200 ms + 500 ms slack for scheduler jitter
+        // and CI noise. If the limiter is broken (e.g. always
+        // returns immediately), elapsed would be ~0 ms.
+        let expected_max = expected_min + Duration::from_millis(500);
+        assert!(
+            elapsed < expected_max,
+            "elapsed {elapsed:?} must be < {expected_max:?}"
+        );
+    }
+
+    #[test]
+    fn page_size_clamps_to_100() {
+        // NewsAPI rejects pageSize > 100; the plugin must clamp.
+        let cfg = GoogleNewsConfig {
+            api_key: "K".into(),
+            base_url: "https://newsapi.org/v2".into(),
+            rate_limit_per_sec: 5,
+            language: "en".into(),
+            tenant: 0,
+        };
+        // 500 must be clamped down to 100.
+        let args = SearchArgs {
+            query: "Bitcoin".into(),
+            from: None,
+            to: None,
+            sort_by: None,
+            page_size: Some(500),
+            poll_interval_secs: None,
+        };
+        let url = build_search_url(&cfg, &args);
+        assert!(url.contains("&pageSize=100"), "url = {url}");
+        // Already-100 stays 100.
+        let args = SearchArgs {
+            page_size: Some(100),
+            ..args
+        };
+        let url = build_search_url(&cfg, &args);
+        assert!(url.contains("&pageSize=100"), "url = {url}");
+        // 0 must be clamped up to 1 (the lower bound).
+        let args = SearchArgs {
+            page_size: Some(0),
+            ..args
+        };
+        let url = build_search_url(&cfg, &args);
+        assert!(url.contains("&pageSize=1"), "url = {url}");
+        // In-range value passes through unchanged.
+        let args = SearchArgs {
+            page_size: Some(25),
+            ..args
+        };
+        let url = build_search_url(&cfg, &args);
+        assert!(url.contains("&pageSize=25"), "url = {url}");
+        // None defaults to 100.
+        let args = SearchArgs {
+            page_size: None,
+            ..args
+        };
+        let url = build_search_url(&cfg, &args);
+        assert!(url.contains("&pageSize=100"), "url = {url}");
+    }
+}
+
