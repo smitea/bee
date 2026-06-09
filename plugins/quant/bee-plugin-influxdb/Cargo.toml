@@ -4,18 +4,27 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "Bee 量化交易参考实现:实时时序 OutputAdapter。Plugin 结构是 production-grade;实际 sink 是日志文件占位。"
+description = "Bee production-grade InfluxDB v2 Output Adapter (S36): real line protocol + batched POST /api/v2/write + Flux query"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 bee-plugin-sdk = { path = "../../../crates/bee-plugin-sdk" }
-bee-adapter = { path = "../../../crates/bee-adapter" }
-tokio = { workspace = true, features = ["fs"] }
-thiserror = "2"
-bincode = "1"
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bincode = "1"
+sha2 = "0.10"
+hex = "0.4"
+thiserror = "2"
+log = "0.4"
+futures = "0.3"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
+mockito = "1"
 
 [lints]
 workspace = true
