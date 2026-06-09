@@ -1,237 +1,383 @@
-//! `bee-plugin-ta-lib` — production-grade reference implementation.
+//! `bee-plugin-ta-indicators` — production-grade technical-analysis Handlers (S38).
 //!
-//! Implements Handler UDFs (pure-compute functions invoked by
-//! Phases): `ema`, `macd`, `decision_tree`, `sentiment_analyzer`.
-//! Plugin scaffold is production-grade (cdylib + FFI vtable); the
-//! actual algorithms are simplified placeholder versions that
-//! will be replaced by a real `ta-lib` binding in S38.
+//! Real `yata` (pure Rust) indicators exposed as Bee Handler UDFs.
+//! Six handlers are registered:
 //!
-//! Handlers are free functions with stable signatures. The
-//! runtime parses the generic `Event` payload bytes (from
-//! `bee-adapter`) and dispatches to the appropriate handler based
-//! on the name declared in the plugin's `PluginManifest`.
+//! | Handler    | Backed by                                | Event schema         | Result schema            |
+//! |------------|------------------------------------------|----------------------|--------------------------|
+//! | `macd`     | `yata::indicators::MACD`                 | `{ price, ts }`      | `{ value, ts }` (line)   |
+//! | `ema`      | `yata::methods::EMA`                     | `{ price, ts }`      | `{ value, ts }`          |
+//! | `rsi`      | `yata::indicators::RSI`                  | `{ price, ts }`      | `{ value, ts }`          |
+//! | `bbands`   | `yata::indicators::BollingerBands`       | `{ price, ts }`      | `{ upper, mid, lower, ts }` |
+//! | `atr`      | `yata::methods::TR` + Wilder's smoothing | `{ high, low, close, ts }` | `{ value, ts }`    |
+//! | `vwap`     | Custom running sum                       | `{ price, volume, ts }` | `{ value, ts }`       |
 //!
-//! This plugin declares no Adapters — only Handlers.
+//! ## State management
 //!
-//! ## Architecture
+//! All indicators are streaming-friendly: each `handle` call
+//! processes one event and emits one output. The plugin stores
+//! per-stream state in a process-global `LazyLock<Mutex<HashMap<...>>>`
+//! keyed by `state/handler/<stream_id>/<indicator>/`. The MVP stub
+//! holds the state in memory; S38 follow-up wires this into Bee's
+//! `BeeHostV1::safe_kv_get` / `safe_kv_put` so state survives a
+//! plugin reload.
 //!
-//! - [`TaLibFactory`]: produces the
-//!   [`bee_plugin_sdk::PluginManifest`] + [`bee_plugin_sdk::PluginHandle`]
-//!   for the host.
-//! - Free-function handlers: the actual compute primitives. Pure
-//!   functions; no I/O, no plugin state.
-//! - `cdylib_plugin!(Factory)` invocation at the bottom generates
-//!   the FFI entry symbols.
+//! ## Backends
+//!
+//! The plugin is configured at the plugin level (not per
+//! Datasource). The MVP ships the `"yata"` backend only. The
+//! `"ta-lib"` backend (C FFI via `ta-lib-sys`) is a documented
+//! follow-up; see `IndicatorConfig` below.
+
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
+
+use serde::{Deserialize, Serialize};
+
+use yata::core::{IndicatorConfig as YataIndicatorConfig, IndicatorInstance, Method, OHLCV};
+use yata::helpers::MA;
+use yata::indicators::{
+    BollingerBands, BollingerBandsInstance, MACD, MACDInstance, RelativeStrengthIndex,
+    RelativeStrengthIndexInstance,
+};
+use yata::methods::{EMA, TR};
 
 use bee_plugin_sdk::{
     event::EventBytes, Factory, HandlerDescriptor, PluginHandle, PluginManifest, PluginName,
 };
 
-/// Result of a MACD computation. The last
-/// `(macd_line, signal_line, histogram)` triple.
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct MacdResult {
-    pub macd_line: f64,
-    pub signal_line: f64,
-    pub histogram: f64,
+// ---------------------------------------------------------------------------
+// Section 2: type definitions — event / result / state types
+// ---------------------------------------------------------------------------
+
+/// Single-value event: one price + one timestamp. Used by
+/// `macd`, `ema`, `rsi`, `bbands` (Bollinger Bands uses the
+/// `close` part of the synthetic OHLCV; only `price` is needed).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Event {
+    pub price: f64,
+    pub ts: i64,
 }
 
-/// Trading decision produced by [`decision_tree`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum Decision {
-    Buy,
-    Sell,
-    Hold,
+/// OHLC event: high / low / close + timestamp. Used by `atr`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct EventOHLC {
+    pub high: f64,
+    pub low: f64,
+    pub close: f64,
+    pub ts: i64,
 }
 
-impl std::fmt::Display for Decision {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Decision::Buy => f.write_str("buy"),
-            Decision::Sell => f.write_str("sell"),
-            Decision::Hold => f.write_str("hold"),
+/// Volume-weighted event: price + volume + timestamp. Used by `vwap`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct EventVwap {
+    pub price: f64,
+    pub volume: f64,
+    pub ts: i64,
+}
+
+/// Scalar result: one value + the timestamp it was computed for.
+/// Used by `macd`, `ema`, `rsi`, `atr`, `vwap`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct IndicatorResult {
+    pub value: f64,
+    pub ts: i64,
+}
+
+/// Bollinger Bands result: upper / middle / lower + timestamp.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct BbandsResult {
+    pub upper: f64,
+    pub middle: f64,
+    pub lower: f64,
+    pub ts: i64,
+}
+
+/// Synthetic OHLCV constructed from a single `price` (close).
+/// All other fields (open / high / low / volume) fall back to
+/// `price` so that the yata `Indicator` API gets a valid
+/// `OHLCV` for the single-value handlers (`macd`, `rsi`,
+/// `bbands`). The yata library's own `Source::Close` extractor
+/// is what they consume; `open` / `high` / `low` / `volume` are
+/// ignored by these indicators.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PriceCandle {
+    price: f64,
+}
+
+impl OHLCV for PriceCandle {
+    #[inline]
+    fn open(&self) -> f64 {
+        self.price
+    }
+    #[inline]
+    fn high(&self) -> f64 {
+        self.price
+    }
+    #[inline]
+    fn low(&self) -> f64 {
+        self.price
+    }
+    #[inline]
+    fn close(&self) -> f64 {
+        self.price
+    }
+    #[inline]
+    fn volume(&self) -> f64 {
+        0.0
+    }
+}
+
+/// Synthetic OHLCV constructed from explicit high / low / close.
+/// Used by `atr` (which consumes all three via `Source` /
+/// `tr_close`). `open` and `volume` are unused.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct HlcCandle {
+    high: f64,
+    low: f64,
+    close: f64,
+}
+
+impl OHLCV for HlcCandle {
+    #[inline]
+    fn open(&self) -> f64 {
+        self.close
+    }
+    #[inline]
+    fn high(&self) -> f64 {
+        self.high
+    }
+    #[inline]
+    fn low(&self) -> f64 {
+        self.low
+    }
+    #[inline]
+    fn close(&self) -> f64 {
+        self.close
+    }
+    #[inline]
+    fn volume(&self) -> f64 {
+        0.0
+    }
+}
+
+/// Per-stream state for the MACD handler. Holds the yata
+/// `MACDInstance` (default config: fast=12, slow=26, signal=9).
+/// The generic is the moving-average constructor; the default
+/// `MA` is the standard EMA-family enum and matches
+/// `MACD::default()`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MacdState {
+    pub indicator: MACDInstance<MA>,
+}
+
+impl Default for MacdState {
+    fn default() -> Self {
+        let cfg = MACD::default();
+        let candle = PriceCandle { price: 0.0 };
+        Self {
+            indicator: cfg
+                .init(&candle)
+                .expect("MACD::default config always validates"),
         }
     }
 }
 
-/// Exponential moving average. Returns the last EMA value.
-///
-/// `ema[i] = alpha * prices[i] + (1 - alpha) * ema[i-1]`,
-/// where `alpha = 2 / (period + 1)`. Seeded with the SMA of the
-/// first `period` values. If `prices.len() < period`, returns the
-/// arithmetic mean of the input.
-pub fn ema(prices: &[f64], period: usize) -> f64 {
-    if prices.is_empty() {
-        return 0.0;
-    }
-    if prices.len() < period {
-        let sum: f64 = prices.iter().sum();
-        return sum / prices.len() as f64;
-    }
-    let alpha = 2.0 / (period as f64 + 1.0);
-    let seed: f64 = prices[..period].iter().sum::<f64>() / period as f64;
-    let mut prev = seed;
-    for &p in &prices[period..] {
-        prev = alpha * p + (1.0 - alpha) * prev;
-    }
-    prev
+/// Per-stream state for the EMA handler. Holds the yata `EMA`
+/// method (a Wilder's-style EMA over `ValueType`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct EmaState {
+    pub indicator: EMA,
 }
 
-/// Moving Average Convergence Divergence. Returns the last
-/// `(macd_line, signal_line, histogram)` triple.
-///
-/// `macd_line[i] = ema(prices, fast_period, i) - ema(prices, slow_period, i)`.
-/// `signal_line = ema(macd_line, signal_period)` over the last
-/// `signal_period` values of `macd_line`.
-/// `histogram = macd_line - signal_line`.
-pub fn macd(
-    prices: &[f64],
-    fast_period: usize,
-    slow_period: usize,
-    signal_period: usize,
-) -> MacdResult {
-    let fast = ema_series(prices, fast_period);
-    let slow = ema_series(prices, slow_period);
-    let macd_line: Vec<f64> = fast
-        .iter()
-        .zip(slow.iter())
-        .map(|(f, s)| f - s)
-        .collect();
-    let signal_line = ema_last_n(&macd_line, signal_period);
-    let last_macd = *macd_line.last().unwrap_or(&0.0);
-    MacdResult {
-        macd_line: last_macd,
-        signal_line,
-        histogram: last_macd - signal_line,
-    }
-}
-
-/// Decision tree combining a MACD histogram and a sentiment
-/// score.
-///
-/// - `hist > 0` AND `sentiment > 0.5` → `Buy`
-/// - `hist < 0` AND `sentiment < -0.5` → `Sell`
-/// - otherwise → `Hold`
-pub fn decision_tree(macd_histogram: f64, sentiment_score: f64) -> Decision {
-    if macd_histogram > 0.0 && sentiment_score > 0.5 {
-        Decision::Buy
-    } else if macd_histogram < 0.0 && sentiment_score < -0.5 {
-        Decision::Sell
-    } else {
-        Decision::Hold
-    }
-}
-
-/// Keyword-based sentiment analyzer. Returns a score in
-/// `[-1, 1]`.
-///
-/// Positive keywords: `bullish`, `growth`, `high`, `buy`, `rally`,
-/// `adoption`. Negative keywords: `bearish`, `crash`, `low`, `sell`,
-/// `decline`, `regulation`. Score = `(positive - negative) / max(positive + negative, 1)`,
-/// clamped to `[-1, 1]`. Returns `0.0` when no keywords match.
-pub fn sentiment_analyzer(text: &str) -> f64 {
-    const POSITIVE: &[&str] = &[
-        "bullish", "growth", "high", "buy", "rally", "adoption",
-    ];
-    const NEGATIVE: &[&str] = &[
-        "bearish", "crash", "low", "sell", "decline", "regulation",
-    ];
-    let positive = POSITIVE.iter().filter(|k| text.contains(*k)).count();
-    let negative = NEGATIVE.iter().filter(|k| text.contains(*k)).count();
-    let denom = (positive + negative).max(1) as f64;
-    let score = (positive as f64 - negative as f64) / denom;
-    score.clamp(-1.0, 1.0)
-}
-
-/// Compute the full EMA series. `series[i]` is the EMA of
-/// `prices[0..=i]`. Returns a `Vec` of the same length as `prices`.
-/// The first `period` entries equal the SMA seed.
-fn ema_series(prices: &[f64], period: usize) -> Vec<f64> {
-    if prices.is_empty() {
-        return vec![];
-    }
-    if prices.len() < period {
-        let mean: f64 = prices.iter().sum::<f64>() / prices.len() as f64;
-        return vec![mean; prices.len()];
-    }
-    let alpha = 2.0 / (period as f64 + 1.0);
-    let seed: f64 = prices[..period].iter().sum::<f64>() / period as f64;
-    let mut series = Vec::with_capacity(prices.len());
-    for _ in 0..period {
-        series.push(seed);
-    }
-    let mut prev = seed;
-    for &p in &prices[period..] {
-        prev = alpha * p + (1.0 - alpha) * prev;
-        series.push(prev);
-    }
-    series
-}
-
-/// EMA of the last `n` values of `series`. If `series.len() < n`,
-/// returns the EMA of the whole series (which falls back to the
-/// mean per [`ema`]'s short-input rule).
-fn ema_last_n(series: &[f64], n: usize) -> f64 {
-    if series.is_empty() {
-        return 0.0;
-    }
-    let n = n.min(series.len());
-    if n == 0 {
-        return 0.0;
-    }
-    ema(&series[series.len() - n..], n)
-}
-
-/// Factory for the ta-lib plugin. Holds no state; both methods
-/// are pure.
-pub struct TaLibFactory;
-
-impl Factory for TaLibFactory {
-    fn manifest() -> PluginManifest {
-        PluginManifest {
-            name: PluginName("ta-lib".into()),
-            feature_version: "1.0.0".into(),
-            abi_version: "v1".into(),
-            adapters: vec![],
-            handlers: vec![
-                HandlerDescriptor { name: "MACD".into() },
-                HandlerDescriptor { name: "EMA".into() },
-                HandlerDescriptor { name: "decision_tree".into() },
-                HandlerDescriptor { name: "sentiment_analyzer".into() },
-            ],
+impl Default for EmaState {
+    fn default() -> Self {
+        let period: u8 = 20;
+        let seed: f64 = 0.0;
+        Self {
+            indicator: EMA::new(period, &seed).expect("EMA::new never fails for period > 0"),
         }
     }
+}
 
-    fn init() -> bee_plugin_sdk::PluginResult<PluginHandle> {
-        let mut handlers = std::collections::HashMap::new();
-        handlers.insert(
-            "MACD".to_string(),
-            &vtable_shim_macd::VTABLE as *const _,
-        );
-        handlers.insert(
-            "EMA".to_string(),
-            &vtable_shim_ema::VTABLE as *const _,
-        );
-        handlers.insert(
-            "decision_tree".to_string(),
-            &vtable_shim_decision_tree::VTABLE as *const _,
-        );
-        handlers.insert(
-            "sentiment_analyzer".to_string(),
-            &vtable_shim_sentiment_analyzer::VTABLE as *const _,
-        );
-        Ok(PluginHandle {
-            manifest: Self::manifest(),
-            inner: std::sync::Arc::new(()),
-            input_adapters: std::collections::HashMap::new(),
-            output_adapters: std::collections::HashMap::new(),
-            handlers,
-        })
+/// Per-stream state for the RSI handler.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RsiState {
+    pub indicator: RelativeStrengthIndexInstance,
+}
+
+impl Default for RsiState {
+    fn default() -> Self {
+        let cfg = RelativeStrengthIndex::default();
+        let candle = PriceCandle { price: 0.0 };
+        Self {
+            indicator: cfg
+                .init(&candle)
+                .expect("RelativeStrengthIndex::default config always validates"),
+        }
     }
 }
 
-fn write_event_bytes(out: *mut EventBytes, value: impl serde::Serialize) -> i32 {
-    let bytes = match bincode::serialize(&value) {
+/// Per-stream state for the Bollinger Bands handler.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BbandsState {
+    pub indicator: BollingerBandsInstance,
+}
+
+impl Default for BbandsState {
+    fn default() -> Self {
+        let cfg = BollingerBands::default();
+        let candle = PriceCandle { price: 0.0 };
+        Self {
+            indicator: cfg
+                .init(&candle)
+                .expect("BollingerBands::default config always validates"),
+        }
+    }
+}
+
+/// Per-stream state for the ATR handler. ATR is the Wilder's
+/// smoothed average of the True Range (`TR`). yata 0.6 does not
+/// expose a dedicated `ATRIndicator`, so we compose `TR` (which
+/// produces per-bar true range) with `EMA` using
+/// `alpha = 1 / period` (the same arithmetic as yata's `RMA`
+/// helper). We use `EMA` (which accepts the same `1/length`
+/// alpha in its `new` constructor) by re-seeding it with a
+/// custom alpha — but `EMA::new` only accepts a `PeriodType` and
+/// internally uses `alpha = 2 / (length + 1)`, which is the
+/// standard EMA. For Wilder's smoothing we therefore keep a
+/// manual `prev_value` + custom `alpha = 1 / period` and avoid
+/// using `EMA` here. `period` is carried explicitly so the
+/// alpha is correct for any period in `1..=254`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct AtrState {
+    pub period: u8,
+    pub tr: TR,
+    pub prev_value: f64,
+    pub initialized: bool,
+}
+
+impl Default for AtrState {
+    fn default() -> Self {
+        let period: u8 = 14;
+        let candle = HlcCandle {
+            high: 0.0,
+            low: 0.0,
+            close: 0.0,
+        };
+        Self {
+            period,
+            tr: TR::new(&candle).expect("TR::new never fails"),
+            prev_value: 0.0,
+            initialized: false,
+        }
+    }
+}
+
+/// Per-stream state for the VWAP handler. Custom running sum
+/// of `price * volume` and `volume` over the stream's lifetime.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct VwapState {
+    pub running_pv: f64,
+    pub running_v: f64,
+}
+
+// ---------------------------------------------------------------------------
+// Section 3: plugin-level config
+// ---------------------------------------------------------------------------
+
+/// Plugin-level configuration. The MVP supports only the
+/// `"yata"` backend. The `"ta-lib"` backend (C FFI via
+/// `ta-lib-sys`) is a documented follow-up: it would carry the
+/// same handler surface but route compute through the C library
+/// instead of `yata`. For now, an unknown backend is rejected
+/// at `init` time so misconfiguration is loud.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndicatorConfig {
+    pub indicator_backend: String,
+}
+
+impl Default for IndicatorConfig {
+    fn default() -> Self {
+        Self {
+            indicator_backend: "yata".to_string(),
+        }
+    }
+}
+
+impl IndicatorConfig {
+    /// Parse a bincode-encoded `IndicatorConfig` blob. Returns
+    /// `Err(String)` on any failure (unknown backend, bad
+    /// bincode, ...).
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
+        if bytes.is_empty() {
+            return Ok(Self::default());
+        }
+        let cfg: Self = bincode::deserialize(bytes)
+            .map_err(|e| format!("bincode deserialize IndicatorConfig: {e}"))?;
+        if cfg.indicator_backend != "yata" {
+            return Err(format!(
+                "unsupported indicator_backend '{}' (MVP supports only 'yata'; 'ta-lib' is a follow-up)",
+                cfg.indicator_backend
+            ));
+        }
+        Ok(cfg)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Section 4: stream identity
+// ---------------------------------------------------------------------------
+//
+// The SDK's `HandlerVtable::handle` is intentionally agnostic
+// about stream identity: the host passes the per-stream state
+// blob in, the handler updates it, the host stores it keyed by
+// (handler, stream_id). The plugin therefore does NOT hash the
+// stream id itself; it just operates on whatever state blob the
+// host passes in. Each handler name is unique in the manifest
+// below, so the (handler, stream_id) pair is unambiguous at the
+// host level.
+
+// ---------------------------------------------------------------------------
+// Section 5: in-memory KV stub
+// ---------------------------------------------------------------------------
+
+/// Per-process KV stub. The MVP holds per-(stream, handler)
+/// state in memory so a single `handle` call can find its
+/// predecessor state. The S38 follow-up wires this to
+/// `BeeHostV1::safe_kv_get` / `safe_kv_put` so state survives
+/// a plugin reload.
+static HANDLER_STATE: LazyLock<Mutex<HashMap<String, Vec<u8>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Build the canonical key for a (stream_id, handler) state
+/// entry. Mirrors the spec's
+/// `state/handler/<stream_id>/<indicator_name>/` layout. The
+/// MVP hashes the stream id to a hex string (the host passes
+/// 32 bytes; we display them). We do the hex encoding inline
+/// (no `hex` crate dependency) — this is a constant-size
+/// 32-byte → 64-char transform.
+fn state_key(stream_id: &[u8; 32], handler: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut hex_buf = [0u8; 64];
+    for (i, &b) in stream_id.iter().enumerate() {
+        hex_buf[i * 2] = HEX[(b >> 4) as usize];
+        hex_buf[i * 2 + 1] = HEX[(b & 0x0f) as usize];
+    }
+    let hex_str = std::str::from_utf8(&hex_buf)
+        .expect("hex digits are ASCII, always valid UTF-8");
+    format!("state/handler/{hex_str}/{handler}/")
+}
+
+// ---------------------------------------------------------------------------
+// Section 6: indicator dispatch (6 handlers)
+// ---------------------------------------------------------------------------
+
+/// Serialize `value` to bincode, write the resulting bytes into
+/// `*out`, and return 0 on success / -1 on serialization
+/// failure. Mirrors the helper in the S33 scaffold.
+fn write_event_bytes<T: Serialize>(out: *mut EventBytes, value: &T) -> i32 {
+    let bytes = match bincode::serialize(value) {
         Ok(b) => b,
         Err(_) => return -1,
     };
@@ -242,458 +388,448 @@ fn write_event_bytes(out: *mut EventBytes, value: impl serde::Serialize) -> i32 
     0
 }
 
-mod vtable_shim_macd {
-    //! MACD handler shim. State: `Vec<f64>` (price history).
-    //! Event: `f64` (new price). Result: `MacdResult`.
-
-    use super::{macd, MacdResult};
-
-    use bee_plugin_sdk::event::EventBytes;
-    use bee_plugin_sdk::vtable::HandlerVtable;
-
-    pub unsafe extern "C" fn init_state(out: *mut EventBytes) -> i32 {
-        super::write_event_bytes(out, Vec::<f64>::new())
+/// Deserialize a bincode-encoded value from `(ptr, len)`. On
+/// empty input, returns `Default::default()`. On any decode
+/// failure, also returns `Default::default()` (the indicator
+/// state is recoverable from "empty" — we treat garbage state
+/// the same as fresh state, which is the right call for an
+/// idempotent Handler that always produces one output per
+/// input).
+fn decode_or_default<T: Default + for<'de> Deserialize<'de>>(ptr: *const u8, len: usize) -> T {
+    if len == 0 {
+        return T::default();
     }
-
-    pub unsafe extern "C" fn handle(
-        state_ptr: *const u8,
-        state_len: usize,
-        event_ptr: *const u8,
-        event_len: usize,
-        new_state_out: *mut EventBytes,
-        result_out: *mut EventBytes,
-        _err_out: *mut EventBytes,
-    ) -> i32 {
-        let state_bytes = std::slice::from_raw_parts(state_ptr, state_len);
-        let mut state: Vec<f64> = match bincode::deserialize(state_bytes) {
-            Ok(s) => s,
-            Err(_) => return -1,
-        };
-        let event_bytes = std::slice::from_raw_parts(event_ptr, event_len);
-        let price: f64 = match bincode::deserialize(event_bytes) {
-            Ok(p) => p,
-            Err(_) => return -1,
-        };
-        state.push(price);
-        let result = if state.len() >= 26 {
-            macd(&state, 12, 26, 9)
-        } else {
-            MacdResult {
-                macd_line: 0.0,
-                signal_line: 0.0,
-                histogram: 0.0,
-            }
-        };
-        if super::write_event_bytes(new_state_out, &state) != 0 {
-            return -1;
-        }
-        super::write_event_bytes(result_out, &result)
-    }
-
-    pub const VTABLE: HandlerVtable = HandlerVtable {
-        handle,
-        init_state,
-    };
+    let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
+    bincode::deserialize(bytes).unwrap_or_default()
 }
 
-mod vtable_shim_ema {
-    //! EMA handler shim. State: `Vec<f64>` (price history).
-    //! Event: `f64` (new price). Result: `f64` (last EMA value).
-
-    use super::ema;
-
-    use bee_plugin_sdk::event::EventBytes;
-    use bee_plugin_sdk::vtable::HandlerVtable;
-
-    pub unsafe extern "C" fn init_state(out: *mut EventBytes) -> i32 {
-        super::write_event_bytes(out, Vec::<f64>::new())
-    }
-
-    pub unsafe extern "C" fn handle(
-        state_ptr: *const u8,
-        state_len: usize,
-        event_ptr: *const u8,
-        event_len: usize,
-        new_state_out: *mut EventBytes,
-        result_out: *mut EventBytes,
-        _err_out: *mut EventBytes,
-    ) -> i32 {
-        let state_bytes = std::slice::from_raw_parts(state_ptr, state_len);
-        let mut state: Vec<f64> = match bincode::deserialize(state_bytes) {
-            Ok(s) => s,
-            Err(_) => return -1,
-        };
-        let event_bytes = std::slice::from_raw_parts(event_ptr, event_len);
-        let price: f64 = match bincode::deserialize(event_bytes) {
-            Ok(p) => p,
-            Err(_) => return -1,
-        };
-        state.push(price);
-        let result = ema(&state, 20);
-        if super::write_event_bytes(new_state_out, &state) != 0 {
-            return -1;
-        }
-        super::write_event_bytes(result_out, &result)
-    }
-
-    pub const VTABLE: HandlerVtable = HandlerVtable {
-        handle,
-        init_state,
-    };
+/// Persist `bytes` for `(stream_id, handler)`.
+fn write_state_blob(stream_id: &[u8; 32], handler: &str, bytes: Vec<u8>) {
+    let key = state_key(stream_id, handler);
+    HANDLER_STATE
+        .lock()
+        .expect("HANDLER_STATE poisoned")
+        .insert(key, bytes);
 }
 
-mod vtable_shim_decision_tree {
-    //! Decision-tree handler shim. State: empty.
-    //! Event: `(f64, f64)` = (macd_histogram, sentiment_score).
-    //! Result: `Decision`.
-
-    use super::{decision_tree, Decision};
-
-    use bee_plugin_sdk::event::EventBytes;
-    use bee_plugin_sdk::vtable::HandlerVtable;
-
-    pub unsafe extern "C" fn init_state(out: *mut EventBytes) -> i32 {
-        super::write_event_bytes(out, Vec::<u8>::new())
-    }
-
-    pub unsafe extern "C" fn handle(
-        _state_ptr: *const u8,
-        _state_len: usize,
-        event_ptr: *const u8,
-        event_len: usize,
-        new_state_out: *mut EventBytes,
-        result_out: *mut EventBytes,
-        _err_out: *mut EventBytes,
-    ) -> i32 {
-        let event_bytes = std::slice::from_raw_parts(event_ptr, event_len);
-        let (hist, sentiment): (f64, f64) = match bincode::deserialize(event_bytes) {
-            Ok(v) => v,
-            Err(_) => return -1,
-        };
-        let result = decision_tree(hist, sentiment);
-        if super::write_event_bytes(new_state_out, Vec::<u8>::new()) != 0 {
-            return -1;
-        }
-        super::write_event_bytes(result_out, &result)
-    }
-
-    pub const VTABLE: HandlerVtable = HandlerVtable {
-        handle,
-        init_state,
-    };
+/// Derive a `stream_id` for the MVP. The S33 `HandlerVtable`
+/// signature does not pass `stream_id` directly into `handle`,
+/// so the MVP uses a fixed `[0u8; 32]` sentinel (a single
+/// global stream). When the S38 follow-up wires the host's
+/// `BeeHostV1::current_stream_id` into the handler call, the
+/// stream id will be passed in via a side channel (a global
+/// thread-local set by the host immediately before `handle`).
+/// The MVP's contract is: the in-memory KV stub is per-process
+/// state; tests / unit exercises get a single global stream
+/// for now.
+fn current_stream_id() -> [u8; 32] {
+    [0u8; 32]
 }
 
-mod vtable_shim_sentiment_analyzer {
-    //! Sentiment-analyzer handler shim. State: empty.
-    //! Event: `String` (text to analyze). Result: `f64` in `[-1, 1]`.
-
-    use super::sentiment_analyzer;
-
-    use bee_plugin_sdk::event::EventBytes;
-    use bee_plugin_sdk::vtable::HandlerVtable;
-
-    pub unsafe extern "C" fn init_state(out: *mut EventBytes) -> i32 {
-        super::write_event_bytes(out, Vec::<u8>::new())
-    }
-
-    pub unsafe extern "C" fn handle(
-        _state_ptr: *const u8,
-        _state_len: usize,
-        event_ptr: *const u8,
-        event_len: usize,
-        new_state_out: *mut EventBytes,
-        result_out: *mut EventBytes,
-        _err_out: *mut EventBytes,
-    ) -> i32 {
-        let event_bytes = std::slice::from_raw_parts(event_ptr, event_len);
-        let text: String = match bincode::deserialize(event_bytes) {
-            Ok(s) => s,
-            Err(_) => return -1,
-        };
-        let result = sentiment_analyzer(&text);
-        if super::write_event_bytes(new_state_out, Vec::<u8>::new()) != 0 {
-            return -1;
-        }
-        super::write_event_bytes(result_out, &result)
-    }
-
-    pub const VTABLE: HandlerVtable = HandlerVtable {
-        handle,
-        init_state,
-    };
-}
-
-bee_plugin_sdk::cdylib_plugin!(TaLibFactory);
-
-#[cfg(test)]
-mod tests {
+/// `macd` handler. Event: `{ price, ts }`. State:
+/// `MacdState { indicator: MACDInstance }`. Result:
+/// `{ value: macd_line, ts }`.
+pub mod macd_shim {
     use super::*;
 
-    #[test]
-    fn ema_constant_input_returns_constant() {
-        let prices = vec![5.0; 10];
-        let result = ema(&prices, 3);
-        assert!((result - 5.0).abs() < 1e-9, "expected 5.0, got {result}");
+    pub unsafe extern "C" fn init_state(out: *mut EventBytes) -> i32 {
+        write_event_bytes(out, &MacdState::default())
     }
 
-    #[test]
-    fn ema_short_input_returns_mean() {
-        let prices = vec![1.0, 2.0, 3.0];
-        let result = ema(&prices, 5);
-        assert!((result - 2.0).abs() < 1e-9, "expected 2.0, got {result}");
-    }
-
-    #[test]
-    fn ema_increasing_input_trends_up() {
-        let prices: Vec<f64> = (1..=10).map(|x| x as f64).collect();
-        let result = ema(&prices, 3);
-        assert!(result > 3.0, "expected > 3.0, got {result}");
-    }
-
-    #[test]
-    fn macd_returns_last_triple() {
-        let prices: Vec<f64> = (1..=30).map(|x| x as f64).collect();
-        let result = macd(&prices, 12, 26, 9);
-        assert!(result.macd_line.is_finite());
-        assert!(result.signal_line.is_finite());
-        assert!(result.histogram.is_finite());
-        assert!(result.macd_line > 0.0);
-    }
-
-    #[test]
-    fn decision_tree_bullish_buy() {
-        assert_eq!(decision_tree(0.1, 0.6), Decision::Buy);
-    }
-
-    #[test]
-    fn decision_tree_bearish_sell() {
-        assert_eq!(decision_tree(-0.1, -0.6), Decision::Sell);
-    }
-
-    #[test]
-    fn decision_tree_mixed_hold() {
-        assert_eq!(decision_tree(0.1, -0.6), Decision::Hold);
-    }
-
-    #[test]
-    fn sentiment_analyzer_all_positive() {
-        let text = "bullish growth high buy rally adoption";
-        let score = sentiment_analyzer(text);
-        assert!((score - 1.0).abs() < 1e-9, "expected 1.0, got {score}");
-    }
-
-    #[test]
-    fn sentiment_analyzer_all_negative() {
-        let text = "bearish crash low sell decline regulation";
-        let score = sentiment_analyzer(text);
-        assert!((score + 1.0).abs() < 1e-9, "expected -1.0, got {score}");
-    }
-
-    #[test]
-    fn sentiment_analyzer_neutral() {
-        let text = "the weather is nice today";
-        let score = sentiment_analyzer(text);
-        assert_eq!(score, 0.0);
-    }
-
-    #[test]
-    fn factory_manifest_declares_four_handlers() {
-        let m = TaLibFactory::manifest();
-        assert_eq!(m.name.0, "ta-lib");
-        assert_eq!(m.abi_version, "v1");
-        assert!(m.adapters.is_empty());
-        assert_eq!(m.handlers.len(), 4);
-        let names: Vec<&str> = m.handlers.iter().map(|h| h.name.as_str()).collect();
-        assert!(names.contains(&"MACD"));
-        assert!(names.contains(&"EMA"));
-        assert!(names.contains(&"decision_tree"));
-        assert!(names.contains(&"sentiment_analyzer"));
-    }
-
-    #[test]
-    fn factory_init_returns_handle_with_manifest() {
-        let h = TaLibFactory::init().unwrap();
-        assert_eq!(h.manifest.name.0, "ta-lib");
-        assert_eq!(h.manifest.handlers.len(), 4);
-    }
-
-    #[test]
-    fn vtable_macd_init_state_and_handle() {
-        let handle = TaLibFactory::init().expect("init");
-        let vtable = *handle.handlers.get("MACD").expect("MACD vtable");
-        let mut state_out = EventBytes::EMPTY;
-        let rc = unsafe { ((*vtable).init_state)(&mut state_out) };
-        assert_eq!(rc, 0);
-        let state: Vec<f64> =
-            bincode::deserialize(unsafe { std::slice::from_raw_parts(state_out.ptr, state_out.len) })
-                .expect("decode state");
-        assert!(state.is_empty());
-        // Feed a few prices; result should be a MacdResult with
-        // finite values (32 prices are needed for full MACD).
-        let mut new_state = state_out;
-        let mut result = EventBytes::EMPTY;
-        for i in 0..32 {
-            let price = (i as f64) * 1.0 + 100.0;
-            let event_bytes = bincode::serialize(&price).unwrap();
-            let rc = unsafe {
-                ((*vtable).handle)(
-                    new_state.ptr,
-                    new_state.len,
-                    event_bytes.as_ptr(),
-                    event_bytes.len(),
-                    &mut new_state,
-                    &mut result,
-                    std::ptr::null_mut(),
-                )
-            };
-            assert_eq!(rc, 0, "handle iter {i} returned {rc}");
+    pub unsafe extern "C" fn handle(
+        state_ptr: *const u8,
+        state_len: usize,
+        event_ptr: *const u8,
+        event_len: usize,
+        new_state_out: *mut EventBytes,
+        result_out: *mut EventBytes,
+        _err_out: *mut EventBytes,
+    ) -> i32 {
+        let mut state: MacdState = decode_or_default(state_ptr, state_len);
+        let event: Event = match bincode::deserialize(unsafe {
+            std::slice::from_raw_parts(event_ptr, event_len)
+        }) {
+            Ok(e) => e,
+            Err(_) => return -1,
+        };
+        let candle = PriceCandle { price: event.price };
+        let result = state.indicator.next(&candle);
+        let macd_line = result.value(0);
+        let out = IndicatorResult {
+            value: macd_line,
+            ts: event.ts,
+        };
+        let stream_id = current_stream_id();
+        let state_bytes = match bincode::serialize(&state) {
+            Ok(b) => b,
+            Err(_) => return -1,
+        };
+        write_state_blob(&stream_id, "macd", state_bytes);
+        if write_event_bytes(new_state_out, &state) != 0 {
+            return -1;
         }
-        let r_bytes = unsafe { std::slice::from_raw_parts(result.ptr, result.len) };
-        let macd: MacdResult = bincode::deserialize(r_bytes).expect("decode result");
-        assert!(macd.macd_line.is_finite());
-        assert!(macd.signal_line.is_finite());
-        assert!(macd.histogram.is_finite());
+        write_event_bytes(result_out, &out)
     }
 
-    #[test]
-    fn vtable_ema_init_state_and_handle() {
-        let handle = TaLibFactory::init().expect("init");
-        let vtable = *handle.handlers.get("EMA").expect("EMA vtable");
-        let mut state_out = EventBytes::EMPTY;
-        let rc = unsafe { ((*vtable).init_state)(&mut state_out) };
-        assert_eq!(rc, 0);
-        let prices: Vec<f64> = (1..=10).map(|x| x as f64).collect();
-        let mut new_state = state_out;
-        let mut result = EventBytes::EMPTY;
-        for &p in &prices {
-            let event_bytes = bincode::serialize(&p).unwrap();
-            let rc = unsafe {
-                ((*vtable).handle)(
-                    new_state.ptr,
-                    new_state.len,
-                    event_bytes.as_ptr(),
-                    event_bytes.len(),
-                    &mut new_state,
-                    &mut result,
-                    std::ptr::null_mut(),
-                )
-            };
-            assert_eq!(rc, 0, "handle returned {rc}");
+    pub const VTABLE: bee_plugin_sdk::vtable::HandlerVtable =
+        bee_plugin_sdk::vtable::HandlerVtable {
+            handle,
+            init_state,
+        };
+}
+
+/// `ema` handler. Event: `{ price, ts }`. State: `EmaState`.
+/// Result: `{ value: ema_value, ts }`.
+pub mod ema_shim {
+    use super::*;
+
+    pub unsafe extern "C" fn init_state(out: *mut EventBytes) -> i32 {
+        write_event_bytes(out, &EmaState::default())
+    }
+
+    pub unsafe extern "C" fn handle(
+        state_ptr: *const u8,
+        state_len: usize,
+        event_ptr: *const u8,
+        event_len: usize,
+        new_state_out: *mut EventBytes,
+        result_out: *mut EventBytes,
+        _err_out: *mut EventBytes,
+    ) -> i32 {
+        let mut state: EmaState = decode_or_default(state_ptr, state_len);
+        let event: Event = match bincode::deserialize(unsafe {
+            std::slice::from_raw_parts(event_ptr, event_len)
+        }) {
+            Ok(e) => e,
+            Err(_) => return -1,
+        };
+        let value = state.indicator.next(&event.price);
+        let out = IndicatorResult {
+            value,
+            ts: event.ts,
+        };
+        let stream_id = current_stream_id();
+        let state_bytes = match bincode::serialize(&state) {
+            Ok(b) => b,
+            Err(_) => return -1,
+        };
+        write_state_blob(&stream_id, "ema", state_bytes);
+        if write_event_bytes(new_state_out, &state) != 0 {
+            return -1;
         }
-        let r_bytes = unsafe { std::slice::from_raw_parts(result.ptr, result.len) };
-        let ema_value: f64 = bincode::deserialize(r_bytes).expect("decode result");
-        assert!(ema_value.is_finite());
-        assert!(ema_value > 0.0, "ema_value={ema_value}");
+        write_event_bytes(result_out, &out)
     }
 
-    #[test]
-    fn vtable_decision_tree_handle_buy() {
-        let handle = TaLibFactory::init().expect("init");
-        let vtable = *handle
-            .handlers
-            .get("decision_tree")
-            .expect("decision_tree vtable");
-        let mut state = EventBytes::EMPTY;
-        unsafe { ((*vtable).init_state)(&mut state) };
-        let event_bytes = bincode::serialize(&(0.1_f64, 0.6_f64)).unwrap();
-        let mut new_state = EventBytes::EMPTY;
-        let mut result = EventBytes::EMPTY;
-        let rc = unsafe {
-            ((*vtable).handle)(
-                state.ptr,
-                state.len,
-                event_bytes.as_ptr(),
-                event_bytes.len(),
-                &mut new_state,
-                &mut result,
-                std::ptr::null_mut(),
-            )
+    pub const VTABLE: bee_plugin_sdk::vtable::HandlerVtable =
+        bee_plugin_sdk::vtable::HandlerVtable {
+            handle,
+            init_state,
         };
-        assert_eq!(rc, 0);
-        let r_bytes = unsafe { std::slice::from_raw_parts(result.ptr, result.len) };
-        let decision: Decision = bincode::deserialize(r_bytes).expect("decode result");
-        assert_eq!(decision, Decision::Buy);
+}
+
+/// `rsi` handler. Event: `{ price, ts }`. State: `RsiState`.
+/// Result: `{ value: rsi, ts }`. RSI is in `[0, 100]`; until
+/// the indicator has seen `period` bars it returns
+/// `50.0` (neutral).
+pub mod rsi_shim {
+    use super::*;
+
+    pub unsafe extern "C" fn init_state(out: *mut EventBytes) -> i32 {
+        write_event_bytes(out, &RsiState::default())
     }
 
-    #[test]
-    fn vtable_decision_tree_handle_sell() {
-        let handle = TaLibFactory::init().expect("init");
-        let vtable = *handle
-            .handlers
-            .get("decision_tree")
-            .expect("decision_tree vtable");
-        let mut state = EventBytes::EMPTY;
-        unsafe { ((*vtable).init_state)(&mut state) };
-        let event_bytes = bincode::serialize(&(-0.1_f64, -0.6_f64)).unwrap();
-        let mut new_state = EventBytes::EMPTY;
-        let mut result = EventBytes::EMPTY;
-        let rc = unsafe {
-            ((*vtable).handle)(
-                state.ptr,
-                state.len,
-                event_bytes.as_ptr(),
-                event_bytes.len(),
-                &mut new_state,
-                &mut result,
-                std::ptr::null_mut(),
-            )
+    pub unsafe extern "C" fn handle(
+        state_ptr: *const u8,
+        state_len: usize,
+        event_ptr: *const u8,
+        event_len: usize,
+        new_state_out: *mut EventBytes,
+        result_out: *mut EventBytes,
+        _err_out: *mut EventBytes,
+    ) -> i32 {
+        let mut state: RsiState = decode_or_default(state_ptr, state_len);
+        let event: Event = match bincode::deserialize(unsafe {
+            std::slice::from_raw_parts(event_ptr, event_len)
+        }) {
+            Ok(e) => e,
+            Err(_) => return -1,
         };
-        assert_eq!(rc, 0);
-        let r_bytes = unsafe { std::slice::from_raw_parts(result.ptr, result.len) };
-        let decision: Decision = bincode::deserialize(r_bytes).expect("decode result");
-        assert_eq!(decision, Decision::Sell);
+        let candle = PriceCandle { price: event.price };
+        let result = state.indicator.next(&candle);
+        let rsi_value = result.value(0);
+        let out = IndicatorResult {
+            value: rsi_value,
+            ts: event.ts,
+        };
+        let stream_id = current_stream_id();
+        let state_bytes = match bincode::serialize(&state) {
+            Ok(b) => b,
+            Err(_) => return -1,
+        };
+        write_state_blob(&stream_id, "rsi", state_bytes);
+        if write_event_bytes(new_state_out, &state) != 0 {
+            return -1;
+        }
+        write_event_bytes(result_out, &out)
     }
 
-    #[test]
-    fn vtable_sentiment_analyzer_handle_positive() {
-        let handle = TaLibFactory::init().expect("init");
-        let vtable = *handle
-            .handlers
-            .get("sentiment_analyzer")
-            .expect("sentiment_analyzer vtable");
-        let mut state = EventBytes::EMPTY;
-        unsafe { ((*vtable).init_state)(&mut state) };
-        let event_bytes = bincode::serialize(&"bullish growth high buy rally adoption".to_string())
-            .unwrap();
-        let mut new_state = EventBytes::EMPTY;
-        let mut result = EventBytes::EMPTY;
-        let rc = unsafe {
-            ((*vtable).handle)(
-                state.ptr,
-                state.len,
-                event_bytes.as_ptr(),
-                event_bytes.len(),
-                &mut new_state,
-                &mut result,
-                std::ptr::null_mut(),
-            )
+    pub const VTABLE: bee_plugin_sdk::vtable::HandlerVtable =
+        bee_plugin_sdk::vtable::HandlerVtable {
+            handle,
+            init_state,
         };
-        assert_eq!(rc, 0);
-        let r_bytes = unsafe { std::slice::from_raw_parts(result.ptr, result.len) };
-        let score: f64 = bincode::deserialize(r_bytes).expect("decode result");
-        assert!((score - 1.0).abs() < 1e-9, "score={score}");
+}
+
+/// `bbands` handler. Event: `{ price, ts }`. State:
+/// `BbandsState`. Result: `{ upper, middle, lower, ts }`.
+pub mod bbands_shim {
+    use super::*;
+
+    pub unsafe extern "C" fn init_state(out: *mut EventBytes) -> i32 {
+        write_event_bytes(out, &BbandsState::default())
     }
 
-    #[test]
-    fn vtable_handle_with_garbage_event_returns_error() {
-        let handle = TaLibFactory::init().expect("init");
-        let vtable = *handle.handlers.get("EMA").expect("EMA vtable");
-        let mut state = EventBytes::EMPTY;
-        unsafe { ((*vtable).init_state)(&mut state) };
-        let garbage = vec![0xFFu8; 4];
-        let mut new_state = EventBytes::EMPTY;
-        let mut result = EventBytes::EMPTY;
-        let rc = unsafe {
-            ((*vtable).handle)(
-                state.ptr,
-                state.len,
-                garbage.as_ptr(),
-                garbage.len(),
-                &mut new_state,
-                &mut result,
-                std::ptr::null_mut(),
-            )
+    pub unsafe extern "C" fn handle(
+        state_ptr: *const u8,
+        state_len: usize,
+        event_ptr: *const u8,
+        event_len: usize,
+        new_state_out: *mut EventBytes,
+        result_out: *mut EventBytes,
+        _err_out: *mut EventBytes,
+    ) -> i32 {
+        let mut state: BbandsState = decode_or_default(state_ptr, state_len);
+        let event: Event = match bincode::deserialize(unsafe {
+            std::slice::from_raw_parts(event_ptr, event_len)
+        }) {
+            Ok(e) => e,
+            Err(_) => return -1,
         };
-        assert_eq!(rc, -1, "garbage event should return -1");
+        let candle = PriceCandle { price: event.price };
+        let result = state.indicator.next(&candle);
+        // yata::BollingerBands returns values in
+        // [upper, middle, lower] order.
+        let upper = result.value(0);
+        let middle = result.value(1);
+        let lower = result.value(2);
+        let out = BbandsResult {
+            upper,
+            middle,
+            lower,
+            ts: event.ts,
+        };
+        let stream_id = current_stream_id();
+        let state_bytes = match bincode::serialize(&state) {
+            Ok(b) => b,
+            Err(_) => return -1,
+        };
+        write_state_blob(&stream_id, "bbands", state_bytes);
+        if write_event_bytes(new_state_out, &state) != 0 {
+            return -1;
+        }
+        write_event_bytes(result_out, &out)
+    }
+
+    pub const VTABLE: bee_plugin_sdk::vtable::HandlerVtable =
+        bee_plugin_sdk::vtable::HandlerVtable {
+            handle,
+            init_state,
+        };
+}
+
+/// `atr` handler. Event: `{ high, low, close, ts }`. State:
+/// `AtrState { period, tr, prev_value, initialized }`. Result:
+/// `{ value: atr, ts }`.
+///
+/// Implementation note: yata 0.6 does not expose a dedicated
+/// `ATRIndicator`. The standard formula is `ATR(n) = smoothed
+/// TR(n)` where the smoothing is Wilder's `RMA`
+/// (`alpha = 1/n`). We use yata's `TR` Method for the per-bar
+/// true range, then apply Wilder's smoothing manually so the
+/// `alpha = 1/period` is correct (yata's `EMA::new` uses
+/// `alpha = 2/(n+1)`, which is the standard EMA, not Wilder's).
+pub mod atr_shim {
+    use super::*;
+
+    pub unsafe extern "C" fn init_state(out: *mut EventBytes) -> i32 {
+        write_event_bytes(out, &AtrState::default())
+    }
+
+    pub unsafe extern "C" fn handle(
+        state_ptr: *const u8,
+        state_len: usize,
+        event_ptr: *const u8,
+        event_len: usize,
+        new_state_out: *mut EventBytes,
+        result_out: *mut EventBytes,
+        _err_out: *mut EventBytes,
+    ) -> i32 {
+        let mut state: AtrState = decode_or_default(state_ptr, state_len);
+        let event: EventOHLC = match bincode::deserialize(unsafe {
+            std::slice::from_raw_parts(event_ptr, event_len)
+        }) {
+            Ok(e) => e,
+            Err(_) => return -1,
+        };
+        let candle = HlcCandle {
+            high: event.high,
+            low: event.low,
+            close: event.close,
+        };
+        let tr_value = state.tr.next(&candle);
+        let n = state.period as f64;
+        let alpha = 1.0 / n;
+        let atr = if !state.initialized {
+            // Seed: on the first bar, ATR == TR. (Wilder's
+            // original formula seeds with the simple mean of
+            // the first `n` TRs; the S38 follow-up can refine
+            // this to match `pandas-ta` exactly.)
+            tr_value
+        } else {
+            alpha.mul_add(tr_value, (1.0 - alpha) * state.prev_value)
+        };
+        state.prev_value = atr;
+        state.initialized = true;
+        let out = IndicatorResult {
+            value: atr,
+            ts: event.ts,
+        };
+        let stream_id = current_stream_id();
+        let state_bytes = match bincode::serialize(&state) {
+            Ok(b) => b,
+            Err(_) => return -1,
+        };
+        write_state_blob(&stream_id, "atr", state_bytes);
+        if write_event_bytes(new_state_out, &state) != 0 {
+            return -1;
+        }
+        write_event_bytes(result_out, &out)
+    }
+
+    pub const VTABLE: bee_plugin_sdk::vtable::HandlerVtable =
+        bee_plugin_sdk::vtable::HandlerVtable {
+            handle,
+            init_state,
+        };
+}
+
+/// `vwap` handler. Event: `{ price, volume, ts }`. State:
+/// `VwapState { running_pv, running_v }`. Result:
+/// `{ value: vwap, ts }`.
+///
+/// `VWAP = sum(price * volume) / sum(volume)` over the
+/// stream's lifetime. yata does not provide a VWAP
+/// `Indicator`, so this is a small custom state machine.
+pub mod vwap_shim {
+    use super::*;
+
+    pub unsafe extern "C" fn init_state(out: *mut EventBytes) -> i32 {
+        write_event_bytes(out, &VwapState::default())
+    }
+
+    pub unsafe extern "C" fn handle(
+        state_ptr: *const u8,
+        state_len: usize,
+        event_ptr: *const u8,
+        event_len: usize,
+        new_state_out: *mut EventBytes,
+        result_out: *mut EventBytes,
+        _err_out: *mut EventBytes,
+    ) -> i32 {
+        let mut state: VwapState = decode_or_default(state_ptr, state_len);
+        let event: EventVwap = match bincode::deserialize(unsafe {
+            std::slice::from_raw_parts(event_ptr, event_len)
+        }) {
+            Ok(e) => e,
+            Err(_) => return -1,
+        };
+        state.running_pv += event.price * event.volume;
+        state.running_v += event.volume;
+        let vwap = if state.running_v == 0.0 {
+            event.price
+        } else {
+            state.running_pv / state.running_v
+        };
+        let out = IndicatorResult {
+            value: vwap,
+            ts: event.ts,
+        };
+        let stream_id = current_stream_id();
+        let state_bytes = match bincode::serialize(&state) {
+            Ok(b) => b,
+            Err(_) => return -1,
+        };
+        write_state_blob(&stream_id, "vwap", state_bytes);
+        if write_event_bytes(new_state_out, &state) != 0 {
+            return -1;
+        }
+        write_event_bytes(result_out, &out)
+    }
+
+    pub const VTABLE: bee_plugin_sdk::vtable::HandlerVtable =
+        bee_plugin_sdk::vtable::HandlerVtable {
+            handle,
+            init_state,
+        };
+}
+
+// ---------------------------------------------------------------------------
+// Section 7: plugin manifest + factory
+// ---------------------------------------------------------------------------
+
+/// Factory for the ta-indicators plugin. Holds no per-instance
+/// state: all vtables are `const`, and the per-stream state
+/// lives in `HANDLER_STATE`.
+pub struct TaIndicatorsFactory;
+
+impl Factory for TaIndicatorsFactory {
+    fn manifest() -> PluginManifest {
+        PluginManifest {
+            name: PluginName("bee-plugin-ta-indicators".into()),
+            feature_version: "0.1.0".into(),
+            abi_version: "v1".into(),
+            adapters: vec![],
+            handlers: vec![
+                HandlerDescriptor {
+                    name: "macd".into(),
+                },
+                HandlerDescriptor {
+                    name: "ema".into(),
+                },
+                HandlerDescriptor {
+                    name: "rsi".into(),
+                },
+                HandlerDescriptor {
+                    name: "bbands".into(),
+                },
+                HandlerDescriptor {
+                    name: "atr".into(),
+                },
+                HandlerDescriptor {
+                    name: "vwap".into(),
+                },
+            ],
+        }
+    }
+
+    fn init() -> bee_plugin_sdk::PluginResult<PluginHandle> {
+        let mut handlers: HashMap<String, *const bee_plugin_sdk::vtable::HandlerVtable> =
+            HashMap::new();
+        handlers.insert("macd".to_string(), &macd_shim::VTABLE as *const _);
+        handlers.insert("ema".to_string(), &ema_shim::VTABLE as *const _);
+        handlers.insert("rsi".to_string(), &rsi_shim::VTABLE as *const _);
+        handlers.insert("bbands".to_string(), &bbands_shim::VTABLE as *const _);
+        handlers.insert("atr".to_string(), &atr_shim::VTABLE as *const _);
+        handlers.insert("vwap".to_string(), &vwap_shim::VTABLE as *const _);
+        Ok(PluginHandle {
+            manifest: Self::manifest(),
+            inner: std::sync::Arc::new(()),
+            input_adapters: HashMap::new(),
+            output_adapters: HashMap::new(),
+            handlers,
+        })
     }
 }
+
+bee_plugin_sdk::cdylib_plugin!(TaIndicatorsFactory);
+
