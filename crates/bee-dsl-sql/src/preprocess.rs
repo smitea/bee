@@ -647,12 +647,19 @@ pub enum CreateKind {
 ///
 /// In addition, the body is scanned for the pattern
 /// `FROM <UDF_name>(...)` and rewritten to
-/// `FROM UNNEST(<UDF_name>(...)) AS u(n)`. This is a
-/// `generate_series`-specific hack for the S41 MVP: DataFusion 50
-/// has no UDTF support, so the only way to turn the scalar UDF's
-/// `Int64Array` result into a table is `UNNEST`. The hack is
-/// documented here; a proper UDTF-based replacement is a
-/// follow-up.
+/// `FROM UNNEST(<UDF_name>(...)) AS <alias>(<col>, ...)`. This is a
+/// hack for the S41 MVP's test-fixture UDFs: DataFusion 50
+/// has no UDTF support, so the only way to turn a scalar UDF's
+/// array-shaped result into a table is `UNNEST`. Two UDFs are
+/// handled:
+/// - `generate_series(start, end)` returns a flat `Int64Array` and
+///   rewrites to `... AS u(n)`.
+/// - `generate_events(schema, count, seed)` returns a
+///   `Struct<user_id: Int64, ts: Int64>` and rewrites to
+///   `... AS t(user_id, ts)` (the struct fields become columns).
+/// Other UDFs in `FROM` are left alone (DataFusion will surface a
+/// clear error at planning time). A proper UDTF-based replacement
+/// is a follow-up.
 pub fn strip_create_source_and_view(sql: &str) -> (Vec<CreateDefinition>, String) {
     // 1. Scan for `CREATE SOURCE <name> AS <body>;` and
     //    `CREATE VIEW <name> AS <body>;` lines. Collect them into
@@ -676,14 +683,13 @@ pub fn strip_create_source_and_view(sql: &str) -> (Vec<CreateDefinition>, String
     cleaned.push_str(rest);
 
     // 2. For each definition, apply the `FROM <UDF_name>(...)` →
-    //    `FROM UNNEST(<UDF_name>(...)) AS u(n)` rewrite to the body.
-    //    The MVP only knows `generate_series`; other names are
+    //    `FROM UNNEST(<UDF_name>(...)) AS <alias>(<col>, ...)` rewrite
+    //    to the body. The MVP knows the test-fixture UDFs
+    //    `generate_series` and `generate_events`; other names are
     //    left alone (the SQL will surface a clear DataFusion error
     //    if the body references an unknown UDF).
     for d in &mut defs {
-        if d.body.contains("FROM generate_series(") {
-            d.body = rewrite_generate_series_in_from(&d.body);
-        }
+        d.body = rewrite_test_fixtures_in_from(&d.body);
     }
 
     // 3. Recursive substitution: apply all OTHER defs'
@@ -928,34 +934,75 @@ fn find_next_statement_start(s: &str) -> Option<usize> {
     None
 }
 
-/// Rewrite `FROM generate_series(...)` to
-/// `FROM UNNEST(generate_series(...)) AS u(n)`. Hardcoded for the
-/// S41 MVP: the column alias is `n` (matching the demo's
-/// `SELECT n FROM generate_series(...)`). A more general UDTF
-/// replacement is a follow-up.
-fn rewrite_generate_series_in_from(body: &str) -> String {
-    // Find `FROM generate_series(` and replace with
-    // `FROM UNNEST(generate_series(` then close the `UNNEST(...)`
-    // paren after the matching `)`. For the MVP, the `generate_series`
-    // call has a known 2-arg form like `generate_series(1, 1000000)`,
-    // so the matching `)` is the first one after the `(`.
-    let marker = "FROM generate_series(";
-    let Some(start) = body.find(marker) else {
-        return body.to_string();
-    };
+/// Rewrite `FROM <UDF_name>(...)` to
+/// `FROM UNNEST(<UDF_name>(...)) AS <alias>(<col>, ...)` for the
+/// S41 MVP's test-fixture UDFs. Two cases are handled:
+///
+/// - `generate_series(start, end)` → `UNNEST(...) AS u(n)`. The
+///   flat `Int64Array` result expands to a single column named
+///   `n` (matching the demo's `SELECT n FROM generate_series(...)`).
+/// - `generate_events(schema, count, seed)` → `UNNEST(...) AS
+///   t(user_id, ts)`. The `Struct<user_id, ts>` result expands to
+///   two columns named after the struct fields.
+///
+/// Other UDFs are left alone; DataFusion will surface a clear
+/// error at planning time if the FROM references an unknown UDF.
+/// A proper UDTF-based replacement is a follow-up.
+fn rewrite_test_fixtures_in_from(body: &str) -> String {
+    // First handle generate_series (flat Int64Array → 1 col `n`).
+    if let Some(out) = rewrite_one_udf_in_from(body, "generate_series", "u(n)") {
+        return out;
+    }
+    // Then generate_events (Struct<user_id, ts> → 2 cols).
+    if let Some(out) = rewrite_one_udf_in_from(body, "generate_events", "t(user_id, ts)") {
+        return out;
+    }
+    body.to_string()
+}
+
+/// Rewrite `FROM <udf_name>(...)` to
+/// `FROM UNNEST(<udf_name>(...)) AS <alias>` if the marker is
+/// present. Returns `Some(rewritten)` on a hit, `None` if the
+/// marker is absent (so the caller can try the next UDF). Returns
+/// `None` if the marker is present but the call is malformed (no
+/// closing `)`); the caller will leave the body alone so DataFusion
+/// can surface a clear parse error.
+///
+/// Paren balance: the output is
+///   `UNNEST(` + `<udf_name>(` + `<args>)` + `) AS <alias>` + tail
+/// which yields
+///   `UNNEST(<udf_name>(<args>)) AS <alias>`
+/// (2 opens from `UNNEST(` and `<udf_name>(`, 2 closes from the
+/// `<args>)` slice and the explicit `)` before `AS`; the alias
+/// string is text and any parens inside it must be balanced by
+/// the caller, e.g. `u(n)` or `t(user_id, ts)`).
+///
+/// The original `rewrite_generate_series_in_from` produced exactly
+/// this shape: the body slice `<args>)` provides the UDF's closing
+/// paren, and the literal `") AS "` adds UNNEST's closing paren
+/// followed by `AS ` and the alias text.
+fn rewrite_one_udf_in_from(body: &str, udf_name: &str, alias: &str) -> Option<String> {
+    let marker = format!("FROM {udf_name}(");
+    let start = body.find(&marker)?;
     let after_open = start + marker.len();
-    // Find the matching `)` for the `generate_series(` call.
-    let close = match body[after_open..].find(')') {
-        Some(p) => after_open + p,
-        None => return body.to_string(),
-    };
-    let mut out = String::with_capacity(body.len() + 24);
+    // Find the matching `)` for the UDF call. The MVP assumes
+    // the call has no nested parens (true for both
+    // `generate_series` and `generate_events` — they take
+    // Int64 args only). If the close paren is missing, return
+    // `None` so the body is passed through unchanged and
+    // DataFusion can surface a clear parse error.
+    let close_rel = body[after_open..].find(')')?;
+    let close = after_open + close_rel;
+    let mut out = String::with_capacity(body.len() + 32);
     out.push_str(&body[..start]);
-    out.push_str("FROM UNNEST(generate_series(");
-    out.push_str(&body[after_open..=close]);
-    out.push_str(") AS u(n)");
+    out.push_str("FROM UNNEST(");
+    out.push_str(udf_name);
+    out.push('(');
+    out.push_str(&body[after_open..=close]); // includes original `)`
+    out.push_str(") AS ");
+    out.push_str(alias);
     out.push_str(&body[close + 1..]);
-    out
+    Some(out)
 }
 
 /// Substitute every word-boundary occurrence of `name` in `sql`
@@ -1547,9 +1594,9 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_generate_series_in_from_inserts_unnest() {
+    fn rewrite_test_fixtures_in_from_handles_generate_series() {
         let body = "SELECT n FROM generate_series(1, 10)";
-        let out = rewrite_generate_series_in_from(body);
+        let out = rewrite_test_fixtures_in_from(body);
         assert_eq!(
             out,
             "SELECT n FROM UNNEST(generate_series(1, 10)) AS u(n)"
@@ -1557,10 +1604,56 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_generate_series_in_from_no_op_when_no_marker() {
+    fn rewrite_test_fixtures_in_from_handles_generate_events() {
+        // S41 (9c-d): generate_events returns a Struct<user_id, ts>;
+        // UNNEST exposes the fields as columns named via the alias
+        // `t(user_id, ts)`. The SQL references `user_id` and `ts`
+        // unqualified in the SELECT, which DataFusion resolves from
+        // the alias columns.
+        let body = "SELECT user_id, ts FROM generate_events(0, 1000, 42)";
+        let out = rewrite_test_fixtures_in_from(body);
+        assert_eq!(
+            out,
+            "SELECT user_id, ts FROM UNNEST(generate_events(0, 1000, 42)) AS t(user_id, ts)"
+        );
+    }
+
+    #[test]
+    fn rewrite_test_fixtures_in_from_no_op_when_no_marker() {
         let body = "SELECT 1";
-        let out = rewrite_generate_series_in_from(body);
+        let out = rewrite_test_fixtures_in_from(body);
         assert_eq!(out, "SELECT 1");
+    }
+
+    #[test]
+    fn rewrite_test_fixtures_in_from_passes_through_malformed_call() {
+        // No closing `)` — the body is left alone so DataFusion
+        // can surface a clear parse error.
+        let body = "SELECT n FROM generate_series(1, 10";
+        let out = rewrite_test_fixtures_in_from(body);
+        assert_eq!(out, body);
+    }
+
+    #[test]
+    fn strip_create_source_rewrites_generate_events() {
+        // S41 (9c-d) regression: the preprocessor must auto-UNNEST
+        // generate_events in a CREATE SOURCE body so the SQL can
+        // use it as a `FROM` source (DataFusion 50 cannot UNNEST a
+        // scalar UDF's struct result without help).
+        let sql = "\
+            CREATE SOURCE clicks AS \
+            SELECT user_id, ts FROM generate_events(0, 1000, 42);\
+            EMIT INTO console SELECT * FROM clicks;";
+        let (_defs, cleaned) = strip_create_source_and_view(sql);
+        assert!(!cleaned.contains("CREATE SOURCE"), "cleaned: {cleaned}");
+        // The `clicks` body should have the UNNEST rewrite applied,
+        // and the downstream SELECT should pick up the subquery.
+        assert!(
+            cleaned.contains(
+                "FROM (SELECT user_id, ts FROM UNNEST(generate_events(0, 1000, 42)) AS t(user_id, ts)) AS clicks"
+            ),
+            "cleaned: {cleaned}"
+        );
     }
 
     #[test]
