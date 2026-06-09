@@ -20,11 +20,12 @@ The script pre-builds the perf-fib plugin + the bee binary (release
 mode), then runs all 3 demos and prints a measured performance table.
 
 The prime sieve has a **hard correctness check**: the output must be
-`count = 12779448`. This is NOT the true prime count ≤ 10^8 (which is
-5,761,455; see the `prime_sieve.sql` header for the math explanation).
-20 sieving phases is too few for a full Eratosthenes sieve; 1229
-primes ≤ sqrt(10^8) = 10000 would be needed. The S41 MVP uses 20
-phases and accepts the actual count as the correctness check.
+`n_primes = 5761455` (the true prime count ≤ 10^8). The sieve uses
+**1229 phases** (full Eratosthenes — every prime ≤ sqrt(10^8) = 10000),
+producing a ~1200-layer-deep pipeline that takes 5-15 minutes on a
+single Node. For N-node mode, the runtime scheduler distributes
+phases across Nodes (Work-Stealing) and wall-clock decreases roughly
+linearly with N.
 
 ## Why these 3 demos
 
@@ -35,7 +36,7 @@ phases and accepts the actual count as the correctness check.
 
 - **Prime sieve**: the canonical distributed-scheduling problem.
   Each sieve pass is a self-contained filter that can run in
-  parallel on different Nodes. For 1-node mode, all 20 Phases
+  parallel on different Nodes. For 1-node mode, all 1229 Phases
   run in-process; for N-node mode (future), the runtime scheduler
   places them on different Nodes.
 
