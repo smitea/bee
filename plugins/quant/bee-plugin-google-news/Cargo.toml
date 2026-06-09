@@ -4,18 +4,29 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "Bee 量化交易参考实现:实时新闻流 InputAdapter。Plugin 结构是 production-grade;实际数据源是合成新闻占位。"
+description = "Bee production-grade NewsAPI adapter (S35): real HTTP polling + rate limiting + Stream identity"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 bee-plugin-sdk = { path = "../../../crates/bee-plugin-sdk" }
-bee-adapter = { path = "../../../crates/bee-adapter" }
-tokio = { workspace = true }
-thiserror = "2"
-bincode = "1"
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bincode = "1"
+sha2 = "0.10"
+hex = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "2"
+log = "0.4"
+futures = "0.3"
+urlencoding = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
+mockito = "1"
 
 [lints]
 workspace = true
