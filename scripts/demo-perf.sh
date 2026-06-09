@@ -37,17 +37,17 @@ FIB_TPUT=$(( 1000000 * 1000000000 / (T1 - T0) ))
 
 # 2. Demo 2: prime sieve
 echo ""
-echo "==== Demo 2: Prime sieve (≤ 10^8, 20 sieving phases) ===="
+echo "==== Demo 2: Prime sieve (≤ 10^8, 1229 sieving phases — full Eratosthenes) ===="
 T0=$(date +%s%N)
 PRIME_OUTPUT=$($BEE run examples/performance/prime_sieve.sql 2>&1)
 T1=$(date +%s%N)
 SIEVE_MS=$(( (T1 - T0) / 1000000 ))
 echo "$PRIME_OUTPUT" | tail -5
 
-# Hard correctness check: with 20 phases, the count is 12,779,448
-# (not the true prime count of 5,761,455; see SQL header comment for math).
-EXPECTED_COUNT=12779448
-N=$(echo "$PRIME_OUTPUT" | grep -oE 'count=[0-9]+' | tail -1 | cut -d= -f2)
+# Hard correctness check: with 1229 phases, the count is the true prime count
+# of 5,761,455 (primes ≤ 10^8). See SQL header comment for the math.
+EXPECTED_COUNT=5761455
+N=$(echo "$PRIME_OUTPUT" | grep -oE 'n_primes=[0-9]+' | tail -1 | cut -d= -f2)
 if [ -z "$N" ]; then
     echo "FAIL: count not found in output"
     exit 1
