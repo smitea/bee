@@ -11,6 +11,7 @@ pub mod asof;
 mod compile;
 mod handlers;
 mod physical;
+pub mod plugin_loader;
 pub mod preprocess;
 pub mod sinks;
 mod udfs;

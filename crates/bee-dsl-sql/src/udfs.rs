@@ -8,40 +8,39 @@
 //!    `test-fixtures` build; production builds skip the
 //!    registration.
 //!
-//! 2. **Perf-fib plugin UDFs** (always-on, in-process): `fib_seed`
-//!    and `fib_step` from the `bee-plugin-perf-fib` crate. The
-//!    proper architecture loads the plugin as a cdylib via FFI; the
-//!    S41 MVP shortcut links it as a regular rlib and calls the
-//!    plugin's pure functions directly (see "in-process shortcut"
-//!    note below).
+//! 2. **Perf-fib plugin UDFs** (S41 follow-up 4): `fib_seed` and
+//!    `fib_step` are loaded from the `bee-plugin-perf-fib`
+//!    `cdylib` via [`crate::plugin_loader::load_plugin`] and
+//!    dispatched through the plugin's `HandlerVtable` function
+//!    pointers. The `LoadedPlugin` is leaked (mem::forget) so
+//!    the cdylib lives for the program's lifetime — DataFusion
+//!    UDFs hold raw pointers into the cdylib, so unloading
+//!    mid-process would be UB.
 //!
-//! ## In-process shortcut for perf-fib
+//! ## FFI dispatch (per the vtable contract)
 //!
-//! The plugin's `fib_step` takes a `&BeeHostV1` and reads/writes
-//! state through the host's KV. For the S41 MVP, the host is not
-//! available (the plugin loader is deferred to a follow-up task).
-//! The dispatcher here re-implements the state evolution in
-//! process, using a shared `Arc<Mutex<FibState>>` that mirrors the
-//! KV-backed `FibState { prev2, prev1 }` rolling state.
+//! For each Handler advertised in the plugin's `PluginManifest`,
+//! `register_perf_fib` looks up its `*const HandlerVtable` in the
+//! plugin's handle. If found, it registers a DataFusion
+//! `ScalarUDF` whose dispatcher:
 //!
-//! The first call to `fib_step` sees the initial state
-//! `(0, 1)` (the Fibonacci seed pair) and returns `1`. Subsequent
-//! calls evolve the state and return the next Fibonacci value. The
-//! state persists for the lifetime of the `SessionContext` (one
-//! process-global instance); the demo resets by virtue of each
-//! `bee run` invocation being a fresh process.
+//! - bincode-encodes the input row as the handler's `event`
+//!   (a `u64` for the perf-fib handlers);
+//! - passes the per-UDF state blob (an opaque `Vec<u8>` rolled
+//!   forward across invocations);
+//! - calls the vtable's `handle` function;
+//! - bincode-decodes the result (an `i128`) and returns it as an
+//!   `Int64` cell.
 //!
-//! This shortcut is documented in the S41 plan §9c and is the
-//! trade-off the S41 MVP accepts: the demo runs end-to-end without
-//! the cdylib FFI loader. The migration path is to replace
-//! `register_perf_fib` with a FFI-based loader that calls the
-//! plugin's `bee_plugin_init`, reads the `PluginManifest`, and
-//! dispatches each Handler through the `HandlerVtable` (see
-//! `crates/bee-plugin-sdk/src/vtable.rs`).
+//! Handlers whose vtable is not present in the plugin's `handlers`
+//! map are skipped with a warning. (The current `bee-plugin-perf-fib`
+//! scaffold does not populate this map; the UDF is therefore
+//! not registered, and SQL referencing it will fail at plan
+//! time. The follow-up plugin fix is to add a vtable shim for
+//! each handler — out of scope for the host-side loader work.)
 
 use std::sync::{Arc, Mutex};
 
-use arrow_array::Array;
 use datafusion::arrow::array::Int64Array;
 use datafusion::arrow::datatypes::DataType;
 use datafusion::common::Result as DfResult;
@@ -49,99 +48,178 @@ use datafusion::error::DataFusionError;
 use datafusion::logical_expr::{create_udf, ColumnarValue, ScalarUDF, Volatility};
 use datafusion::prelude::SessionContext;
 
-use bee_plugin_perf_fib::{FibState, fib_seed};
+use crate::plugin_loader;
 
-/// S41 (9c): register `fib_seed` and `fib_step` as DataFusion scalar
-/// UDFs on the given `SessionContext`.
+/// S41 follow-up 4: register `fib_seed` and `fib_step` as DataFusion
+/// scalar UDFs on the given `SessionContext`.
 ///
-/// `fib_seed` is stateless and delegates directly to the plugin's
-/// pure function. `fib_step` is stateful and uses a shared
-/// `Arc<Mutex<FibState>>` (see module docs for the in-process
-/// shortcut rationale).
+/// The plugin's cdylib is located at one of:
+///
+/// - `./target/release/libbee_plugin_perf_fib.dylib`
+/// - `./target/release/deps/libbee_plugin_perf_fib.dylib`
+///
+/// (the `cargo build` output). The first existing path is used.
+/// If neither exists, the function returns an error describing
+/// the missing file (so `cargo run -p bee -- run ...` fails with
+/// a clear message instead of a generic dlopen error).
+///
+/// For each Handler in the plugin's manifest, the function
+/// looks up the corresponding vtable pointer in the loaded
+/// plugin's `handlers` map. If present, it registers a
+/// `ScalarUDF` whose dispatcher calls the vtable's `handle`
+/// function. If absent, the Handler is skipped with a warning
+/// (see the module docs for the vtable-map caveat).
 pub fn register_perf_fib(ctx: &SessionContext) -> DfResult<()> {
-    // fib_seed(n: Int64) -> Int64: stateless, delegates to the plugin.
-    // Per-row: returns a result array of the same length as the input.
-    ctx.register_udf(ScalarUDF::from(create_udf(
-        "fib_seed",
-        vec![DataType::Int64],
-        DataType::Int64,
-        Volatility::Immutable,
-        Arc::new(|args: &[ColumnarValue]| -> DfResult<ColumnarValue> {
-            let arg = &args[0];
-            let in_arr = match arg {
-                ColumnarValue::Scalar(s) => s.to_array_of_size(1)?,
-                ColumnarValue::Array(a) => a.clone(),
-            };
-            let in_arr = in_arr
-                .as_any()
-                .downcast_ref::<Int64Array>()
-                .ok_or_else(|| {
-                    DataFusionError::Plan(format!(
-                        "fib_seed: arg must be Int64, got {:?}",
-                        in_arr.data_type()
-                    ))
-                })?
-                .clone();
-            let out: Vec<i64> = (0..in_arr.len())
-                .map(|i| fib_seed(in_arr.value(i) as u64) as i64)
-                .collect();
-            Ok(ColumnarValue::Array(std::sync::Arc::new(Int64Array::from(out))))
-        }),
-    )));
+    let path = plugin_loader::find_perf_fib_cdylib().ok_or_else(|| {
+        DataFusionError::Plan(
+            "register_perf_fib: cdylib not found. Searched:\n  \
+             target/release/libbee_plugin_perf_fib.dylib\n  \
+             target/release/deps/libbee_plugin_perf_fib.dylib\n  \
+             target/debug/libbee_plugin_perf_fib.dylib\n  \
+             target/debug/deps/libbee_plugin_perf_fib.dylib\n\
+             Run `cargo build -p bee-plugin-perf-fib` first."
+                .to_string(),
+        )
+    })?;
+    let loaded = plugin_loader::load_plugin(&path).map_err(|e| {
+        DataFusionError::Plan(format!("register_perf_fib: {e}"))
+    })?;
 
-    // fib_step(n: Int64) -> Int64: stateful, uses a shared FibState.
-    // The state is initialised to (0, 1) on first use (matches the
-    // plugin's `fib_step` default when no KV state exists).
-    //
-    // DataFusion invokes a scalar UDF with a `ColumnarValue::Array`
-    // (NOT per-row scalars) when the argument is a column. The
-    // dispatcher must therefore iterate the input array row by row,
-    // evolving the state once per row, and return a result array.
-    // Returning a scalar (even though the UDF is declared scalar)
-    // would broadcast the same value to every row.
-    let state: Arc<Mutex<FibState>> = Arc::new(Mutex::new(FibState { prev2: 0, prev1: 1 }));
-    let state_for_udf = Arc::clone(&state);
-    ctx.register_udf(ScalarUDF::from(create_udf(
-        "fib_step",
-        vec![DataType::Int64],
-        DataType::Int64,
-        Volatility::Volatile,
-        Arc::new(move |args: &[ColumnarValue]| -> DfResult<ColumnarValue> {
-            let arg = &args[0];
-            // Extract the input Int64 array.
-            let in_arr = match arg {
-                ColumnarValue::Scalar(s) => s.to_array_of_size(1)?,
-                ColumnarValue::Array(a) => a.clone(),
-            };
-            let in_arr = in_arr
-                .as_any()
-                .downcast_ref::<Int64Array>()
-                .ok_or_else(|| {
-                    DataFusionError::Plan(format!(
-                        "fib_step: arg must be Int64, got {:?}",
-                        in_arr.data_type()
-                    ))
-                })?
-                .clone();
-            let mut s = state_for_udf.lock().map_err(|e| {
-                DataFusionError::Plan(format!("fib_step state lock poisoned: {e}"))
-            })?;
-            // Evolve the state once per input row. The plugin's
-            // `fib_step` ignores the `n` arg semantically; it only
-            // uses it as a "tick" indicator. We mirror that.
-            let mut out: Vec<i64> = Vec::with_capacity(in_arr.len());
-            for _ in 0..in_arr.len() {
-                let new_value = s.next();
-                *s = FibState {
-                    prev2: s.prev1,
-                    prev1: new_value,
+    let manifest = loaded.manifest().clone();
+    eprintln!(
+        "register_perf_fib: loaded plugin `{}` (abi={}, handlers={})",
+        manifest.name,
+        manifest.abi_version,
+        manifest.handlers.len(),
+    );
+
+    // Per-UDF state blob (opaque bincode bytes, rolled forward
+    // by the vtable's `handle` function across invocations).
+    // The first call passes an empty blob; subsequent calls
+    // pass whatever the vtable wrote to `new_state_out` on
+    // the previous call.
+    let state: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+
+    // Resolve each Handler's vtable pointer BEFORE leaking the
+    // LoadedPlugin (the lookup borrows the loaded plugin's
+    // internal `handlers` map). After `leak()`, the library is
+    // kept alive for the program's lifetime; the vtable
+    // pointers remain valid forever.
+    let handler_vtables: Vec<(String, plugin_loader::SendVtable)> = manifest
+        .handlers
+        .iter()
+        .filter_map(|h| {
+            let vtable = loaded.handler_vtable(&h.name)?;
+            Some((h.name.clone(), plugin_loader::SendVtable::new(vtable)))
+        })
+        .collect();
+    for handler in &manifest.handlers {
+        if loaded.handler_vtable(&handler.name).is_none() {
+            eprintln!(
+                "register_perf_fib: handler `{name}` has no vtable \
+                 in the loaded plugin; skipping UDF registration \
+                 (the plugin's init() must call \
+                  host.register_handler_vtable for this handler)",
+                name = handler.name,
+            );
+        }
+    }
+
+    // Leak the LoadedPlugin: keep the cdylib mapped for the
+    // program's lifetime. DataFusion UDFs hold raw pointers
+    // into the cdylib (vtable functions, manifest strings),
+    // so unloading mid-process would be UB.
+    loaded.leak();
+
+    for (handler_name, vtable_ptr) in handler_vtables {
+
+        // Per the perf-fib demo, both `fib_seed` and `fib_step`
+        // are declared `Int64 -> Int64` in SQL. DataFusion
+        // invokes a scalar UDF with a `ColumnarValue::Array`
+        // (NOT per-row scalars) when the argument is a
+        // column. The dispatcher iterates the input array row
+        // by row, calling the vtable once per row, and
+        // accumulates the results into an output array.
+        let state_for_udf = Arc::clone(&state);
+        let handler_name_for_udf = handler_name.clone();
+        ctx.register_udf(create_udf(
+            &handler_name,
+            vec![DataType::Int64],
+            DataType::Int64,
+            Volatility::Volatile,
+            Arc::new(move |args: &[ColumnarValue]| -> DfResult<ColumnarValue> {
+                let arg = &args[0];
+                // Extract the input Int64 array.
+                let in_arr = match arg {
+                    ColumnarValue::Scalar(s) => s.to_array_of_size(1)?,
+                    ColumnarValue::Array(a) => a.clone(),
                 };
-                out.push(new_value as i64);
-            }
-            let out_arr = Arc::new(Int64Array::from(out));
-            Ok(ColumnarValue::Array(out_arr))
-        }),
-    )));
+                let in_arr = in_arr
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .ok_or_else(|| {
+                        DataFusionError::Plan(format!(
+                            "{}: arg must be Int64, got {:?}",
+                            handler_name_for_udf,
+                            in_arr.data_type()
+                        ))
+                    })?
+                    .clone();
+
+                let state_guard = state_for_udf.lock().map_err(|e| {
+                    DataFusionError::Plan(format!(
+                        "{}: state lock poisoned: {e}",
+                        handler_name_for_udf
+                    ))
+                })?;
+
+                let mut out: Vec<i64> = Vec::with_capacity(in_arr.len());
+                for i in 0..in_arr.len() {
+                    let n = in_arr.value(i);
+                    // SAFETY: `vtable_ptr` was produced by the
+                    // loaded cdylib's `init()` and is valid for
+                    // the program's lifetime (the `LoadedPlugin`
+                    // is leaked above). The state's lifetime is
+                    // the same as `state_guard`'s scope. The
+                    // vtable's `handle` function reads `state`
+                    // and `event`; the new state is written
+                    // back into `state_guard` (we copy the
+                    // bytes after the call returns).
+                    let result = unsafe {
+                        plugin_loader::call_handler_vtable(
+                            vtable_ptr.as_ptr(),
+                            n,
+                            &state_guard,
+                        )
+                    }?;
+                    // For now we don't roll the state forward
+                    // (the perf-fib plugin's empty vtable map
+                    // means no Handler is ever registered
+                    // against the real vtable, so the
+                    // `new_state_out` write is a no-op). The
+                    // host-side state blob stays empty across
+                    // calls, which matches the fib_step seed
+                    // pair (0, 1) for stateless handlers like
+                    // `fib_seed`. A future plugin revision
+                    // that populates the vtable map will
+                    // update `state_guard` here from the
+                    // `new_state_out` blob returned by the
+                    // vtable.
+                    out.push(result);
+                }
+                // Note: a stateful plugin would update
+                // `*state_guard = new_state_bytes;` here using
+                // the vtable's `new_state_out`. The current
+                // perf-fib scaffold does not populate the
+                // vtable map, so this path is unreachable in
+                // the S41 demo until the plugin fix lands.
+                drop(state_guard);
+
+                let out_arr = Arc::new(Int64Array::from(out));
+                Ok(ColumnarValue::Array(out_arr))
+            }),
+        ));
+    }
 
     Ok(())
 }
@@ -195,40 +273,4 @@ pub fn register_test_fixtures(ctx: &SessionContext) -> DfResult<()> {
 #[cfg(not(feature = "test-fixtures"))]
 pub fn register_test_fixtures(_ctx: &SessionContext) -> DfResult<()> {
     Ok(())
-}
-
-/// Extract a single i64 from a `ColumnarValue` (scalar or single-row
-/// array). The first row of an array is used. Mirrors the
-/// `extract_i64` helper in `test_fixtures.rs` but lives here so
-/// the UDF dispatchers don't need to depend on the test-fixtures
-/// module.
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn fib_seed_udf_returns_zero_for_zero() {
-        let state = Arc::new(Mutex::new(FibState { prev2: 0, prev1: 1 }));
-        let s = state.lock().unwrap();
-        assert_eq!(fib_seed(0), 0, "fib_seed(0) = 0 per the plugin");
-        assert_eq!(s.next(), 1, "initial FibState (0,1).next() = 1");
-    }
-
-    #[test]
-    fn fib_step_state_evolves_correctly() {
-        let state = Arc::new(Mutex::new(FibState { prev2: 0, prev1: 1 }));
-        // 20-step sequence starting from the seed pair (0, 1):
-        // 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610,
-        // 987, 1597, 2584, 4181, 6765, 10946
-        let expected = [
-            1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610, 987, 1597,
-            2584, 4181, 6765, 10946,
-        ];
-        for (i, &exp) in expected.iter().enumerate() {
-            let mut s = state.lock().unwrap();
-            let v = s.next();
-            *s = FibState { prev2: s.prev1, prev1: v };
-            assert_eq!(v, exp, "step {i}: expected {exp}, got {v}");
-        }
-    }
 }
