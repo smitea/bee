@@ -27,6 +27,7 @@
 //! at-least-once semantics are not in S36 scope).
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -54,6 +55,10 @@ pub struct WriteCtx {
     /// "Flush now" signal. The worker `notified().await` polls
     /// this in parallel with the time interval.
     flush_notify: Arc<Notify>,
+    /// Shutdown flag. `drop()` sets this so the worker can exit
+    /// its loop after the final flush, instead of waiting up to
+    /// `flush_interval_ms` for the next tick.
+    shutdown: Arc<AtomicBool>,
     /// Worker thread handle; dropping the ctx signals the
     /// worker to do a final flush + exit.
     worker: Option<std::thread::JoinHandle<()>>,
@@ -105,6 +110,7 @@ impl WriteCtx {
 
         let batch: Arc<Mutex<Vec<LineProtocolRow>>> = Arc::new(Mutex::new(Vec::new()));
         let flush_notify = Arc::new(Notify::new());
+        let shutdown = Arc::new(AtomicBool::new(false));
 
         let runtime = Arc::new(
             tokio::runtime::Builder::new_multi_thread()
@@ -116,6 +122,7 @@ impl WriteCtx {
 
         let worker_batch = Arc::clone(&batch);
         let worker_notify = Arc::clone(&flush_notify);
+        let worker_shutdown = Arc::clone(&shutdown);
         let worker_bucket = effective_bucket.clone();
         let worker_runtime = Arc::clone(&runtime);
         let worker_handle = std::thread::Builder::new()
@@ -129,6 +136,7 @@ impl WriteCtx {
                     },
                     worker_batch,
                     worker_notify,
+                    worker_shutdown,
                 ));
             })
             .map_err(|e| InfluxdbError::Runtime(format!("spawn worker: {e}")))?;
@@ -136,6 +144,7 @@ impl WriteCtx {
         Ok(Self {
             batch,
             flush_notify,
+            shutdown,
             worker: Some(worker_handle),
             runtime: Some(runtime),
             args,
@@ -172,15 +181,16 @@ impl WriteCtx {
 
 impl Drop for WriteCtx {
     fn drop(&mut self) {
-        // 1. Drop the worker-side runtime first: any in-flight
-        //    `block_on` on the worker thread (there isn't one in
-        //    our design — the worker is in `block_on(async)`) is
-        //    unaffected, but we drop the runtime handle so the
-        //    OS thread is freed when the worker finishes.
-        // 2. Notify the worker to do a final flush.
-        // 3. Join the worker thread so the final flush completes
+        // 1. Notify the worker to do a final flush.
+        // 2. Set the shutdown flag so the worker exits its loop
+        //    after the final flush (instead of waiting up to
+        //    `flush_interval_ms` for the next tick).
+        // 3. Drop the worker-side runtime so the OS thread is
+        //    freed when the worker finishes.
+        // 4. Join the worker thread so the final flush completes
         //    before the ctx is fully dropped.
         self.flush_notify.notify_one();
+        self.shutdown.store(true, Ordering::SeqCst);
         self.runtime = None;
         if let Some(handle) = self.worker.take() {
             let _ = handle.join();
@@ -211,6 +221,7 @@ async fn flush_loop(
     cfg: FlushConfig,
     batch: Arc<Mutex<Vec<LineProtocolRow>>>,
     flush_notify: Arc<Notify>,
+    shutdown: Arc<AtomicBool>,
 ) {
     let limiter = RateLimiter::new(cfg.http_config.rate_limit_per_sec);
     let client = match reqwest::Client::builder()
@@ -229,74 +240,88 @@ async fn flush_loop(
         urlencoding(&cfg.http_config.org),
         urlencoding(&cfg.bucket),
     );
-    let mut interval = tokio::time::interval(Duration::from_millis(
-        cfg.http_config.flush_interval_ms,
-    ));
+    let mut interval =
+        tokio::time::interval(Duration::from_millis(cfg.http_config.flush_interval_ms));
     // The first tick fires immediately; we don't want an empty
     // flush at t=0, so skip it.
     interval.tick().await;
 
     loop {
+        // Wait for a flush signal or a tick.
         tokio::select! {
             _ = interval.tick() => {}
             _ = flush_notify.notified() => {}
         }
-        // Drain the buffer.
-        let rows: Vec<LineProtocolRow> = {
-            let mut b = batch.lock().expect("batch poisoned");
-            std::mem::take(&mut *b)
-        };
-        if rows.is_empty() {
-            // Nothing to do; loop back to wait.
-            continue;
-        }
-        limiter.wait().await;
-        let body = rows
-            .iter()
-            .map(encode_line_protocol)
-            .collect::<Vec<_>>()
-            .join("\n");
-        let line_count = rows.len();
-        let byte_count = body.len();
-        let result = client
-            .post(&url)
-            .header("Authorization", format!("Token {}", cfg.http_config.token))
-            .header("Content-Type", "text/plain; charset=utf-8")
-            .header("Accept", "application/json")
-            .body(body)
-            .send()
-            .await;
-        match result {
-            Ok(resp) => {
-                let status = resp.status();
-                if !status.is_success() {
-                    // Read the error body for logging, but do NOT
-                    // include the token (the token is in the
-                    // Authorization header, not the body).
-                    let body_preview = resp
-                        .text()
-                        .await
-                        .unwrap_or_default()
-                        .chars()
-                        .take(512)
-                        .collect::<String>();
+        // Drain the buffer in a tight loop. The producer may
+        // outpace the worker (each `append` is in-memory; the
+        // POST is a network round-trip), so by the time the
+        // worker is ready to drain, the buffer can hold more
+        // than `max_batch_size` rows. POST all of them as one
+        // logical batch to keep the number of HTTP calls down
+        // (per the S36 spec criterion: "1000-row burst flushes
+        // in <= 2 batches").
+        loop {
+            let rows: Vec<LineProtocolRow> = {
+                let mut b = batch.lock().expect("batch poisoned");
+                if b.is_empty() {
+                    break;
+                }
+                std::mem::take(&mut *b)
+            };
+            limiter.wait().await;
+            let body = rows
+                .iter()
+                .map(encode_line_protocol)
+                .collect::<Vec<_>>()
+                .join("\n");
+            let line_count = rows.len();
+            let byte_count = body.len();
+            let result = client
+                .post(&url)
+                .header("Authorization", format!("Token {}", cfg.http_config.token))
+                .header("Content-Type", "text/plain; charset=utf-8")
+                .header("Accept", "application/json")
+                .body(body)
+                .send()
+                .await;
+            match result {
+                Ok(resp) => {
+                    let status = resp.status();
+                    if !status.is_success() {
+                        // Read the error body for logging, but do NOT
+                        // include the token (the token is in the
+                        // Authorization header, not the body).
+                        let body_preview = resp
+                            .text()
+                            .await
+                            .unwrap_or_default()
+                            .chars()
+                            .take(512)
+                            .collect::<String>();
+                        log::warn!(
+                            "influxdb: POST /api/v2/write failed: status={status} \
+                             lines={line_count} bytes={byte_count} body={body_preview:?}"
+                        );
+                    } else {
+                        log::debug!(
+                            "influxdb: POST /api/v2/write ok: status={status} \
+                             lines={line_count} bytes={byte_count}"
+                        );
+                    }
+                }
+                Err(e) => {
                     log::warn!(
-                        "influxdb: POST /api/v2/write failed: status={status} \
-                         lines={line_count} bytes={byte_count} body={body_preview:?}"
-                    );
-                } else {
-                    log::debug!(
-                        "influxdb: POST /api/v2/write ok: status={status} \
+                        "influxdb: POST /api/v2/write transport error: {e} \
                          lines={line_count} bytes={byte_count}"
                     );
                 }
             }
-            Err(e) => {
-                log::warn!(
-                    "influxdb: POST /api/v2/write transport error: {e} \
-                     lines={line_count} bytes={byte_count}"
-                );
-            }
+        }
+        // After draining, check whether the ctx is being dropped.
+        // If so, exit the loop. This guarantees every queued row
+        // is POSTed before the worker thread terminates.
+        if shutdown.load(Ordering::SeqCst) {
+            return;
         }
     }
 }
@@ -325,11 +350,17 @@ fn urlencoding(s: &str) -> String {
 /// Decode the event's `payload` (bincode-encoded `HashMap<String,
 /// JsonValue>`) into a `LineProtocolRow`.
 ///
-/// The event's payload is expected to be a `HashMap<String,
-/// serde_json::Value>` (bincode-encoded). The plugin then
-/// extracts the `timestamp_col` for the timestamp, the
-/// `tag_cols` for tags, and either the `field_cols` or the
+/// The event's payload is expected to be a JSON-encoded
+/// `HashMap<String, serde_json::Value>` (UTF-8 bytes). The
+/// plugin then extracts the `timestamp_col` for the timestamp,
+/// the `tag_cols` for tags, and either the `field_cols` or the
 /// remaining numeric values for fields.
+///
+/// (We use `serde_json` rather than `bincode` for the payload
+/// because `serde_json::Value` requires `deserialize_any`, which
+/// `bincode` 1.x does not implement. JSON also matches the
+/// InfluxDB v2 line-protocol conventions: numbers, strings,
+/// booleans all have natural JSON representations.)
 fn row_from_event(
     event: &Event,
     args: &WriteArgs,
@@ -337,11 +368,12 @@ fn row_from_event(
     timestamp_col: &str,
     field_cols: Option<&[String]>,
 ) -> Result<LineProtocolRow, InfluxdbError> {
-    // Decode the payload as `HashMap<String, JsonValue>`. If
+    // Decode the payload as a `HashMap<String, JsonValue>`. If
     // that fails, the event is malformed and we surface an
     // error.
-    let map: HashMap<String, JsonValue> = bincode::deserialize(&event.payload)
-        .map_err(|e| InfluxdbError::Payload(format!("expected bincode HashMap<String, JsonValue>: {e}")))?;
+    let map: HashMap<String, JsonValue> = serde_json::from_slice(&event.payload).map_err(|e| {
+        InfluxdbError::Payload(format!("expected JSON HashMap<String, JsonValue>: {e}"))
+    })?;
 
     let timestamp_ns = extract_timestamp(&map, timestamp_col, event.timestamp)?;
     let mut row = LineProtocolRow::new(&args.measurement, timestamp_ns);
@@ -466,6 +498,9 @@ fn json_to_field_value(v: &JsonValue) -> String {
         JsonValue::Bool(b) => b.to_string(),
         JsonValue::String(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
         JsonValue::Null => "\"\"".to_string(),
-        other => format!("\"{}\"", other.to_string().replace('\\', "\\\\").replace('"', "\\\"")),
+        other => format!(
+            "\"{}\"",
+            other.to_string().replace('\\', "\\\\").replace('"', "\\\"")
+        ),
     }
 }
