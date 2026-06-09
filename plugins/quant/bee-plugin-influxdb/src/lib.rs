@@ -1,241 +1,280 @@
-//! `bee-plugin-influxdb` — production-grade reference implementation.
+//! `bee-plugin-influxdb` — production-grade InfluxDB v2 adapter (S36).
 //!
-//! Implements the `influxdb_emit` Output Adapter. Writes each
-//! event to a local append-only log file (default
-//! `/tmp/bee_demo_influxdb.log`) in line-protocol-ish text so a
-//! downstream MACD / EMA Pipeline can be observed end-to-end
-//! without an actual InfluxDB instance. Plugin scaffold is
-//! production-grade (cdylib + FFI vtable); the actual sink is a
-//! log-file placeholder that will be replaced by the real
-//! InfluxDB v2 line-protocol client in S36.
+//! Implements two adapters against a real InfluxDB v2 instance:
+//!
+//! - `influxdb_write` (Output): `POST /api/v2/write?org=...&bucket=...`
+//!   in the v2 line protocol. Events are batched in a thread-safe
+//!   buffer and flushed by a background task on either a size
+//!   threshold (default 500 lines) or a time threshold (default
+//!   1s), whichever comes first. Each successful flush updates a
+//!   `WriteResult` that the runtime can read for observability.
+//! - `influxdb_query` (Input): `POST /api/v2/query?org=...` with a
+//!   Flux query string. A background task polls the query at a
+//!   configurable cadence (default 60s) and pushes each row into an
+//!   mpsc; `next()` blocks on the channel.
 //!
 //! ## Architecture
 //!
-//! - [`Factory`]: produces the [`bee_plugin_sdk::PluginManifest`]
-//!   + [`bee_plugin_sdk::PluginHandle`] for the host.
-//! - [`InfluxOutput`]: the actual [`bee_adapter::OutputAdapter`]
-//!   implementation. `open` creates/opens the log file in append
-//!   mode; `emit` appends one line per event; `close` flushes the
-//!   buffered writer and drops the file handle.
-//! - `cdylib_plugin!(Factory)` invocation at the bottom generates
-//!   the FFI entry symbols.
+//! - [`InfluxFactory`]: the `cdylib_plugin!(Factory)` entrypoint.
+//!   `init()` registers two vtables in the [`PluginHandle`]: the
+//!   `write` Output vtable and the `query` Input vtable.
+//! - [`write::WriteCtx`]: the FFI ctx for the Output adapter. Owns
+//!   the batch buffer, the HTTP client, and a worker thread that
+//!   drives the time-based flush.
+//! - [`query::QueryCtx`]: the FFI ctx for the Input adapter. Owns
+//!   the mpsc receiver and a worker thread that runs the polling
+//!   loop.
 //!
-//! The placeholder is a **sink**: events go in, lines on disk
-//! come out. No background task — `emit` is called by the host's
-//! dataflow runtime for each event that reaches the Phase.
+//! ## Stream identity
+//!
+//! - For `write`: Output adapters do not produce Streams (per
+//!   `docs/best-practices/quant/stories.md` §S36).
+//! - For `query`: `StreamSignature = sha256("influxdb" || "query" || bucket || hash(flux_query))`.
+//!
+//! ## Credentials
+//!
+//! `token` is read from the Datasource config and never logged or
+//! included in any error message returned across the FFI boundary.
+//! On transport errors we log only the HTTP status and a generic
+//! message; the token is never serialised into the `EventBytes`
+//! error blob.
+//!
+//! ## Rate limiting
+//!
+//! A simple token-bucket rate limiter is applied to every outbound
+//! HTTP request. The default is 100 req/sec, per the S36 spec
+//! ("InfluxDB v2 can handle this"). The rate is configurable per
+//! Datasource.
 
-use std::path::PathBuf;
+use std::sync::Arc;
 
-use bee_adapter::{AdapterError, AdapterResult, Event, OutputAdapter};
 use bee_plugin_sdk::{
-    vtable::OutputAdapterVtable, AdapterDescriptor, Factory, PluginHandle, PluginManifest, PluginName,
+    vtable::{InputAdapterVtable, OutputAdapterVtable},
+    AdapterDescriptor, Factory, PluginHandle, PluginManifest, PluginName,
 };
-use tokio::io::{AsyncWriteExt, BufWriter};
+use sha2::{Digest, Sha256};
 
-/// Configuration for the influxdb output.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct InfluxConfig {
-    /// Logical database name. Goes into the line-protocol-ish
-    /// header as a tag, e.g. `database=bitcoin`.
-    pub database: String,
-    /// Measurement (table) name. Goes into the line-protocol-ish
-    /// header as the measurement, e.g. `trade`.
-    pub measurement: String,
-    /// Output file path. `None` = [`Self::DEFAULT_PATH`].
-    pub path: Option<PathBuf>,
-}
+use crate::query::QueryCtx;
+use crate::write::WriteCtx;
 
-impl InfluxConfig {
-    /// Default log file path used when `path` is `None`.
-    pub const DEFAULT_PATH: &str = "/tmp/bee_demo_influxdb.log";
+pub mod config;
+pub mod escape;
+pub mod line;
+pub mod query;
+pub mod ratelimit;
+pub mod write;
 
-    /// Resolve the effective output path: `self.path` if `Some`,
-    /// otherwise [`Self::DEFAULT_PATH`].
-    pub fn resolved_path(&self) -> PathBuf {
-        self.path
-            .clone()
-            .unwrap_or_else(|| PathBuf::from(Self::DEFAULT_PATH))
-    }
-}
+// ---------------------------------------------------------------------------
+// Section 3: StreamSignature
+// ---------------------------------------------------------------------------
 
-impl Default for InfluxConfig {
-    fn default() -> Self {
-        Self {
-            database: "bitcoin".into(),
-            measurement: "trade".into(),
-            path: None,
-        }
-    }
-}
+/// StreamSignature for the `write` Output adapter. Output adapters
+/// do not produce Streams; this constant is exported so the
+/// Compiler / Registry can name the connection-level identity.
+pub const WRITE_STREAM_SIGNATURE: &str = "influxdb:write";
 
-/// `influxdb_emit` Output Adapter. Appends one line per event to
-/// the configured log file in line-protocol-ish format:
+/// Compute the StreamSignature for the `query` Input adapter.
 ///
-/// ```text
-/// <measurement>,database=<database> sequence=<seq>,timestamp=<ts> value="<payload>"
-/// ```
-pub struct InfluxOutput {
-    config: InfluxConfig,
-    writer: BufWriter<tokio::fs::File>,
+///   `StreamSignature = sha256("influxdb" || "query" || bucket || flux_query)`
+///
+/// `bucket` is included so that the same Flux query against two
+/// different buckets produces two different Producers (different
+/// Stream identity, different in-memory state).
+pub fn query_stream_signature(bucket: &str, flux_query: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"influxdb");
+    hasher.update(b"query");
+    hasher.update(bucket.as_bytes());
+    hasher.update(flux_query.as_bytes());
+    hex::encode(hasher.finalize())
 }
 
-impl OutputAdapter for InfluxOutput {
-    type Config = InfluxConfig;
+// ---------------------------------------------------------------------------
+// Section 4: Error type (used by both vtable shims)
+// ---------------------------------------------------------------------------
 
-    async fn open(config: Self::Config) -> AdapterResult<Self> {
-        let path = config.resolved_path();
-        let file = tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .await
-            .map_err(|e| {
-                AdapterError::Open(format!(
-                    "open log file {}: {e}",
-                    path.display()
-                ))
-            })?;
-        Ok(Self {
-            config,
-            writer: BufWriter::new(file),
-        })
-    }
+/// Errors surfaced from the FFI shims. The Display impl never
+/// includes the InfluxDB token (the token is held in the
+/// Datasource config and is excluded from every error path).
+#[derive(Debug, thiserror::Error)]
+pub enum InfluxdbError {
+    #[error("config decode: {0}")]
+    Config(String),
+    #[error("bincode: {0}")]
+    Bincode(String),
+    #[error("runtime: {0}")]
+    Runtime(String),
+    #[error("http: {0}")]
+    Http(String),
+    #[error("invalid line: {0}")]
+    Line(String),
+    #[error("channel closed")]
+    ChannelClosed,
+    #[error("invalid event payload: {0}")]
+    Payload(String),
+    #[error("rate-limit init: {0}")]
+    RateLimit(String),
+}
 
-    async fn emit(&mut self, event: Event) -> AdapterResult<()> {
-        let payload = String::from_utf8_lossy(&event.payload);
-        let line = format!(
-            "{measurement},database={database} sequence={sequence},timestamp={timestamp} value=\"{payload}\"\n",
-            measurement = self.config.measurement,
-            database = self.config.database,
-            sequence = event.sequence,
-            timestamp = event.timestamp,
-            payload = payload,
-        );
-        self.writer
-            .write_all(line.as_bytes())
-            .await
-            .map_err(|e| AdapterError::Emit(format!("write line: {e}")))?;
-        Ok(())
-    }
+// ---------------------------------------------------------------------------
+// Section 5: Plugin manifest + Factory + cdylib entry
+// ---------------------------------------------------------------------------
 
-    async fn close(mut self) -> AdapterResult<()> {
-        // Explicit flush — tokio's `BufWriter` does NOT flush on
-        // drop (to avoid blocking in async contexts), so the
-        // buffered bytes would be discarded without this.
-        self.writer
-            .flush()
-            .await
-            .map_err(|e| AdapterError::Close(format!("flush: {e}")))?;
-        // File handle is dropped at end of function, releasing
-        // the OS-level fd.
-        Ok(())
+/// Build the manifest. The plugin exposes two adapters:
+/// `write` (Output) and `query` (Input).
+pub fn plugin_manifest() -> PluginManifest {
+    PluginManifest {
+        name: PluginName("influxdb".into()),
+        feature_version: "1.0.0".into(),
+        abi_version: "v1".into(),
+        adapters: vec![
+            AdapterDescriptor {
+                name: "write".into(),
+                is_input: false,
+            },
+            AdapterDescriptor {
+                name: "query".into(),
+                is_input: true,
+            },
+        ],
+        handlers: vec![],
     }
 }
 
-/// Factory for the influxdb plugin. Holds no state; both methods
-/// are pure.
+/// Factory for the influxdb plugin. The unit type; both methods
+/// are pure and idempotent.
 pub struct InfluxFactory;
 
 impl Factory for InfluxFactory {
     fn manifest() -> PluginManifest {
-        PluginManifest {
-            name: PluginName("influxdb".into()),
-            feature_version: "1.0.0".into(),
-            abi_version: "v1".into(),
-            adapters: vec![AdapterDescriptor {
-                name: "emit".into(),
-                is_input: false,
-            }],
-            handlers: vec![],
-        }
+        plugin_manifest()
     }
 
     fn init() -> bee_plugin_sdk::PluginResult<PluginHandle> {
-        let vtable: *const OutputAdapterVtable = &vtable_shim::VTABLE;
+        let write_vtable: *const OutputAdapterVtable = &write_shim::VTABLE;
+        let query_vtable: *const InputAdapterVtable = &query_shim::VTABLE;
         let mut output_adapters = std::collections::HashMap::new();
-        output_adapters.insert("emit".to_string(), vtable);
+        output_adapters.insert("write".to_string(), write_vtable);
+        let mut input_adapters = std::collections::HashMap::new();
+        input_adapters.insert("query".to_string(), query_vtable);
         Ok(PluginHandle {
             manifest: Self::manifest(),
-            inner: std::sync::Arc::new(()),
-            input_adapters: std::collections::HashMap::new(),
+            inner: Arc::new(()),
+            input_adapters,
             output_adapters,
             handlers: std::collections::HashMap::new(),
         })
     }
 }
 
-mod vtable_shim {
-    use std::sync::Mutex;
+bee_plugin_sdk::cdylib_plugin!(InfluxFactory);
 
-    use bee_adapter::OutputAdapter;
+// ---------------------------------------------------------------------------
+// FFI vtable shims
+// ---------------------------------------------------------------------------
+
+mod write_shim {
+    use super::WriteCtx;
+    use crate::config::WriteArgs;
     use bee_plugin_sdk::event::{decode_event, EventBytes};
     use bee_plugin_sdk::vtable::OutputAdapterVtable;
 
-    use super::{InfluxConfig, InfluxOutput};
-
-    pub struct Ctx {
-        pub adapter: Mutex<InfluxOutput>,
+    /// Write a UTF-8 error string into the `*err_out` slot as an
+    /// `EventBytes` blob (bincode-`Event`-shaped for the host's
+    /// decoder). The token is never included.
+    fn write_err(err_out: *mut EventBytes, msg: &str) {
+        if err_out.is_null() {
+            return;
+        }
+        let bee_event = bee_adapter::Event {
+            timestamp: 0,
+            sequence: 0,
+            payload: msg.as_bytes().to_vec(),
+        };
+        let bytes = bincode::serialize(&bee_event).unwrap_or_default();
+        let len = bytes.len();
+        let ptr = bytes.as_ptr();
+        std::mem::forget(bytes);
+        unsafe {
+            *err_out = EventBytes { ptr, len };
+        }
     }
 
-    fn block_on<F: std::future::Future>(f: F) -> F::Output {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("build tokio runtime")
-            .block_on(f)
-    }
-
+    /// FFI `open`: decode the bincode `OpenConfig`, spawn the
+    /// background flush thread, return a `*mut c_void` wrapping a
+    /// `Box<WriteCtx>`. On error, returns null and writes the
+    /// error message to `*err_out` if non-null.
     pub unsafe extern "C" fn open(
         config_ptr: *const u8,
         config_len: usize,
-        _err_out: *mut EventBytes,
+        err_out: *mut EventBytes,
     ) -> *mut std::ffi::c_void {
         let bytes = std::slice::from_raw_parts(config_ptr, config_len);
-        let cfg: InfluxConfig = match bincode::deserialize(bytes) {
+        let cfg: OpenConfig = match bincode::deserialize(bytes) {
             Ok(c) => c,
-            Err(_) => return std::ptr::null_mut(),
+            Err(e) => {
+                write_err(err_out, &format!("config decode: {e}"));
+                return std::ptr::null_mut();
+            }
         };
-        let adapter = match block_on(InfluxOutput::open(cfg)) {
-            Ok(a) => a,
-            Err(_) => return std::ptr::null_mut(),
+        let ctx = match WriteCtx::spawn(cfg.datasource, cfg.stream) {
+            Ok(c) => c,
+            Err(e) => {
+                write_err(err_out, &e.to_string());
+                return std::ptr::null_mut();
+            }
         };
-        let ctx = Box::new(Ctx {
-            adapter: Mutex::new(adapter),
-        });
-        Box::into_raw(ctx) as *mut std::ffi::c_void
+        let boxed = Box::new(ctx);
+        Box::into_raw(boxed) as *mut std::ffi::c_void
     }
 
+    /// FFI `emit`: bincode-decode the `Event`, append a line-
+    /// protocol row to the batch buffer. If the buffer crosses
+    /// `max_batch_size`, synchronously trigger a flush. Returns
+    /// 0 on success, -1 on error.
     pub unsafe extern "C" fn emit(
         ctx: *mut std::ffi::c_void,
         event_ptr: *const u8,
         event_len: usize,
     ) -> i32 {
+        if ctx.is_null() {
+            return -1;
+        }
         let event_bytes = std::slice::from_raw_parts(event_ptr, event_len);
         let event = match decode_event(event_bytes) {
             Ok(e) => e,
-            Err(_) => return -1,
+            Err(e) => {
+                log::warn!("influxdb.emit: bincode decode: {e}");
+                return -1;
+            }
         };
-        let result = block_on(async move {
-            let ctx = &*(ctx as *const Ctx);
-            let mut adapter = ctx.adapter.lock().unwrap();
-            adapter.emit(event).await
-        });
-        match result {
+        let ctx = &*(ctx as *const WriteCtx);
+        match ctx.append(&event) {
             Ok(()) => 0,
-            Err(_) => -1,
+            Err(e) => {
+                log::warn!("influxdb.emit: {e}");
+                -1
+            }
         }
     }
 
+    /// FFI `close`: take the `Box<WriteCtx>` back and drop it. The
+    /// `Drop` impl performs a final flush and joins the worker.
     pub unsafe extern "C" fn close(ctx: *mut std::ffi::c_void) -> i32 {
         if ctx.is_null() {
             return 0;
         }
-        let ctx = Box::from_raw(ctx as *mut Ctx);
-        let adapter = ctx.adapter.into_inner().expect("mutex poisoned");
-        match block_on(adapter.close()) {
-            Ok(()) => 0,
-            Err(_) => -1,
-        }
+        let _ = Box::from_raw(ctx as *mut WriteCtx);
+        0
+    }
+
+    /// FFI-facing config blob: bundles the Datasource config with
+    /// the per-call `WriteArgs` so a single `open()` call carries
+    /// both. The Compiler packages them as one bincode blob.
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    pub struct OpenConfig {
+        pub datasource: super::config::InfluxdbConfig,
+        pub stream: WriteArgs,
     }
 
     pub const VTABLE: OutputAdapterVtable = OutputAdapterVtable {
@@ -245,166 +284,91 @@ mod vtable_shim {
     };
 }
 
-bee_plugin_sdk::cdylib_plugin!(InfluxFactory);
+mod query_shim {
+    use super::QueryCtx;
+    use crate::config::QueryArgs;
+    use bee_plugin_sdk::event::{encode_event, EventBytes};
+    use bee_plugin_sdk::vtable::InputAdapterVtable;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::PathBuf;
-
-    /// Local helper: build a tempdir-style path unique to this
-    /// test invocation. Avoids polluting
-    /// `/tmp/bee_demo_influxdb.log` between runs.
-    fn unique_path(name: &str) -> PathBuf {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        PathBuf::from(format!(
-            "/tmp/bee_test_influxdb_{name}_{pid}_{nanos}.log",
-            name = name,
-            pid = std::process::id(),
-            nanos = nanos,
-        ))
-    }
-
-    /// Build a synthetic Event for emit-side tests.
-    fn make_event(seq: u64, payload: &[u8]) -> Event {
-        Event {
-            timestamp: 1_000_000 + seq * 1000,
-            sequence: seq,
-            payload: payload.to_vec(),
+    fn write_err(err_out: *mut EventBytes, msg: &str) {
+        if err_out.is_null() {
+            return;
+        }
+        let bee_event = bee_adapter::Event {
+            timestamp: 0,
+            sequence: 0,
+            payload: msg.as_bytes().to_vec(),
+        };
+        let bytes = bincode::serialize(&bee_event).unwrap_or_default();
+        let len = bytes.len();
+        let ptr = bytes.as_ptr();
+        std::mem::forget(bytes);
+        unsafe {
+            *err_out = EventBytes { ptr, len };
         }
     }
 
-    #[tokio::test]
-    async fn emit_writes_line_per_event() {
-        let path = unique_path("emit_writes_line_per_event");
-        let cfg = InfluxConfig {
-            path: Some(path.clone()),
-            ..Default::default()
+    pub unsafe extern "C" fn open(
+        config_ptr: *const u8,
+        config_len: usize,
+        err_out: *mut EventBytes,
+    ) -> *mut std::ffi::c_void {
+        let bytes = std::slice::from_raw_parts(config_ptr, config_len);
+        let cfg: OpenConfig = match bincode::deserialize(bytes) {
+            Ok(c) => c,
+            Err(e) => {
+                write_err(err_out, &format!("config decode: {e}"));
+                return std::ptr::null_mut();
+            }
         };
-        let mut adapter = InfluxOutput::open(cfg).await.unwrap();
-        for i in 0..3 {
-            adapter.emit(make_event(i, b"hello")).await.unwrap();
+        let ctx = match QueryCtx::spawn(cfg.datasource, cfg.stream) {
+            Ok(c) => c,
+            Err(e) => {
+                write_err(err_out, &e.to_string());
+                return std::ptr::null_mut();
+            }
+        };
+        let boxed = Box::new(ctx);
+        Box::into_raw(boxed) as *mut std::ffi::c_void
+    }
+
+    pub unsafe extern "C" fn next(
+        ctx: *mut std::ffi::c_void,
+        out: *mut EventBytes,
+    ) -> i32 {
+        if ctx.is_null() {
+            return -1;
         }
-        adapter.close().await.unwrap();
-
-        let contents = tokio::fs::read_to_string(&path).await.unwrap();
-        let lines: Vec<&str> = contents.lines().collect();
-        assert_eq!(lines.len(), 3, "expected 3 lines, got: {contents}");
-        // First line has sequence=0; last line has sequence=2.
-        assert!(lines[0].contains("sequence=0"), "line 0: {}", lines[0]);
-        assert!(lines[2].contains("sequence=2"), "line 2: {}", lines[2]);
-        // Header / payload shape.
-        for (i, line) in lines.iter().enumerate() {
-            assert!(
-                line.starts_with("trade,database=bitcoin "),
-                "line {i}: {line}"
-            );
-            assert!(line.contains("value=\"hello\""), "line {i}: {line}");
+        let ctx = &mut *(ctx as *mut QueryCtx);
+        match ctx.next_event() {
+            Some(event) => {
+                let bytes = encode_event(&event);
+                let len = bytes.len();
+                let ptr = bytes.as_ptr();
+                std::mem::forget(bytes);
+                *out = EventBytes { ptr, len };
+                1
+            }
+            None => {
+                *out = EventBytes::EMPTY;
+                0
+            }
         }
-        let _ = tokio::fs::remove_file(&path).await;
     }
 
-    #[test]
-    fn default_path_is_tmp_bee_demo() {
-        assert_eq!(
-            InfluxConfig::default().resolved_path(),
-            PathBuf::from("/tmp/bee_demo_influxdb.log"),
-        );
+    pub unsafe extern "C" fn close(ctx: *mut std::ffi::c_void) -> i32 {
+        if ctx.is_null() {
+            return 0;
+        }
+        let _ = Box::from_raw(ctx as *mut QueryCtx);
+        0
     }
 
-    #[tokio::test]
-    async fn close_flushes_buffer() {
-        let path = unique_path("close_flushes_buffer");
-        let cfg = InfluxConfig {
-            path: Some(path.clone()),
-            ..Default::default()
-        };
-        let mut adapter = InfluxOutput::open(cfg).await.unwrap();
-        adapter.emit(make_event(0, b"flushed")).await.unwrap();
-        // Before close: BufWriter has the line buffered. tokio's
-        // `BufWriter` does NOT flush on drop (to avoid blocking),
-        // so the data would be lost if `close` did not flush.
-        adapter.close().await.unwrap();
-        // After close: the buffered data must be on disk.
-        let contents = tokio::fs::read_to_string(&path).await.unwrap();
-        assert!(
-            contents.contains("flushed"),
-            "missing payload after close: {contents}"
-        );
-        let _ = tokio::fs::remove_file(&path).await;
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    pub struct OpenConfig {
+        pub datasource: super::config::InfluxdbConfig,
+        pub stream: QueryArgs,
     }
 
-    #[test]
-    fn factory_manifest_declares_emit_adapter() {
-        let m = InfluxFactory::manifest();
-        assert_eq!(m.name.0, "influxdb");
-        assert_eq!(m.abi_version, "v1");
-        assert_eq!(m.adapters.len(), 1);
-        assert_eq!(m.adapters[0].name, "emit");
-        assert!(!m.adapters[0].is_input);
-    }
-
-    #[test]
-    fn factory_init_returns_handle_with_manifest() {
-        let h = InfluxFactory::init().unwrap();
-        assert_eq!(h.manifest.name.0, "influxdb");
-        assert_eq!(h.manifest.adapters.len(), 1);
-        assert_eq!(h.manifest.adapters[0].name, "emit");
-    }
-
-    #[test]
-    fn vtable_open_emit_close_writes_event_to_log() {
-        let path = unique_path("vtable_open_emit_close");
-        let cfg = InfluxConfig {
-            path: Some(path.clone()),
-            ..Default::default()
-        };
-        let handle = InfluxFactory::init().expect("init");
-        let vtable = *handle
-            .output_adapters
-            .get("emit")
-            .expect("emit vtable");
-        let cfg_bytes = bincode::serialize(&cfg).unwrap();
-        let ctx = unsafe {
-            ((*vtable).open)(cfg_bytes.as_ptr(), cfg_bytes.len(), std::ptr::null_mut())
-        };
-        assert!(!ctx.is_null(), "open returned null");
-        let event = Event {
-            timestamp: 1_000_000,
-            sequence: 42,
-            payload: b"vtable-payload".to_vec(),
-        };
-        let event_bytes = bincode::serialize(&event).unwrap();
-        let rc = unsafe {
-            ((*vtable).emit)(
-                ctx,
-                event_bytes.as_ptr(),
-                event_bytes.len(),
-            )
-        };
-        assert_eq!(rc, 0, "emit returned {rc}");
-        let rc = unsafe { ((*vtable).close)(ctx) };
-        assert_eq!(rc, 0, "close returned {rc}");
-        let body = std::fs::read_to_string(&path).expect("read log");
-        assert!(body.contains("sequence=42"), "missing sequence: {body}");
-        assert!(body.contains("vtable-payload"), "missing payload: {body}");
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn vtable_open_with_garbage_config_returns_null() {
-        let handle = InfluxFactory::init().expect("init");
-        let vtable = *handle
-            .output_adapters
-            .get("emit")
-            .expect("emit vtable");
-        let garbage = vec![0xFFu8; 8];
-        let ctx = unsafe {
-            ((*vtable).open)(garbage.as_ptr(), garbage.len(), std::ptr::null_mut())
-        };
-        assert!(ctx.is_null(), "open with garbage should return null");
-    }
+    pub const VTABLE: InputAdapterVtable = InputAdapterVtable { open, next, close };
 }
