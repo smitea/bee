@@ -10,6 +10,7 @@ description = "Bee production-grade NewsAPI adapter (S35): real HTTP polling + r
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+bee-adapter = { path = "../../../crates/bee-adapter" }
 bee-plugin-sdk = { path = "../../../crates/bee-plugin-sdk" }
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
