@@ -287,9 +287,12 @@ impl AggregateArgs {
 pub struct DocumentEvent {
     /// Collection the document came from (per-call arg).
     pub collection: String,
-    /// The document itself. Stored as a `bson::Bson` so any
-    /// document shape is representable.
-    pub document: bson::Bson,
+    /// The document itself, encoded as **raw BSON bytes**
+    /// (`bson::to_vec(&doc)`). Stored as `Vec<u8>` (not
+    /// `bson::Bson`) because `Bson`'s `Serialize` impl is the
+    /// human-readable one, not the bincode one — bincode would
+    /// silently produce empty payloads. See S37 (f.1).
+    pub document: Vec<u8>,
 }
 
 impl DocumentEvent {
@@ -1237,7 +1240,7 @@ mod find_shim {
                     for doc in docs {
                         let event = DocumentEvent {
                             collection: args.collection.clone(),
-                            document: bson::Bson::Document(doc),
+                            document: bson::to_vec(&doc).unwrap_or_default(),
                         };
                         if tx.send(event).await.is_err() {
                             return;
@@ -1458,7 +1461,7 @@ mod aggregate_shim {
                     for row in rows {
                         let event = DocumentEvent {
                             collection: args.collection.clone(),
-                            document: bson::Bson::Document(row),
+                            document: bson::to_vec(&row).unwrap_or_default(),
                         };
                         if tx.send(event).await.is_err() {
                             return;
@@ -1655,30 +1658,69 @@ mod tests {
         // `Event::payload` for Input adapters. Lossless round-trip
         // matters for the Compiler-side handler.
         //
-        // NOTE: `DocumentEvent.document` is typed as `bson::Bson`,
-        // which only implements `Serialize` (not `Deserialize`)
-        // for the bincode backend. The impl's `to_event()` uses
-        // `bincode::serialize(self).unwrap_or_default()`, which
-        // means the host-side payload is *empty* in production
-        // today — a real bug, not a test issue. This test
-        // exercises the wire format that is *intended* (raw BSON
-        // bytes via `bson::to_vec` + BSON `from_slice`) and is
-        // what a fix would switch the struct to. See the report
-        // for S37 f, concern #1.
+        // `document` is `Vec<u8>` (raw BSON), not `bson::Bson` —
+        // see S37 (f.1). `Bson`'s `Serialize` impl is the
+        // human-readable one, which bincode cannot use, so the
+        // host would have received empty payloads.
         let doc = bson::doc! { "symbol": "BTC/USDT", "price": 50_000.0_f64 };
         let raw_doc = bson::to_vec(&doc).expect("bson encode");
-        // BSON payload round-trip (this is the format that
-        // *should* be on the wire).
+        let event = DocumentEvent {
+            collection: "trades".into(),
+            document: raw_doc.clone(),
+        };
+        // Full DocumentEvent round-trip (the new shape).
+        let bytes = bincode::serialize(&event).expect("bincode encode");
+        let back: DocumentEvent =
+            bincode::deserialize(&bytes).expect("bincode decode");
+        assert_eq!(back.collection, "trades");
+        assert_eq!(back.document, raw_doc);
+        // The inner BSON payload is still a valid BSON document
+        // after the round-trip.
         let back_doc: bson::Document =
-            bson::from_slice(&raw_doc).expect("bson decode");
+            bson::from_slice(&back.document).expect("bson decode");
         assert_eq!(back_doc, doc);
-        // The per-event metadata (`collection`) is a plain
-        // bincode-serialisable String.
-        let coll = "trades".to_string();
-        let bytes = bincode::serialize(&coll).expect("serialize collection");
-        let back_coll: String =
-            bincode::deserialize(&bytes).expect("deserialize collection");
-        assert_eq!(back_coll, "trades");
+    }
+
+    #[test]
+    fn document_event_to_event_payload_is_nonempty() {
+        // Regression test for S37 (f.1). Before the fix,
+        // `DocumentEvent.document` was typed `bson::Bson`, and
+        // `Bson`'s `Serialize` impl is the human-readable one,
+        // not the bincode one. `to_event()` called
+        // `bincode::serialize(self).unwrap_or_default()`, which
+        // silently produced **empty** `Event::payload` bytes for
+        // every document the mongodb plugin emitted to the host.
+        //
+        // This test constructs a non-trivial `DocumentEvent`
+        // and asserts that the resulting `Event::payload` is
+        // non-empty (and is at least large enough to contain a
+        // bincode-serialised `(String, Vec<u8>)` of the values
+        // we passed in).
+        let doc = bson::doc! {
+            "symbol": "BTC/USDT",
+            "price": 50_000.0_f64,
+            "timestamp": 1_700_000_000_i64,
+        };
+        let raw_doc = bson::to_vec(&doc).expect("bson encode");
+        assert!(!raw_doc.is_empty(), "sanity: bson::to_vec must produce bytes");
+        let event = DocumentEvent {
+            collection: "trades".into(),
+            document: raw_doc,
+        };
+        let envelope = event.to_event();
+        assert!(
+            !envelope.payload.is_empty(),
+            "Event::payload must be non-empty (was: {} bytes) — \
+             this is the S37 (f.1) regression: bincode of bson::Bson \
+             produced empty bytes",
+            envelope.payload.len()
+        );
+        // And the payload must be a valid bincode-encoded
+        // `DocumentEvent` — round-tripping it yields the same
+        // struct back. This is what the host would actually do.
+        let back: DocumentEvent = bincode::deserialize(&envelope.payload)
+            .expect("host-side bincode decode of Event::payload");
+        assert_eq!(back, event);
     }
 
     #[test]
@@ -1962,7 +2004,8 @@ mod tests {
             for i in 0..256 {
                 let ev = DocumentEvent {
                     collection: "trades".into(),
-                    document: bson::Bson::Int64(i),
+                    document: bson::to_vec(&bson::doc! { "i": i })
+                        .expect("bson encode"),
                 };
                 // try_send returns Ok only while the channel has
                 // capacity. The 257th call must return Full.
@@ -1973,7 +2016,8 @@ mod tests {
             }
             let overflow = DocumentEvent {
                 collection: "trades".into(),
-                document: bson::Bson::Int64(999),
+                document: bson::to_vec(&bson::doc! { "i": 999 })
+                    .expect("bson encode"),
             };
             assert!(
                 tx.try_send(overflow).is_err(),
