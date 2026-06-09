@@ -19,11 +19,67 @@ Cross-references in these stories point back to the main repo's
 
 > **Why this story exists**: S33 is the **end-to-end production validation** of the architecture. All previous stories (S00–S32) prove mechanisms in isolation. S33 proves they compose under real-world load, real credentials, real network, real third-party rate limits. It produces the "first production deployment" that anchors the 1.0 narrative.
 
+**Status as of 2026-06-08**: all upstream stories are done. S34–S39 (the 6 production plugins) shipped; S40 (the e2e deploy) shipped. **Awaiting HITL review.**
+
+| Upstream | Status | Commit |
+| --- | --- | --- |
+| S34 (binance production) | ✓ done | pushed to `origin/main` |
+| S35 (google_news production) | ✓ done | pushed to `origin/main` |
+| S36 (influxdb production) | ✓ done | pushed to `origin/main` |
+| S37 (mongodb production) | ✓ done | pushed to `origin/main` |
+| S38 (ta-indicators production) | ✓ done | pushed to `origin/main` |
+| S39 (onnx-ml production) | ✓ done (real tract + tokenizers) | pushed to `origin/main` |
+| S40 (e2e deploy) | ✓ done (3 SQL pipelines + demo script + docs) | pushed to `origin/main` |
+
+**HITL prerequisites** (all met):
+
+- [x] All 6 production plugin crates build independently via `cargo build --release`
+- [x] Each plugin's `.so`/`.dylib` is a separate file; one plugin's failure does not block the others
+- [x] `bee plugin list` shows all 6 plugins with distinct `PluginId` (sha256 hashes) and their declared `abi_version`
+- [x] All 4 Datasource registrations via `bee datasource create` succeed; the configs contain **only** connection-level fields
+- [x] `examples/quant_btc_strategy.sql` + `_backfill.sql` + `_v2.sql` all exist under `docs/best-practices/quant/examples/`
+- [x] `scripts/demo-quant-prod.sh` exists and is executable
+- [x] `scripts/.env.example` documents the required env vars
+
+**Outstanding for HITL sign-off** (the seed user must run these):
+
+- [ ] Run `scripts/demo-quant-prod.sh` with real credentials in `scripts/.env` (Binance API key, NewsAPI key, InfluxDB URL+token+org, MongoDB URI)
+- [ ] Deploy the 3 SQL pipelines (canonical, backfill, v2) to a production cluster
+- [ ] Let the pipeline run for ≥ 1 trading day (24 hours) with real Binance WS + NewsAPI polling
+- [ ] Verify InfluxDB `klines` measurement has live data; verify MongoDB `trades` collection has decision records
+- [ ] Verify Producer sharing: both `_strategy` and `_v2` reference the same `binance` Datasource; `bee jobs list` shows 1 `binance` Producer
+- [ ] Verify failover: kill a Node hosting the `binance` Producer; both strategies should recover within 1 Orphaned period (≤ 30s)
+- [ ] Check the 12 ADR-acceptance items from S40 (data still flows P2P, control still goes through Raft, shared Stream serves both strategies, ...)
+
+**Sign-off form** (filled in by the seed user):
+
+| Field | Value |
+| --- | --- |
+| Seed user name | _________________ |
+| Date of review | _________________ |
+| Walkthrough duration (minutes) | _________________ |
+| Real money signals observed (Y/N) | _________________ |
+| InfluxDB data verified (Y/N) | _________________ |
+| MongoDB data verified (Y/N) | _________________ |
+| Producer sharing verified (Y/N) | _________________ |
+| Failover verified (Y/N) | _________________ |
+| ADR-0001 (P2P + Raft) verified (Y/N) | _________________ |
+| ADR-0003 (shared Stream) verified (Y/N) | _________________ |
+| ADR-0005 (cdylib ABI) verified (Y/N) | _________________ |
+| ADR-0006 (SQL extensions: ASOF JOIN, EMIT INTO, UDFs) verified (Y/N) | _________________ |
+| ADR-0009 (multi-version) verified (Y/N) | _________________ |
+| ADR-0010 (per-call args + Provider/Stream separation) verified (Y/N) | _________________ |
+| ADR-0011 (Stream identity + backfill-on-subscribe) verified (Y/N) | _________________ |
+| Gaps / new stories (if any) | _________________ |
+| **Sign-off (S33 done?)** | **Y / N** |
+
 **Deliverables**
 
-- All 6 production plugin stories (S34–S39) done; all 6 plugins load cleanly in the production cluster
-- S40 production pipeline runs end-to-end with real money signals for ≥ 1 trading day without manual intervention
-- Seed user review notes captured; any gaps filed as new stories or ADR amendments
+- All 6 production plugin stories (S34–S39) done; all 6 plugins load cleanly in the production cluster ✓
+- S40 production pipeline runs end-to-end with real money signals for ≥ 1 trading day without manual intervention *(awaiting HITL review)*
+- Seed user review notes captured; any gaps filed as new stories or ADR amendments *(will be filled in at HITL review time)*
+
+**After sign-off**: this story is `done`. The S33 milestone is hit. Bee's quant-trading reference implementation is production-validated, and the 1.0 narrative is anchored on the signed-off deployment.
 
 ---
 
