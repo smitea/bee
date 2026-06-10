@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 use super::types::{NodeCommand, NodeId, RpcMessage};
@@ -49,5 +50,70 @@ impl InMemoryTransport {
     pub async fn recv_cmd(&self) -> Option<NodeCommand> {
         let mut inbox = self.cmd_inbox.lock().await;
         inbox.recv().await
+    }
+}
+
+/// Abstract the 4 calls a `Node` makes on its transport:
+/// `self_id`, `send`, `recv_rpc`, `recv_cmd`.
+///
+/// `InMemoryTransport` (above) satisfies this trait
+/// via mpsc channels. `TcpTransport` (in `tcp.rs`)
+/// satisfies it via `bee_transport::Listener` + per-peer
+/// `Connection`s. The trait exists so `Node::new` can
+/// accept either, and so future transports (QUIC, Unix
+/// socket, ...) can plug in without touching the Raft
+/// state machine.
+#[async_trait]
+pub trait NodeTransport: Send + Sync + 'static {
+    fn self_id(&self) -> NodeId;
+
+    /// Send `msg` to peer `target`. The Node is allowed
+    /// to fire-and-forget (queue + spawn) — failures
+    /// are logged but do not surface back to the
+    /// caller; the Raft timeouts catch the resulting
+    /// election churn.
+    async fn send(&self, target: NodeId, msg: RpcMessage) -> Result<(), TransportError>;
+
+    /// Receive the next inbound `RpcMessage` (with its
+    /// source node). `None` on graceful shutdown.
+    async fn recv_rpc(&self) -> Option<(NodeId, RpcMessage)>;
+
+    /// Receive the next `NodeCommand` (a `Submit { op,
+    /// reply }` or a `Shutdown`). `None` on graceful
+    /// shutdown.
+    async fn recv_cmd(&self) -> Option<NodeCommand>;
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum TransportError {
+    #[error("unknown peer {0}")]
+    UnknownPeer(NodeId),
+    #[error("send channel closed for peer {0}")]
+    PeerClosed(NodeId),
+    #[error("io: {0}")]
+    Io(String),
+}
+
+#[async_trait]
+impl NodeTransport for InMemoryTransport {
+    fn self_id(&self) -> NodeId {
+        InMemoryTransport::self_id(self)
+    }
+
+    async fn send(&self, target: NodeId, msg: RpcMessage) -> Result<(), TransportError> {
+        InMemoryTransport::send(self, target, msg)
+            .await
+            .map_err(|e| match e {
+                "unknown peer" => TransportError::UnknownPeer(target),
+                _ => TransportError::Io(e.to_string()),
+            })
+    }
+
+    async fn recv_rpc(&self) -> Option<(NodeId, RpcMessage)> {
+        InMemoryTransport::recv_rpc(self).await
+    }
+
+    async fn recv_cmd(&self) -> Option<NodeCommand> {
+        InMemoryTransport::recv_cmd(self).await
     }
 }
