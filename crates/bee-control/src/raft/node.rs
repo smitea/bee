@@ -391,12 +391,11 @@ impl Node {
             | RpcMessage::AdminJobInspect(_)
             | RpcMessage::AdminTaskDiagnostics(_)
             | RpcMessage::AdminClusterStatus
-            | RpcMessage::AdminPing => {
-                // TODO(S33.1 Task 8): dispatch to
-                // self.handle_admin(msg) which queries
-                // self.kv / self.cp and replies via
-                // self.transport.send(to, AdminReply(...))
-                // on the same Raft channel.
+            | RpcMessage::AdminPing
+            | RpcMessage::AdminListKv(_) => {
+                // No-op on the Raft channel; the
+                // AdminServer (Task 5) is the entry
+                // point for AdminListKv in MVP.
             }
         }
     }

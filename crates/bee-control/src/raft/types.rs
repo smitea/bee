@@ -70,6 +70,8 @@ pub enum RpcMessage {
     AdminTaskDiagnostics(u32),
     AdminClusterStatus,
     AdminPing,
+    /// S33.2: list KV entries by prefix.
+    AdminListKv(String),
 }
 
 #[derive(Debug)]

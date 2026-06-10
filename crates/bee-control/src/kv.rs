@@ -145,6 +145,24 @@ impl KVStateMachine {
         self.store.remove(key)
     }
 
+    /// S33.2: O(n) prefix scan. Returns all
+    /// `(key, value)` pairs whose key starts with
+    /// `prefix`. For the 24h-soak key space
+    /// (`soak/run_*/tick_*` × 288 ticks), this is
+    /// < 1 ms in practice. **Read-only**: does
+    /// not mutate state. The AdminServer holds the
+    /// `tokio::sync::Mutex<KVStateMachine>` lock
+    /// for the duration of the call (same lock the
+    /// Raft apply loop uses), so the read is
+    /// consistent with the latest committed entry.
+    pub fn list(&self, prefix: &str) -> Vec<(String, Vec<u8>)> {
+        self.store
+            .iter()
+            .filter(|(k, _)| k.starts_with(prefix))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
     /// Compare-and-swap. `expected = None` means "key must not exist";
     /// `expected = Some(v)` means "key must exist with value v".
     /// Returns `Ok(())` on success, `Err(TxnError::Conflict)` on mismatch.
@@ -263,5 +281,34 @@ impl KVStateMachine {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn list_returns_matching_prefix() {
+        let mut kv = KVStateMachine::new();
+        kv.put("soak/run_1/tick_1".to_string(), b"a".to_vec());
+        kv.put("soak/run_1/tick_2".to_string(), b"b".to_vec());
+        kv.put("soak/run_2/tick_1".to_string(), b"c".to_vec());
+        kv.put("other/x".to_string(), b"d".to_vec());
+        let r1 = kv.list("soak/run_1/");
+        assert_eq!(r1.len(), 2);
+        let r2 = kv.list("soak/");
+        assert_eq!(r2.len(), 3);
+        let r3 = kv.list("nope/");
+        assert!(r3.is_empty());
+        // Full-key prefix returns just that one.
+        let r4 = kv.list("soak/run_1/tick_1");
+        assert_eq!(r4.len(), 1);
+    }
+
+    #[test]
+    fn list_empty_kv_returns_empty() {
+        let kv = KVStateMachine::new();
+        assert!(kv.list("anything/").is_empty());
     }
 }

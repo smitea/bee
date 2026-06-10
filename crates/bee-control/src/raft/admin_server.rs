@@ -280,9 +280,12 @@ async fn dispatch(
                 commit_index: state_locked.commit_index,
             })
         }
-        // S33.2 Task 6: the ListKv arm is added in
-        // a follow-up commit (the KV list is a
-        // direct read; it doesn't need state).
+        // S33.2 Task 6: the ListKv arm.
+        AdminRequest::ListKv { prefix } => {
+            let kv = kv.lock().await;
+            let entries = kv.list(&prefix);
+            AdminResponse::KvList(entries)
+        }
     }
 }
 

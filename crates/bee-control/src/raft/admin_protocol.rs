@@ -35,6 +35,15 @@ pub enum AdminRequest {
     /// assert the admin RPC is wired correctly
     /// without exercising the heavier handlers.
     Ping,
+    /// S33.2: list KV entries whose key starts with
+    /// `prefix`. The AdminServer calls
+    /// `kv.list(prefix)` under the existing KV
+    /// lock; the response is a list of `(key,
+    /// raw_value_bytes)` pairs. The CLI's
+    /// `bee --connect <addr> kv list <prefix>`
+    /// decodes per known schema or prints
+    /// `(key, value_len)`.
+    ListKv { prefix: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,6 +63,11 @@ pub enum AdminResponse {
     /// production should swap for a structured error
     /// type in a follow-up.
     Error(String),
+    /// S33.2: reply to `ListKv`. Each tuple is
+    /// `(key, bincode_body)`. The CLI decides
+    /// how to render (per the optional
+    /// `--raw` flag).
+    KvList(Vec<(String, Vec<u8>)>),
 }
 
 /// Compact form of `JobRecord` for the wire. Mirrors
@@ -182,6 +196,9 @@ impl From<AdminRequest> for RpcMessage {
             AdminRequest::TaskDiagnostics(id) => RpcMessage::AdminTaskDiagnostics(id),
             AdminRequest::ClusterStatus => RpcMessage::AdminClusterStatus,
             AdminRequest::Ping => RpcMessage::AdminPing,
+            AdminRequest::ListKv { prefix } => {
+                RpcMessage::AdminListKv(prefix)
+            }
         }
     }
 }
