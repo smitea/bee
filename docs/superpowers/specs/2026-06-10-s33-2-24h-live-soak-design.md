@@ -76,25 +76,24 @@ criteria, the human-fillable results template. The actual
    - MVP mock plugins (binance / google_news / etc.) need
      **no changes** — auto-instrumentation covers them.
 
-3. **KVStateMachine::list + Op::List** (new)
+3. **KVStateMachine::list + AdminRequest::ListKv** (new)
    - `pub fn list(&self, prefix: &str) -> Vec<(String,
      Vec<u8>)>` — O(n) scan of the in-memory HashMap,
      filter by key prefix. For 24h soak = 288 entries max,
      this is fine.
-   - `Op::List { prefix: String }` variant. `apply_op` calls
-     `kv.list(&prefix)` and returns the result via a new
-     `OpResult::List(Vec<(String, Vec<u8>)>)` enum (or
-     pushes the result to a per-Op reply channel — TBD in
-     the plan).
+   - **No `Op::List` variant**: the list operation is a
+     **read** that does not replicate through Raft. Each
+     Node serves from its local KV state machine under the
+     existing `tokio::sync::Mutex<KVStateMachine>` lock. The
+     read is consistent within a single read (the lock
+     serializes with the apply loop), and a 288-entry key
+     space means stale-read windows are irrelevant for the
+     24h loop.
    - **Wire**: `AdminRequest::ListKv { prefix: String }` →
-     `AdminResponse::KvList(Vec<(String, Vec<u8>)>)`. This
-     is a *read* so it bypasses the Raft log (each Node
-     serves from its local KV; the result is consistent
-     within a single read but the prefix scan over a
-     288-entry key space is small enough that stale reads
-     across the 24h loop are not a concern).
+     `AdminResponse::KvList(Vec<(String, Vec<u8>)>)`. The
+     dispatch acquires the KV lock + calls `kv.list(prefix)`.
    - CLI: `bee --connect <addr> kv list <prefix>` prints
-     `(key, value_len) per line; --raw prints the full
+     `(key, value_len)` per line; `--raw` prints the full
      bincode body per line.
 
 4. **`scripts/soak-quant-24h.sh`** — the 24h monitoring loop
