@@ -23,6 +23,7 @@
 //! - Membership changes (1.x)
 
 pub mod admin_protocol;
+pub mod admin_server;
 pub mod cluster;
 pub mod node;
 pub mod tcp;
