@@ -123,6 +123,12 @@ fn strip_use_lines(sql: &str) -> String {
 pub fn parse_sql(source: &str) -> DfResult<Vec<datafusion::sql::parser::Statement>> {
     let stmts: std::collections::VecDeque<_> =
         datafusion::sql::parser::DFParserBuilder::new(source)
+            // S41 sieve + 1229 chained `CREATE VIEW` statements blow
+            // the default DataFusion parser recursion limit (50).
+            // Raise it to 2000 — the largest single-pipeline depth
+            // we expect in any S41 demo is ~1500 (the full
+            // Eratosthenes sieve at N=10^8 needs 1229 phases).
+            .with_recursion_limit(2000)
             .build()?
             .parse_statements()?;
     eprintln!("=== DEBUG: parse_sql found {} statements ===", stmts.len());
