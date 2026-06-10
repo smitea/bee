@@ -929,8 +929,58 @@ async fn run_connect_cli(args: &[String]) -> Result<(), String> {
                 return Err(format!("unexpected response: {resp:?}"));
             }
         }
+        Some("kv") => {
+            // `bee --connect <addr> kv list <prefix>
+            //         [--raw]`
+            //  - <prefix>  : the key prefix (e.g.
+            //                 `soak/run_2026-06-10/`).
+            //  - --raw     : print the full bincode
+            //                 body per line. Default
+            //                 prints `(key,
+            //                 value_len)`.
+            let sub = args.get(2).map(String::as_str);
+            let raw = args.iter().any(|a| a == "--raw");
+            match sub {
+                Some("list") => {
+                    let prefix = args
+                        .get(3)
+                        .ok_or_else(|| "kv list requires <prefix>".to_string())?;
+                    let resp = client
+                        .call(AdminRequest::ListKv {
+                            prefix: prefix.to_string(),
+                        })
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    if let AdminResponse::KvList(entries) = resp {
+                        if entries.is_empty() {
+                            println!("(no entries)");
+                        } else {
+                            for (k, v) in &entries {
+                                if raw {
+                                    println!(
+                                        "{} {}",
+                                        k,
+                                        String::from_utf8_lossy(v)
+                                    );
+                                } else {
+                                    println!("{} ({} bytes)", k, v.len());
+                                }
+                            }
+                        }
+                    } else {
+                        return Err(format!("unexpected response: {resp:?}"));
+                    }
+                }
+                Some(other) => {
+                    return Err(format!("unknown kv subcommand `{other}`"))
+                }
+                None => {
+                    return Err("kv requires a subcommand: list".to_string())
+                }
+            }
+        }
         Some(other) => return Err(format!("unknown --connect subcommand `{other}`")),
-        None => return Err("--connect requires a subcommand: ping|jobs|diagnostics|cluster".to_string()),
+        None => return Err("--connect requires a subcommand: ping|jobs|diagnostics|cluster|kv".to_string()),
     }
     Ok(())
 }
