@@ -285,3 +285,51 @@ fi
 3. **`BEE_MULTINODE=1` opt-in vs. auto-detect**: do we want the S40 demo script to auto-launch 3 nodes when on a single host, or always require the env var? My recommendation: env var (explicit > implicit; the S40 demo's CI / dry-run path stays simple).
 
 4. **Backwards compat of the binary CLI**: the existing `bee run`, `bee jobs`, etc. handlers hardcode `Cluster::new(ClusterConfig::default())`. With the new `node` subcommand + `--connect` flag, do we keep the in-process path for `bee run` (yes — no change), or do we always require `--connect` (more invasive, not worth it)?
+
+## Resolutions (S33.1 implementation, 2026-06-10)
+
+All four questions resolved as recommended. The MVP ships in this commit.
+
+1. **Single binary, both roles.** `bee` is one binary that does
+   worker (`bee node`) and admin (`bee --connect <addr>`). The
+   existing CLI handlers (`run_jobs_cli`, `run_diagnostics`,
+   `run_cluster_status_cli`) still work — they spin up an
+   in-process 3-node in-memory cluster as a demo. The new
+   `bee node` and `bee --connect` paths are purely additive.
+   No sub-binaries; no proliferation. See
+   `bee/src/main.rs::main` (dispatch) + `bee/src/run_node.rs`.
+
+2. **No file-backed KV in MVP.** Confirmed: the existing
+   `KVStateMachine` is in-process only. The S33.1 multi-node
+   path inherits the same constraint: the 3 `bee node`
+   processes each have their own empty `KVStateMachine`.
+   This is correct for the 60-second failover demo.
+   Persistence is deferred to 1.x (or a separate story if
+   the S33.2 24h soak needs on-disk state — that's a
+   decision for the S33.2 sign-off, not S33.1).
+
+3. **`BEE_MULTINODE=1` opt-in.** The S40 demo's
+   `scripts/demo-quant-prod.sh` checks `${BEE_MULTINODE:-0}`
+   and only spawns 3 nodes when set. The
+   `BEE_DRY_RUN=1 bash scripts/demo-quant-prod.sh` path
+   stays at 23/23 (off path is a no-op; the new step is
+   a green "failover (dry-run / set BEE_MULTINODE=1 to
+   enable)" record). When `BEE_MULTINODE=1` is set, the
+   failover step is real: `start-cluster.sh` spawns 3
+   `bee node` workers, `kill-node.sh` SIGKILLs one, and
+   the assertion is "surviving 2 of 2 nodes still up;
+   cluster has quorum". 23/23 still green in the
+   dry-run path (verified 2026-06-10).
+
+4. **In-process path kept for `bee run` / `bee jobs` /
+   `bee cluster` / `bee diagnostics`.** No `--connect`
+   requirement. The `Cluster::new(ClusterConfig::default())`
+   call in the existing handlers is unchanged. The new
+   `bee --connect <addr>` is a separate top-level flag
+   that intercepts BEFORE the subcommand dispatch (see
+   `Some("--connect") => ...` in `main.rs::main`). A user
+   who wants the multi-process experience runs `bee node`
+   in 3 terminals + `bee --connect <addr> <subcommand>`
+   from a 4th; a user who wants the quick demo runs
+   `bee jobs` and gets the in-process cluster.
+
