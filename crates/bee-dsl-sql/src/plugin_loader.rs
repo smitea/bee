@@ -85,8 +85,9 @@ impl LoadedPlugin {
     }
 
     /// The plugin's vtable map (name → `*const HandlerVtable`).
-    /// Empty for the current perf-fib scaffold; populated by
-    /// future plugin revisions.
+    /// Populated by the plugin's `init()` (the
+    /// `PerfFibFactory::init` registers `fib_seed` and `fib_step`;
+    /// `TaIndicatorsFactory::init` registers the 6 indicators).
     pub fn handlers(&self) -> &std::collections::HashMap<String, *const HandlerVtable> {
         // SAFETY: same as `manifest()` above.
         unsafe { &(*self.handle).handlers }
@@ -162,13 +163,12 @@ pub enum LoadError {
 /// 1. Open the library with [`libloading::Library::new`].
 /// 2. Resolve the `bee_plugin_init` symbol (typed
 ///    `unsafe extern "C" fn(*mut BeeHostV1) -> *mut PluginHandle`).
-/// 3. Call it with a host function pointer table. For the S41
-///    demo we pass a table with the `register_*_vtable` slots set
-///    to `None`; the perf-fib plugin's `init()` ignores the host
-///    entirely (its `init()` only fills the manifest + an empty
-///    vtable map).
+/// 3. Call it with a host function pointer table. The MVP
+///    passes a table with all function-pointer slots set to
+///    `None`; plugins that need the host's KV / registration
+///    callbacks (a future S41 follow-up) would wire those here.
 /// 4. Return a [`LoadedPlugin`] that owns the library and the
-///    raw handle.
+///   raw handle.
 ///
 /// # Errors
 /// - `libloading` error opening the library → [`LoadError::Dlopen`]
@@ -187,10 +187,11 @@ pub fn load_plugin(path: &Path) -> Result<LoadedPlugin, LoadError> {
                 source: e,
             })?;
 
-        // The S41 perf-fib plugin's `init()` does not call back
-        // into the host. We pass an empty `BeeHostV1` (all
-        // function pointers are `None`); the plugin will see
-        // `ctx == null` and never dereference it.
+        // MVP: empty `BeeHostV1`. The plugin's `init()` does not
+        // call back into the host; it just builds the manifest +
+        // vtable maps and returns the handle. A follow-up that
+        // wires the KV / registration paths would populate
+        // these slots.
         let mut host = Box::new(BeeHostV1 {
             ctx: std::ptr::null_mut(),
             register_adapter: None,
@@ -289,19 +290,25 @@ fn find_workspace_root() -> Option<std::path::PathBuf> {
 ///
 /// Calls the plugin's `handle(state, event) -> (new_state, result)`
 /// function (per the `HandlerVtable` contract in
-/// `crates/bee-plugin-sdk/src/vtable.rs`). The encoding is:
+/// `crates/bee-plugin-sdk/src/vtable.rs`) and returns both the
+/// scalar result and the plugin's new state blob so the caller
+/// can roll its `state_guard` forward across calls. The encoding
+/// is:
 ///
 /// - **Event**: the first input array's first row, bincode-encoded
 ///   as a `u64`. (The S41 perf-fib handlers take a single `n: u64`
 ///   argument; future plugins can extend the encoding.)
 /// - **State**: an opaque blob held by the caller across
 ///   invocations (so the Handler can roll forward). For a
-///   per-DataFusion-UDF state, the host keeps a `RefCell<Vec<u8>>`
+///   per-DataFusion-UDF state, the host keeps a `Mutex<Vec<u8>>`
 ///   alongside the UDF closure. The first call passes an empty
 ///   blob; subsequent calls pass whatever the vtable's previous
 ///   call wrote to `new_state_out`.
 /// - **Result**: a single `i128` bincode-encoded value, returned
 ///   to the host as an Int64Array cell (cast down via `as i64`).
+/// - **New state**: bincode-encoded plugin-private state blob;
+///   the caller copies this into its `state_guard` for the next
+///   invocation.
 ///
 /// # Safety
 /// The caller must ensure:
@@ -324,7 +331,7 @@ pub unsafe fn call_handler_vtable(
     vtable: *const HandlerVtable,
     n: i64,
     state_in: &[u8],
-) -> Result<i64, datafusion::error::DataFusionError> {
+) -> Result<(i64, Vec<u8>), datafusion::error::DataFusionError> {
     use datafusion::error::DataFusionError;
 
     if vtable.is_null() {
@@ -408,7 +415,21 @@ pub unsafe fn call_handler_vtable(
             )));
         }
     };
-    Ok(value as i64)
+
+    // Copy the new state blob out (the plugin leaked its
+    // `Vec<u8>`; the host now owns a copy and the original
+    // memory is leaked for the program's lifetime — a small
+    // constant per dispatch, acceptable for the S41 demo).
+    let new_state_bytes: Vec<u8> = if new_state.ptr.is_null() || new_state.len == 0 {
+        Vec::new()
+    } else {
+        // SAFETY: the plugin wrote bincode-encoded state bytes
+        // into `new_state`. The slice is valid for the duration
+        // of this read.
+        unsafe { std::slice::from_raw_parts(new_state.ptr, new_state.len) }.to_vec()
+    };
+
+    Ok((value as i64, new_state_bytes))
 }
 
 /// Convenience: look up a Handler's vtable and call it, given a
@@ -426,7 +447,7 @@ pub unsafe fn dispatch_handler(
     handler_name: &str,
     n: i64,
     state_in: &[u8],
-) -> Result<Option<i64>, datafusion::error::DataFusionError> {
+) -> Result<Option<(i64, Vec<u8>)>, datafusion::error::DataFusionError> {
     match loaded.handler_vtable(handler_name) {
         Some(vtable) => call_handler_vtable(vtable, n, state_in).map(Some),
         None => Ok(None),
@@ -536,16 +557,23 @@ mod tests {
         assert_eq!(manifest.name.0, "bee-plugin-perf-fib");
         assert!(manifest.handlers.iter().any(|h| h.name == "fib_seed"));
         assert!(manifest.handlers.iter().any(|h| h.name == "fib_step"));
-        // The handlers HashMap is currently empty (the
-        // plugin's init() does not populate the vtable map);
-        // assert that fact so the test fails loudly if a
-        // future plugin revision starts populating it (and
-        // the test needs to be updated).
+        // The plugin's `init()` populates the vtable map
+        // with one entry per declared Handler. Assert the
+        // map is non-empty and contains the two expected
+        // names; the test fails loudly if a future plugin
+        // revision renames or drops a handler.
+        let handlers = loaded.handlers();
         assert!(
-            loaded.handlers().is_empty(),
-            "perf-fib vtable map must be empty (plugin init \
-             does not register vtables); update this test if \
-             the plugin starts populating the map"
+            !handlers.is_empty(),
+            "perf-fib vtable map must be populated by init()"
+        );
+        assert!(
+            handlers.contains_key("fib_seed"),
+            "perf-fib vtable map must contain `fib_seed`"
+        );
+        assert!(
+            handlers.contains_key("fib_step"),
+            "perf-fib vtable map must contain `fib_step`"
         );
         // Leak so the cdylib stays mapped for the rest of
         // the test process.

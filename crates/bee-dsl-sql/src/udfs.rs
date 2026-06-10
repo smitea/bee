@@ -42,7 +42,7 @@
 use std::sync::{Arc, Mutex};
 
 use datafusion::arrow::array::Int64Array;
-use datafusion::arrow::datatypes::DataType;
+use datafusion::arrow::datatypes::{DataType, Field};
 use datafusion::common::Result as DfResult;
 use datafusion::error::DataFusionError;
 use datafusion::logical_expr::{create_udf, ColumnarValue, ScalarUDF, Volatility};
@@ -166,7 +166,7 @@ pub fn register_perf_fib(ctx: &SessionContext) -> DfResult<()> {
                     })?
                     .clone();
 
-                let state_guard = state_for_udf.lock().map_err(|e| {
+                let mut state_guard = state_for_udf.lock().map_err(|e| {
                     DataFusionError::Plan(format!(
                         "{}: state lock poisoned: {e}",
                         handler_name_for_udf
@@ -185,34 +185,24 @@ pub fn register_perf_fib(ctx: &SessionContext) -> DfResult<()> {
                     // and `event`; the new state is written
                     // back into `state_guard` (we copy the
                     // bytes after the call returns).
-                    let result = unsafe {
+                    let (value, new_state_bytes) = unsafe {
                         plugin_loader::call_handler_vtable(
                             vtable_ptr.as_ptr(),
                             n,
                             &state_guard,
                         )
                     }?;
-                    // For now we don't roll the state forward
-                    // (the perf-fib plugin's empty vtable map
-                    // means no Handler is ever registered
-                    // against the real vtable, so the
-                    // `new_state_out` write is a no-op). The
-                    // host-side state blob stays empty across
-                    // calls, which matches the fib_step seed
-                    // pair (0, 1) for stateless handlers like
-                    // `fib_seed`. A future plugin revision
-                    // that populates the vtable map will
-                    // update `state_guard` here from the
-                    // `new_state_out` blob returned by the
-                    // vtable.
-                    out.push(result);
+                    // Roll the state forward so the next
+                    // iteration sees the previous call's
+                    // `new_state_out`. The plugin's contract
+                    // is that the new state is a fresh
+                    // bincode-encoded blob; for a stateless
+                    // handler (like `fib_seed`) the plugin
+                    // writes back the same sentinel, so the
+                    // assignment is a no-op.
+                    *state_guard = new_state_bytes;
+                    out.push(value);
                 }
-                // Note: a stateful plugin would update
-                // `*state_guard = new_state_bytes;` here using
-                // the vtable's `new_state_out`. The current
-                // perf-fib scaffold does not populate the
-                // vtable map, so this path is unreachable in
-                // the S41 demo until the plugin fix lands.
                 drop(state_guard);
 
                 let out_arr = Arc::new(Int64Array::from(out));
@@ -230,16 +220,20 @@ pub fn register_perf_fib(ctx: &SessionContext) -> DfResult<()> {
 /// stubbed out (no-op) in production builds.
 #[cfg(feature = "test-fixtures")]
 pub fn register_test_fixtures(ctx: &SessionContext) -> DfResult<()> {
-    // generate_series(start: Int64, end: Int64) -> Int64Array.
-    // Returns a single Int64Array containing the inclusive range
-    // [start, end]. Use as `FROM UNNEST(generate_series(1, N))` to
-    // expand into rows (DataFusion 50 has no UDTF support; UNNEST
-    // is the canonical way to turn a scalar UDF's array result into
-    // a table source).
+    // generate_series(start: Int64, end: Int64) -> List<Int64>.
+    // Returns a single-row `ListArray` containing the inclusive
+    // range [start, end]. Use as
+    // `FROM UNNEST(generate_series(1, N))` to expand into rows
+    // (DataFusion 50 has no UDTF support; UNNEST is the canonical
+    // way to turn a scalar UDF's list result into a table source).
     ctx.register_udf(ScalarUDF::from(create_udf(
         "generate_series",
         vec![DataType::Int64, DataType::Int64],
-        DataType::Int64,
+        DataType::List(std::sync::Arc::new(Field::new(
+            "item",
+            DataType::Int64,
+            true,
+        ))),
         Volatility::Immutable,
         Arc::new(|args: &[ColumnarValue]| -> DfResult<ColumnarValue> {
             crate::test_fixtures::generate_series_impl(args)
