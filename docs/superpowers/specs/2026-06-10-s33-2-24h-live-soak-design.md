@@ -257,8 +257,8 @@ criteria, the human-fillable results template. The actual
    <bincode(TickMetrics)>` (Raft commit, replicated to all
    3 nodes)
 
-**Tick size estimate**: 8 fields × 100 bytes = ~800 bytes
-per tick. 288 ticks = 230 KB total. Trivial for Raft.
+**Tick size estimate**: 9 fields × 100 bytes = ~900 bytes
+per tick. 288 ticks = 260 KB total. Trivial for Raft.
 
 **Post-soak**:
 
@@ -314,8 +314,8 @@ schema (e.g. `soak/run_*/tick_*` → TickMetrics) or prints
 | Bootstrap finds 0 mongo trades | Same; exit 3 |
 | Any tick finds log_lag > 1000 | Exit 1 with the offending node_id |
 | Any tick finds a task Orphaned for > 60s | Exit 1 with the task_id |
-| influx_klines_per_min == 0 for 10 consecutive ticks (50 min) | Exit 1 (the loop maintains a rolling "0 rate" counter per sink) |
-| mongo_trades_per_min == 0 for 10 consecutive ticks | Exit 1 |
+| influx_klines_per_min == 0 for ≥ 10 min (2 consecutive default-ticks; 120 consecutive 5s-ticks under --smoke) | Exit 1 (the loop maintains a rolling "0 rate" counter per sink) |
+| mongo_trades_per_min == 0 for ≥ 10 min | Exit 1 |
 | InfluxDB / MongoDB unreachable on a tick | Log "query failed", skip threshold check for that tick, continue. After 3 consecutive failures, exit 1 (the external sink is down). |
 | A node's admin RPC is unreachable (failover) | The loop re-runs Phase 2 (leader discovery) every 5s until a new leader is found, then continues. Records `failover_at_ms` on the first failure; `recovered_at_ms` when new leader responds. |
 | Bee itself crashes (kill -9 all 3) | The script's `trap EXIT` cleans up. Run is aborted, partial ticks lost. |
