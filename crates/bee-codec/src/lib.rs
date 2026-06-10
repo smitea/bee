@@ -14,6 +14,13 @@ pub enum MessageType {
     Heartbeat = 0x01,
     DataPacket = 0x02,
     StealTask = 0x03,
+    /// S33.1: admin RPC traffic (ListJobs, JobInspect,
+    /// TaskDiagnostics, ClusterStatus, Ping). Distinct
+    /// from `DataPacket` so a future routing layer can
+    /// forward admin frames to a different handler
+    /// (e.g. a sidecar admin service) without parsing
+    /// the bincode body.
+    Admin = 0x04,
 }
 
 impl MessageType {
@@ -22,6 +29,7 @@ impl MessageType {
             0x01 => Ok(MessageType::Heartbeat),
             0x02 => Ok(MessageType::DataPacket),
             0x03 => Ok(MessageType::StealTask),
+            0x04 => Ok(MessageType::Admin),
             other => Err(CodecError::UnknownMessageType(other)),
         }
     }
@@ -233,10 +241,18 @@ mod tests {
 
     #[test]
     fn message_type_known_values_round_trip() {
-        for mt in [MessageType::Heartbeat, MessageType::DataPacket, MessageType::StealTask] {
+        for mt in [MessageType::Heartbeat, MessageType::DataPacket, MessageType::StealTask, MessageType::Admin] {
             let parsed = MessageType::from_u8(mt as u8).expect("known type must parse");
             assert_eq!(parsed, mt);
         }
+    }
+
+    #[test]
+    fn message_type_admin_round_trips() {
+        // S33.1: Admin = 0x04 must round-trip through
+        // from_u8 and compare equal.
+        assert_eq!(MessageType::from_u8(0x04).unwrap(), MessageType::Admin);
+        assert_eq!(MessageType::Admin as u8, 0x04);
     }
 
     #[test]
