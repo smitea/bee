@@ -187,6 +187,130 @@ fixed in `09c8dd3`.
 
 ---
 
+### S33.1 · Multi-node cluster + failover demo (the gap the agent's S33 sign-off recorded as Gaps #1)
+
+- **Type**: AFK
+- **Blocked by**: S12 (Work-Stealing — done), S07 (3-node Raft — done)
+- **ADRs**: 0001 (P2P + Raft), 0007 (simplified all-in-one topology — this story supersedes the "single-binary" assumption for the demo), 0008 (adaptive scheduler — exercises the multi-node path)
+- **Design**: `docs/superpowers/specs/2026-06-10-s33-1-multinode-cluster-failover-design.md`
+
+> **Why this story exists**: the S33 sign-off form asks the seed user to "Verify failover: kill a Node hosting the `binance` Producer; both strategies should recover within 1 Orphaned period (≤ 30s)". The agent's sign-off attempt recorded that this cannot be verified today because:
+> - `scripts/start-cluster.sh` and `scripts/kill-node.sh` do not exist.
+> - `bee` binary, in every CLI handler, hardcodes `Cluster::new(ClusterConfig::default())` — a single-process 3-node in-memory cluster. The in-process `shutdown_node(id)` simulates node loss at the Raft level but **not** at the process / machine / network level (which is the real production failure model).
+> - `crates/bee-control/src/raft/cluster.rs::Cluster` only knows about `InMemoryTransport`; the working `bee-transport::Listener` + `Connection` (TCP) is unused by the cluster.
+>
+> S33.1 wires all three together so the seed user (or a CI integration test) can run the failover end-to-end on a single host with 3 `bee` processes.
+
+**Scope**
+
+1. Introduce a `RpcTransport` trait in `crates/bee-control/src/raft/transport.rs` with two implementations:
+   - `InMemoryTransport` (already exists; move from `cluster.rs` into a new `in_memory.rs`, implement the trait).
+   - `TcpTransport` (NEW in `crates/bee-control/src/raft/tcp.rs`) — wraps `bee_transport::Listener` for inbound + per-peer `Connection`s for outbound.
+2. Extend `ClusterConfig` with `nodes: Vec<NodeSpec>` so the constructor can build `TcpTransport`s for each slot. Keep the existing `Cluster::new(ClusterConfig)` as a backward-compat shim (defaults to the all-in-memory 3-node cluster when `nodes` is empty) so every existing test + the 3 CLI handlers (`run_jobs_cli`, `run_diagnostics`, `run_cluster_status_cli`) don't move.
+3. Add `bee node --id N --bind ADDR [--peer ID=ADDR ...]` subcommand for worker-only mode. The worker process runs the `Node` (with the new `TcpTransport`); it does NOT attach the CLI handlers.
+4. Add a thin admin RPC layer (`crates/bee-control/src/raft/admin_server.rs` + `admin_client.rs` + 4 new `RpcMessage::Admin*` variants) so `bee --connect ADDR jobs list` / `diagnostics` / `cluster status` work against a remote cluster node. Wire format: `Frame` body = `bincode`-serialized `AdminRequest` / `AdminResponse`. No `tonic` / gRPC (S19 decision).
+5. `scripts/start-cluster.sh` — spawns 3 `bee node` processes, records PIDs in `/tmp/bee_cluster.pids`, polls `cluster status` until leader is elected, prints the topology.
+6. `scripts/kill-node.sh` — sends `SIGKILL` to a specific node's PID.
+7. Update `scripts/demo-quant-prod.sh`'s "verify failover" step to be gated on `BEE_MULTINODE=1` (off by default so the existing 23/23 dry-run path is unchanged). When enabled: start 3 nodes, deploy, kill node 2, assert `bee --connect 127.0.0.1:7701 jobs list` shows all surviving Tasks re-owned by node 1 or 3 within 30s.
+
+**Out of scope** (deferred)
+
+- Cross-host clusters, TLS / mTLS, mDNS / DNS-based peer discovery → 1.x.
+- An admin RPC for the `deploy` path (the S33.1 demo deploys by hand; S33.3 follow-up adds `bee deploy --target`).
+- File-backed KV (today the cluster is in-memory; if 1.x design requires persistence on disk, that's a separate story).
+- The 24h live-soak run → S33.2.
+
+**Acceptance criteria**
+
+- [ ] `cargo build --workspace` green
+- [ ] `cargo test --workspace` green (the 460 existing + new TCP-cluster integration tests)
+- [ ] `Cluster::new_with_specs(3 TcpTransport on 127.0.0.1:0..2)` elects a leader within 5s in `tcp_3_node_elects_leader`
+- [ ] `tcp_3_node_survives_kill` (NEW): after `simulate_process_crash(2)` (a new helper that drops the inbound channel without notifying peers — i.e. SIGKILL semantics), the surviving 2 nodes re-elect within 5s; any Task owned by node 2 transitions `Running → Orphaned` within `3 × heartbeat_interval`
+- [ ] `tcp_3_node_work_steals` (NEW): after the above, a freshly-joined 3rd node (or the surviving free node) issues `StealTask` for an `Orphaned` Task; the new owner resumes; output stream continues
+- [ ] `bee --connect 127.0.0.1:7701 jobs list` works against a remote cluster node (the `AdminClient` round-trips; CLI handlers thread the client through)
+- [ ] `scripts/start-cluster.sh --nodes 3` runs, spawns 3 `bee node` processes, prints the leader + topology
+- [ ] `scripts/kill-node.sh --node 2` sends `SIGKILL`; the surviving 2 nodes re-elect within 5s; `bee --connect ... jobs list` reflects the new state
+- [ ] `BEE_MULTINODE=1 bash scripts/demo-quant-prod.sh` runs end-to-end: 23/23 (or 24/24) steps green, the new "failover" step asserts recovery within 30s
+- [ ] `BEE_DRY_RUN=1 bash scripts/demo-quant-prod.sh` still 23/23 (the off-by-default path is unchanged)
+- [ ] README "Performance Demos" / "Quant trading" / scripts section documents the new `BEE_MULTINODE=1` path with a one-paragraph "what it does / how to run"
+
+**Deliverables**
+
+- `crates/bee-control/src/raft/{transport,in_memory,tcp,cluster,admin_server,admin_client,types,node}.rs` — 8 files, ~530 net lines
+- `bee/src/main.rs` — 1 file, ~120 net lines (the `node` + `--connect` paths)
+- `scripts/{start-cluster,kill-node}.sh` — 2 new files, ~110 net lines
+- `scripts/demo-quant-prod.sh` — 1 file, ~30 net lines (the gated failover step)
+- New tests in `crates/bee-control/src/raft/cluster.rs::tests` + `crates/bee-control/src/raft/tcp.rs::tests` + `bee/tests/cli_tcp_admin.rs`
+
+**After S33.1**: the S33 sign-off form's "Failover verified (Y/N)" row can be flipped to **Y** by running `BEE_MULTINODE=1 scripts/demo-quant-prod.sh` + a manual `kill -9` of a node, then asserting the surviving cluster is healthy. The agent's S33.1 deliverable is **the means to that verification**, not the verification itself.
+
+---
+
+### S33.2 · Live 24-hour soak against real Binance WS + NewsAPI + InfluxDB + MongoDB (the gap the agent's S33 sign-off recorded as Gaps #3)
+
+- **Type**: **HITL** (requires a real human, real credentials, and a 24h wall-clock window)
+- **Blocked by**: S33.1 (multi-node + failover — the production failure model is what the soak must survive)
+- **ADRs**: 0001, 0003, 0009, 0010, 0011
+- **Depends on**: S33.1, S40, the 6 production plugins (S34–S39)
+
+> **Why this story exists**: the S33 sign-off form lists 4 production-deployment items that the agent cannot drive:
+> 1. Run `scripts/demo-quant-prod.sh` with real credentials.
+> 2. Let the pipeline run for ≥ 1 trading day (24 hours).
+> 3. Verify InfluxDB `klines` measurement + MongoDB `trades` collection have live data.
+> 4. Verify failover (delegated to S33.1).
+>
+> S33.1 closes item 4. S33.2 closes items 1–3 by **defining a reproducible 24h soak procedure** that a real human can execute. The agent's role is to write the procedure, the monitoring scripts, and the success criteria; the actual 24h wall-clock is the human's.
+
+**Scope**
+
+1. **`scripts/soak-quant-24h.sh`** — a 24h version of `demo-quant-prod.sh` that:
+   - Starts a 3-node cluster (`scripts/start-cluster.sh`).
+   - Registers the 4 Datasources against the leader node.
+   - Deploys the 3 SQL pipelines (backfill, strategy, v2).
+   - Loops every 5 min for 24h:
+     - `bee --connect 127.0.0.1:7701 cluster status` — record per-node role + log lag.
+     - `bee --connect ... jobs list` — record job count, running/failed/orphaned.
+     - `bee --connect ... diagnostics <each_task_id>` — record per-task throughput.
+     - InfluxDB query for `klines` last-1m row count (proves Binance WS is flowing).
+     - MongoDB query for `trades` last-1m row count (proves the strategy is deciding).
+     - InfluxDB query for `sentiment` last-1m row count (proves NewsAPI is flowing).
+   - Prints a per-hour summary table.
+   - Exits non-zero if any of: (a) a node's log lag > 1000 entries, (b) any Task is `Orphaned` for > 60s without Work-Stealing, (c) InfluxDB or MongoDB write rate drops to 0 for > 10 min.
+2. **`scripts/soak-quant-24h.sh --failover-midway`** — at the 12h mark, `kill -9` one node; the surviving cluster must re-elect + Work-Steal within 30s; the soak continues for another 12h. Proves the production failure model survives real-data flow.
+3. **`docs/best-practices/quant/soak-results-template.md`** — a markdown template the human fills in with the actual numbers from the 24h run (InfluxDB row counts, MongoDB row counts, per-node uptime, failover transition time, total decisions made, P&L if the user is willing to share).
+
+**Out of scope**
+
+- S33.1's multi-node work (separate story).
+- A real P&L calculation (the demo runs on paper / sandbox Binance keys, not real money).
+- Auto-rollback if the soak fails (the human decides; the S33 sign-off form captures the verdict).
+
+**Acceptance criteria**
+
+- [ ] `scripts/soak-quant-24h.sh` exists, is executable, runs end-to-end (smoke-tested for 60s, not 24h)
+- [ ] The smoke test prints the same per-5-min table the 24h run will print
+- [ ] `scripts/soak-quant-24h.sh --failover-midway` is the same script with the 12h `kill -9` injected; the exit-non-zero thresholds are unchanged
+- [ ] `docs/best-practices/quant/soak-results-template.md` exists and has fields for: per-hour InfluxDB row counts, per-hour MongoDB row counts, per-node uptime %, failover transition time, total decisions, total errors
+- [ ] The S40 demo's `verify outputs` step (today's InfluxDB + MongoDB queries) is reused in the soak — no new query code
+- [ ] A real human runs the 24h soak, fills the template, and decides Y/N on the S33 sign-off form's "Real money signals observed" / "InfluxDB data verified" / "MongoDB data verified" / "Failover verified" rows
+
+**Deliverables**
+
+- `scripts/soak-quant-24h.sh` — 1 new file, ~150 lines
+- `docs/best-practices/quant/soak-results-template.md` — 1 new file, ~80 lines (mostly a table template)
+
+**After S33.2**: the S33 sign-off form has all 4 production-deployment rows verifiable. The seed user runs the 24h soak, fills the template, and either signs Y (S33 done) or files gaps.
+
+**Failure mode escalation**
+
+If the 24h soak fails, the human can either:
+- (a) File a new story under the S33 umbrella (e.g. "S33.3 — InfluxDB token rotation on 24h boundary" if the token expired mid-soak) and re-run.
+- (b) Mark S33 as not-done and revert S33's status to "awaiting HITL review" (i.e. the partial sign-off is rolled back).
+
+The agent's S33.2 deliverable is **the means to verify**; the verdict is the human's.
+
+---
+
 ### S34 · `bee-plugin-binance`: production-grade Binance adapter (real WS + REST + backfill)
 
 - **Type**: AFK
