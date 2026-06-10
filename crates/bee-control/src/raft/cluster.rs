@@ -17,6 +17,12 @@ pub struct ClusterConfig {
     pub n: usize,
     pub base_election_timeout: Duration,
     pub heartbeat_interval: Duration,
+    /// S33.1: per-node transport specs. If empty (the
+    /// default), the constructor falls back to the
+    /// all-in-memory behavior (today's `Cluster::new`
+    /// path). If non-empty, each entry's `transport` is
+    /// honored.
+    pub nodes: Vec<NodeSpec>,
 }
 
 impl Default for ClusterConfig {
@@ -25,6 +31,44 @@ impl Default for ClusterConfig {
             n: 3,
             base_election_timeout: Duration::from_millis(800),
             heartbeat_interval: Duration::from_millis(100),
+            nodes: Vec::new(), // empty → in-memory default
+        }
+    }
+}
+
+/// S33.1: per-node transport spec. The MVP supports
+/// `None` (in-memory) and `Some(Tcp { .. })`. The Tcp
+/// variant is wired in Task 3; this Task (Task 2) just
+/// introduces the type and refuses `Some(...)` with a
+/// panic so the existing `Cluster::new(ClusterConfig::default())`
+/// path is unchanged.
+#[derive(Clone, Debug)]
+pub enum NodeTransportSpec {
+    Tcp {
+        bind_addr: std::net::SocketAddr,
+        peers: Vec<(NodeId, std::net::SocketAddr)>,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub struct NodeSpec {
+    pub id: NodeId,
+    /// `None` → build the in-memory `InMemoryTransport`
+    /// (today's behavior). `Some(Tcp { ... })` → build
+    /// a `TcpTransport` (Task 3).
+    pub transport: Option<NodeTransportSpec>,
+    /// Per-node config override (election timeout,
+    /// heartbeat interval, etc.). `None` → fall back
+    /// to `ClusterConfig`'s defaults.
+    pub node_config: Option<super::node::NodeConfig>,
+}
+
+impl Default for NodeSpec {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            transport: None,
+            node_config: None,
         }
     }
 }
@@ -110,6 +154,45 @@ impl Cluster {
         }
 
         Self { slots }
+    }
+
+    /// S33.1: build a cluster with explicit per-node
+    /// transport specs. If `config.nodes` is empty,
+    /// behaves identically to `Cluster::new` (the
+    /// all-in-memory path). If `config.nodes` is
+    /// non-empty, each non-empty `NodeSpec::transport`
+    /// is honored. The MVP supports only the in-memory
+    /// transport via this path; the `Some(Tcp { .. })`
+    /// variant is wired in Task 3 (`TcpTransport`).
+    pub async fn new_with_specs(config: ClusterConfig) -> Self {
+        // For Task 2, the behavior is the same as
+        // `Cluster::new` for the empty-`nodes` case. We
+        // still construct the per-id spec lookup so a
+        // future caller that passes a non-empty `nodes`
+        // gets a clear "not yet wired" panic (Task 3
+        // replaces this with the actual TcpTransport
+        // construction).
+        let specs: std::collections::HashMap<NodeId, NodeSpec> = config
+            .nodes
+            .iter()
+            .cloned()
+            .map(|s| (s.id, s))
+            .collect();
+        for (_id, spec) in &specs {
+            if spec.transport.is_some() {
+                panic!(
+                    "Cluster::new_with_specs: transport = Some(...) is not yet \
+                     wired (Task 3); pass transport: None to get the all-in-memory \
+                     default. (id = {})",
+                    _id
+                );
+            }
+        }
+        // Delegate to the existing `Cluster::new` for
+        // the in-memory path. (Task 3 will inline the
+        // slot-building loop here so the Tcp branch can
+        // call `TcpTransport::new`.)
+        Self::new(config).await
     }
 
     pub fn node(&self, id: NodeId) -> Option<&ClusterNodeHandle> {

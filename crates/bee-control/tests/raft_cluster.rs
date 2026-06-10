@@ -8,6 +8,7 @@ fn test_config() -> ClusterConfig {
         n: 3,
         base_election_timeout: Duration::from_millis(800),
         heartbeat_interval: Duration::from_millis(100),
+        nodes: Vec::new(), // in-memory default
     }
 }
 

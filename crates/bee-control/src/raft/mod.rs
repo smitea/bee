@@ -27,7 +27,7 @@ pub mod node;
 pub mod transport;
 pub mod types;
 
-pub use cluster::{Cluster, ClusterConfig, ClusterNodeHandle, NodeMetrics};
+pub use cluster::{Cluster, ClusterConfig, ClusterNodeHandle, NodeMetrics, NodeSpec, NodeTransportSpec};
 pub use node::{Node, NodeConfig, NodeState};
-pub use transport::{InMemoryTransport, Router};
+pub use transport::{InMemoryTransport, NodeTransport, Router, TransportError};
 pub use types::{LogEntry, NodeCommand, NodeId, RpcMessage, Role, Term, LogIndex};
