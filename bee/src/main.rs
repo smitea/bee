@@ -87,18 +87,54 @@ async fn main() -> ExitCode {
                     _ => positional.push(a),
                 }
             }
-            match run_pipeline_cli(
-                positional.first().copied(),
-                positional.get(1).copied(),
-                measure,
-                replay,
-                strict,
-            )
-            .await
-            {
-                Ok(()) => ExitCode::SUCCESS,
+            // S41: a 1229-phase pipeline (the prime sieve at
+            // N=10^8) can stack-overflow on the default main-thread
+            // stack when the DataFusion optimizer recurses through
+            // the nested `CREATE VIEW → SELECT FROM <prev_view>`
+            // chain. Run the full pipeline on a dedicated thread
+            // with a 64 MB stack so the recursion has headroom.
+            // (Per DataFusion 50's optimizer stack frame size, the
+            // 1229-phase sieve needs ~50 MB at peak.)
+            let sql_path = positional.first().copied().map(String::from);
+            let csv_path = positional.get(1).copied().map(String::from);
+            let join = match std::thread::Builder::new()
+                .stack_size(64 * 1024 * 1024)
+                .spawn(move || {
+                    // The pipeline work is CPU-bound and synchronous
+                    // (CSV read, parse, optimize, execute — no
+                    // .await points inside `run_pipeline_cli`).
+                    // Block on it directly via a fresh single-thread
+                    // tokio runtime so the existing `async fn`
+                    // signatures keep working unchanged.
+                    tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("build runtime")
+                        .block_on(async {
+                            run_pipeline_cli(
+                                sql_path.as_deref(),
+                                csv_path.as_deref(),
+                                measure,
+                                replay,
+                                strict,
+                            )
+                            .await
+                        })
+                }) {
+                Ok(j) => j,
                 Err(e) => {
+                    eprintln!("{}: spawn pipeline thread: {}", PKG_NAME, e);
+                    return ExitCode::from(1);
+                }
+            };
+            match join.join() {
+                Ok(Ok(())) => ExitCode::SUCCESS,
+                Ok(Err(e)) => {
                     eprintln!("{}: run failed: {}", PKG_NAME, e);
+                    ExitCode::from(1)
+                }
+                Err(_) => {
+                    eprintln!("{}: pipeline thread panicked", PKG_NAME);
                     ExitCode::from(1)
                 }
             }
