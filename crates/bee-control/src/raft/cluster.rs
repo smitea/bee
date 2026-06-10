@@ -462,4 +462,21 @@ impl Cluster {
         let _ = cmd_tx.send(NodeCommand::Shutdown).await;
         task_done.notified().await;
     }
+
+    /// S33.1 Task 4: alias for `shutdown_node` that
+    /// reads more naturally in multi-process tests
+    /// ("simulate the worker process for node N being
+    /// SIGKILL'd"). The semantics are identical to a
+    /// graceful shutdown: the slot's run-loop exits,
+    /// its transport is dropped, and the cluster's
+    /// heartbeat logic will eventually time out the
+    /// missing peer. For a real SIGKILL simulation
+    /// (where the process is gone before the cluster
+    /// can mark the slot down), see
+    /// `scripts/kill-node.sh` (Task 14) which
+    /// `kill -9`s the OS-level process and leaves the
+    /// cluster to discover the failure via heartbeats.
+    pub async fn simulate_process_crash(&self, id: NodeId) {
+        self.shutdown_node(id).await;
+    }
 }
