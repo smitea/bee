@@ -26,6 +26,16 @@ sharing, plugin loading, FFI dispatch, SQL pipelines, deployment).
   was an architecture-level smoke demo for the FFI + 5 mock plugins;
   the new `scripts/demo-quant-prod.sh` is the S40 e2e demo against
   real Binance WS / NewsAPI / InfluxDB v2 / MongoDB.
+- `scripts/start-cluster.sh` + `scripts/kill-node.sh` — S33.1's
+  multi-node + failover plumbing. Spawns 3 `bee node` worker
+  processes on `127.0.0.1:7701..7703`; SIGKILLs one to demonstrate
+  the production failure model ("the box dies"). Used by the S40
+  demo's failover step when `BEE_MULTINODE=1` is set (off by
+  default so the existing 23/23 `BEE_DRY_RUN=1` path stays green).
+  The re-election itself is asserted by
+  `crates/bee-control/src/raft/cluster_tcp_integration.rs`
+  ::`tcp_3_node_survives_simulated_crash` (the production script
+  verifies the OS-level kill + surviving-nodes-up contract).
 - `specs/2026-06-08-s33-deferred-ffi-design.md` — the design
   spec for the FFI wire format + runtime plugin dispatching.
 - `plans/2026-06-08-s33-deferred-ffi.md` — the implementation
