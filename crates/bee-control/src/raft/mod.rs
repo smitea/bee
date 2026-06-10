@@ -28,6 +28,7 @@ pub mod admin_server;
 pub mod cluster;
 pub mod node;
 pub mod tcp;
+pub mod tick_metrics;
 pub mod transport;
 pub mod types;
 
@@ -41,5 +42,6 @@ pub use admin_protocol::{
 pub use cluster::{Cluster, ClusterConfig, ClusterNodeHandle, NodeMetrics, NodeSpec, NodeTransportSpec};
 pub use node::{Node, NodeConfig, NodeState};
 pub use tcp::TcpTransport;
+pub use tick_metrics::TickMetrics;
 pub use transport::{InMemoryTransport, NodeTransport, Router, TransportError};
 pub use types::{LogEntry, NodeCommand, NodeId, RpcMessage, Role, Term, LogIndex};
