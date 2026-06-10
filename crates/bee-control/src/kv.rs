@@ -48,7 +48,7 @@ impl std::fmt::Display for TxnError {
 
 impl std::error::Error for TxnError {}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Op {
     Put { key: String, value: Vec<u8> },
     Del { key: String },
@@ -103,7 +103,7 @@ pub enum Op {
     UpdateJobLifecycle { job_id: u32, state: JobLifecycleState },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TaskStatus {
     Pending,
     Scheduled,

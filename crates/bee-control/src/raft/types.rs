@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+
 use crate::kv::Op;
 
 pub type NodeId = u32;
@@ -11,7 +13,7 @@ pub enum Role {
     Leader,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LogEntry {
     pub term: Term,
     pub op: Op,
@@ -23,7 +25,7 @@ impl LogEntry {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RpcMessage {
     RequestVote {
         term: Term,

@@ -20,7 +20,9 @@
 /// (`Job B depends on Job A's output`) has not yet reached `Running`.
 /// The deployer / orchestrator drives transitions: Pending → Scheduled
 /// → Running (or WaitingForUpstream → Running once deps are met).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize,
+)]
 pub enum JobLifecycleState {
     #[default]
     Pending,

@@ -7,6 +7,7 @@ publish.workspace = true
 description = "Bee 共享类型: 跨 crate 的核心枚举 (JobLifecycleState 等),打破控制面↔运行时循环依赖。"
 
 [dependencies]
+serde = { version = "1", features = ["derive"] }
 
 [lints]
 workspace = true

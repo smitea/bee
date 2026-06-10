@@ -9,6 +9,7 @@ use crate::control_plane::ControlPlaneStateMachine;
 use crate::kv::{KVStateMachine, Op, TxnError};
 
 use super::node::{Node, NodeConfig, NodeState};
+use super::tcp::TcpTransport;
 use super::transport::{InMemoryTransport, NodeTransport, Router};
 use super::types::{NodeCommand, NodeId, Role, RpcMessage, Term, LogIndex};
 
@@ -70,6 +71,27 @@ impl Default for NodeSpec {
             transport: None,
             node_config: None,
         }
+    }
+}
+
+/// S33.1: per-node config override resolution. If the
+/// `NodeSpec` carries a `NodeConfig`, use it verbatim;
+/// otherwise fall back to `ClusterConfig`'s defaults
+/// plus a `node_offset_ms` of `(index * 100)ms` so the
+/// staggered-election behavior of `Cluster::new` is
+/// preserved.
+fn spec_to_node_node_config(
+    spec: &NodeSpec,
+    config: &ClusterConfig,
+    index: usize,
+) -> NodeConfig {
+    if let Some(nc) = &spec.node_config {
+        return nc.clone();
+    }
+    NodeConfig {
+        base_election_timeout: config.base_election_timeout,
+        heartbeat_interval: config.heartbeat_interval,
+        node_offset_ms: (index as u64) * 100,
     }
 }
 
@@ -163,38 +185,112 @@ impl Cluster {
     /// behaves identically to `Cluster::new` (the
     /// all-in-memory path). If `config.nodes` is
     /// non-empty, each non-empty `NodeSpec::transport`
-    /// is honored. The MVP supports only the in-memory
-    /// transport via this path; the `Some(Tcp { .. })`
-    /// variant is wired in Task 3 (`TcpTransport`).
+    /// is honored.
     pub async fn new_with_specs(config: ClusterConfig) -> Self {
-        // For Task 2, the behavior is the same as
-        // `Cluster::new` for the empty-`nodes` case. We
-        // still construct the per-id spec lookup so a
-        // future caller that passes a non-empty `nodes`
-        // gets a clear "not yet wired" panic (Task 3
-        // replaces this with the actual TcpTransport
-        // construction).
         let specs: std::collections::HashMap<NodeId, NodeSpec> = config
             .nodes
             .iter()
             .cloned()
             .map(|s| (s.id, s))
             .collect();
-        for (_id, spec) in &specs {
-            if spec.transport.is_some() {
-                panic!(
-                    "Cluster::new_with_specs: transport = Some(...) is not yet \
-                     wired (Task 3); pass transport: None to get the all-in-memory \
-                     default. (id = {})",
-                    _id
-                );
-            }
+        let any_tcp = specs.values().any(|s| s.transport.is_some());
+        if !any_tcp {
+            return Self::new(config).await;
         }
-        // Delegate to the existing `Cluster::new` for
-        // the in-memory path. (Task 3 will inline the
-        // slot-building loop here so the Tcp branch can
-        // call `TcpTransport::new`.)
-        Self::new(config).await
+        Self::new_with_tcp(config, &specs).await
+    }
+
+    /// S33.1 Task 3: inlined slot-building loop that
+    /// honors each `NodeSpec::transport`. Today only
+    /// `NodeTransportSpec::Tcp { .. }` is supported;
+    /// `None` (in-memory) is handled by `new_with_specs`
+    /// short-circuiting to `Self::new` above.
+    async fn new_with_tcp(
+        config: ClusterConfig,
+        specs: &std::collections::HashMap<NodeId, NodeSpec>,
+    ) -> Self {
+        // Build a TcpTransport per spec.id. The order
+        // of `connect_peers` matters: the listener is
+        // bound first (so the dial side has a port to
+        // call), then we dial peers in NodeId order.
+        let mut tcp_handles: HashMap<NodeId, Arc<TcpTransport>> = HashMap::new();
+        let mut ids: Vec<NodeId> = specs.keys().copied().collect();
+        ids.sort();
+        for &id in &ids {
+            let spec = &specs[&id];
+            let transport = match &spec.transport {
+                Some(NodeTransportSpec::Tcp { bind_addr, peers }) => {
+                    let t = TcpTransport::bind(id, bind_addr.to_string())
+                        .await
+                        .expect("TcpTransport::bind");
+                    let peer_addrs: Vec<(NodeId, String)> = peers
+                        .iter()
+                        .map(|(pid, addr)| (*pid, addr.to_string()))
+                        .collect();
+                    t.connect_peers(peer_addrs)
+                        .await
+                        .expect("TcpTransport::connect_peers");
+                    Arc::new(t)
+                }
+                None => panic!(
+                    "Cluster::new_with_tcp called with at least one Tcp spec, \
+                     but spec for id={id} is None — use Cluster::new for the \
+                     in-memory path."
+                ),
+            };
+            tcp_handles.insert(id, transport);
+        }
+        let mut slots: Vec<ClusterNodeSlot> = Vec::new();
+        for (i, &id) in ids.iter().enumerate() {
+            let tcp = tcp_handles[&id].clone();
+            let peer_ids: Vec<NodeId> = ids.iter().copied().filter(|&x| x != id).collect();
+            // We need a `cmd_tx` to push Submit / Shutdown
+            // into this node's command channel. TcpTransport
+            // owns its own mpsc; we get at it via a
+            // dedicated channel. For MVP we spawn a tiny
+            // forwarder task that copies from our
+            // Slot's cmd_tx into TcpTransport's
+            // submit_command.
+            let (slot_cmd_tx, mut slot_cmd_rx) =
+                mpsc::channel::<NodeCommand>(64);
+            let tcp_for_forward = tcp.clone();
+            tokio::spawn(async move {
+                while let Some(cmd) = slot_cmd_rx.recv().await {
+                    if tcp_for_forward
+                        .submit_command(cmd)
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            });
+            let kv = Arc::new(Mutex::new(KVStateMachine::new()));
+            let cp = Arc::new(Mutex::new(ControlPlaneStateMachine::new()));
+            let node_config = spec_to_node_node_config(&specs[&id], &config, i);
+            let node = Node::new(
+                id,
+                peer_ids,
+                tcp as Arc<dyn NodeTransport>,
+                kv.clone(),
+                cp.clone(),
+                node_config,
+            );
+            let state = node.state();
+            let task_done = Arc::new(Notify::new());
+            let task_done_inner = task_done.clone();
+            tokio::spawn(async move {
+                let _ = node.run().await;
+                task_done_inner.notify_one();
+            });
+            slots.push(ClusterNodeSlot {
+                handle: ClusterNodeHandle { id, state, kv, cp },
+                cmd_tx: slot_cmd_tx,
+                task_done,
+                alive: Arc::new(AtomicBool::new(true)),
+            });
+        }
+        Self { slots }
     }
 
     pub fn node(&self, id: NodeId) -> Option<&ClusterNodeHandle> {

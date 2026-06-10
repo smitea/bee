@@ -13,6 +13,7 @@ bee-types = { workspace = true }
 bee-plugin-sdk = { workspace = true }
 bee-dsl-sql = { workspace = true }
 bee-transport = { workspace = true }
+bee-codec = { workspace = true }
 async-trait = "0.1"
 bincode = "1"
 thiserror = "2"
