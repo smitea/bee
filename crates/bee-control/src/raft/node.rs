@@ -322,6 +322,23 @@ impl Node {
             RpcMessage::HeartbeatReply { term, follower_id: _ } => {
                 self.handle_heartbeat_reply(term).await;
             }
+            // S33.1 Task 8 will route the 5 Admin* variants
+            // through the admin handler; until then they
+            // are no-ops (the local admin server / TcpTransport
+            // submit_command path are the entry points for
+            // MVP; direct RpcMessage::Admin* delivery on the
+            // Raft channel is not used yet).
+            RpcMessage::AdminListJobs
+            | RpcMessage::AdminJobInspect(_)
+            | RpcMessage::AdminTaskDiagnostics(_)
+            | RpcMessage::AdminClusterStatus
+            | RpcMessage::AdminPing => {
+                // TODO(S33.1 Task 8): dispatch to
+                // self.handle_admin(msg) which queries
+                // self.kv / self.cp and replies via
+                // self.transport.send(to, AdminReply(...))
+                // on the same Raft channel.
+            }
         }
     }
 

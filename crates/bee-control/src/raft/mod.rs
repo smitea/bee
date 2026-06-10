@@ -22,12 +22,17 @@
 //! - Snapshotting (1.x)
 //! - Membership changes (1.x)
 
+pub mod admin_protocol;
 pub mod cluster;
 pub mod node;
 pub mod tcp;
 pub mod transport;
 pub mod types;
 
+pub use admin_protocol::{
+    AdminRequest, AdminResponse, ClusterMetricsDetail, JobDep, JobDetail, JobSummary,
+    NodeMetricsSummary, TaskDiagDetail,
+};
 pub use cluster::{Cluster, ClusterConfig, ClusterNodeHandle, NodeMetrics, NodeSpec, NodeTransportSpec};
 pub use node::{Node, NodeConfig, NodeState};
 pub use tcp::TcpTransport;

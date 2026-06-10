@@ -16,7 +16,7 @@ use std::collections::HashMap;
 
 use crate::kv::{JobLifecycleState, Op, TaskStatus, TxnError};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct JobRecord {
     pub job_id: u32,
     pub dag_hash: String,
@@ -50,13 +50,13 @@ pub struct JobRecord {
 /// BRP data channel subscription. S18 stops at the metadata
 /// layer; the actual data-channel resolution is the S25
 /// cross-Node rebalance machinery.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DependencyRecord {
     pub upstream_job: u32,
     pub stream: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TaskRecord {
     pub task_id: u32,
     pub job_id: u32,

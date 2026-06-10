@@ -60,6 +60,16 @@ pub enum RpcMessage {
         term: Term,
         follower_id: NodeId,
     },
+    /// S33.1: admin RPC request from a remote `bee --connect`
+    /// client. The receiving Node handles it locally (or
+    /// forwards to the leader if the request is a write).
+    /// MVP: all admin requests are reads; every Node can
+    /// serve them from its own state machine.
+    AdminListJobs,
+    AdminJobInspect(u32),
+    AdminTaskDiagnostics(u32),
+    AdminClusterStatus,
+    AdminPing,
 }
 
 #[derive(Debug)]
