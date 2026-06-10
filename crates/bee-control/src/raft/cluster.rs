@@ -9,7 +9,7 @@ use crate::control_plane::ControlPlaneStateMachine;
 use crate::kv::{KVStateMachine, Op, TxnError};
 
 use super::node::{Node, NodeConfig, NodeState};
-use super::transport::{InMemoryTransport, Router};
+use super::transport::{InMemoryTransport, NodeTransport, Router};
 use super::types::{NodeCommand, NodeId, Role, RpcMessage, Term, LogIndex};
 
 #[derive(Debug, Clone)]
@@ -128,7 +128,9 @@ impl Cluster {
             let peer_ids: Vec<NodeId> = ids.iter().copied().filter(|&x| x != id).collect();
             let (_, rpc_rx) = inboxes.remove(0);
             let (_, cmd_rx) = cmd_inboxes.remove(0);
-            let transport = InMemoryTransport::new(id, router.clone(), rpc_rx, cmd_rx);
+            let transport: Arc<dyn NodeTransport> = Arc::new(
+                InMemoryTransport::new(id, router.clone(), rpc_rx, cmd_rx),
+            );
             let kv = Arc::new(Mutex::new(KVStateMachine::new()));
             let cp = Arc::new(Mutex::new(ControlPlaneStateMachine::new()));
             let node_config = NodeConfig {

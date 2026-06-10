@@ -7,7 +7,7 @@ use tokio::sync::Mutex;
 use crate::control_plane::ControlPlaneStateMachine;
 use crate::kv::{KVStateMachine, Op, TxnError};
 
-use super::transport::InMemoryTransport;
+use super::transport::{InMemoryTransport, NodeTransport};
 use super::types::{LogEntry, NodeCommand, NodeId, RpcMessage, Role, Term, LogIndex};
 
 #[derive(Debug, Clone)]
@@ -84,7 +84,14 @@ impl NodeState {
 pub struct Node {
     self_id: NodeId,
     peer_ids: Vec<NodeId>,
-    transport: InMemoryTransport,
+    // Type-erased (Arc<dyn NodeTransport>) so the same
+    // `Node` runs against either `InMemoryTransport`
+    // (mpsc channels; the historical path) or
+    // `TcpTransport` (bee-transport sockets; the S33.1
+    // multi-node path). The 4 call sites inside `Node::run`
+    // call the trait's methods; `InMemoryTransport`
+    // implements the trait (see transport.rs).
+    transport: Arc<dyn NodeTransport>,
     state: Arc<Mutex<NodeState>>,
     kv: Arc<Mutex<KVStateMachine>>,
     cp: Arc<Mutex<ControlPlaneStateMachine>>,
@@ -95,7 +102,7 @@ impl Node {
     pub fn new(
         self_id: NodeId,
         peer_ids: Vec<NodeId>,
-        transport: InMemoryTransport,
+        transport: Arc<dyn NodeTransport>,
         kv: Arc<Mutex<KVStateMachine>>,
         cp: Arc<Mutex<ControlPlaneStateMachine>>,
         config: NodeConfig,
