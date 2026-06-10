@@ -127,6 +127,14 @@ pub struct TaskDiagDetail {
     pub status: TaskStatus,
     pub owner_node: u32,
     pub started_at_ms: u64,
+    /// S33.2: per-Task runtime stats. `None` for
+    /// Tasks that have not yet been observed by the
+    /// Node's auto-counter (e.g. tasks on a peer
+    /// node that the local Node never dispatched
+    /// to). The AdminServer's `TaskDiagnostics`
+    /// handler fills this from `Node::stats` at
+    /// dispatch time.
+    pub runtime_stats: Option<TaskRuntimeStats>,
 }
 
 impl From<&TaskRecord> for TaskDiagDetail {
@@ -138,6 +146,11 @@ impl From<&TaskRecord> for TaskDiagDetail {
             status: t.status,
             owner_node: t.owner_node,
             started_at_ms: t.started_at_ms,
+            // The Node's stats map is not visible
+            // here. The AdminServer's `dispatch`
+            // overrides this field with the live
+            // stats after the `From` conversion.
+            runtime_stats: None,
         }
     }
 }
@@ -171,4 +184,36 @@ impl From<AdminRequest> for RpcMessage {
             AdminRequest::Ping => RpcMessage::AdminPing,
         }
     }
+}
+
+/// S33.2: per-Task runtime statistics, populated by
+/// Node-side auto-instrumentation at the
+/// `dispatch_handler` call site. The fields are
+/// cumulative counters + a 1-minute rolling average
+/// (computed at read time from the cumulative
+/// counter, no separate sliding window needed for
+/// the 5-min tick interval).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TaskRuntimeStats {
+    /// Cumulative count of handler invocations since
+    /// the Node started (or since this Task was last
+    /// observed by the Node's auto-counter).
+    pub messages_processed: u64,
+    /// 1-min rolling average of
+    /// `messages_processed`. Computed at read time
+    /// (see `AdminServer::dispatch(TaskDiagnostics)`
+    /// — we don't store a separate window).
+    pub messages_per_sec: f64,
+    /// Unix epoch ms of the last handler invocation.
+    /// `0` if the Task has never been invoked.
+    pub last_message_at_ms: u64,
+    /// Cumulative count of handler invocations that
+    /// returned `Err`.
+    pub error_count: u64,
+    /// Unix epoch ms of the last error. `0` if no
+    /// error has been observed.
+    pub last_error_at_ms: u64,
+    /// The most recent error message, truncated to
+    /// 1 KiB. `None` if no error has been observed.
+    pub last_error: Option<String>,
 }
