@@ -22,6 +22,7 @@
 //! - Snapshotting (1.x)
 //! - Membership changes (1.x)
 
+pub mod admin_client;
 pub mod admin_protocol;
 pub mod admin_server;
 pub mod cluster;
