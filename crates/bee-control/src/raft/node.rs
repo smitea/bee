@@ -7,8 +7,15 @@ use tokio::sync::Mutex;
 use crate::control_plane::ControlPlaneStateMachine;
 use crate::kv::{KVStateMachine, Op, TxnError};
 
+use super::admin_protocol::TaskRuntimeStats;
 use super::transport::{InMemoryTransport, NodeTransport};
 use super::types::{LogEntry, NodeCommand, NodeId, RpcMessage, Role, Term, LogIndex};
+
+/// S33.2 type alias: a `TaskId` is the same as
+/// `NodeId`/`u32` historically. We use `u32`
+/// directly throughout (matching the
+/// `AdminServer::dispatch` and `TaskRecord`).
+pub type TaskId = u32;
 
 #[derive(Debug, Clone)]
 pub struct NodeConfig {
@@ -84,8 +91,8 @@ impl NodeState {
 pub struct Node {
     self_id: NodeId,
     peer_ids: Vec<NodeId>,
-    // Type-erased (Arc<dyn NodeTransport>) so the same
-    // `Node` runs against either `InMemoryTransport`
+    // Type-erased (Arc<dyn NodeTransport>) so the
+    // same `Node` runs against either `InMemoryTransport`
     // (mpsc channels; the historical path) or
     // `TcpTransport` (bee-transport sockets; the S33.1
     // multi-node path). The 4 call sites inside `Node::run`
@@ -95,6 +102,12 @@ pub struct Node {
     state: Arc<Mutex<NodeState>>,
     kv: Arc<Mutex<KVStateMachine>>,
     cp: Arc<Mutex<ControlPlaneStateMachine>>,
+    /// S33.2: per-Task runtime statistics,
+    /// populated by `Node::record_task_message` /
+    /// `Node::record_task_error` (called from the
+    /// `dispatch_handler` call site). Read by
+    /// `AdminServer::dispatch(TaskDiagnostics)`.
+    stats: Arc<Mutex<HashMap<TaskId, TaskRuntimeStats>>>,
     config: NodeConfig,
 }
 
@@ -114,12 +127,58 @@ impl Node {
             state: Arc::new(Mutex::new(NodeState::new())),
             kv,
             cp,
+            stats: Arc::new(Mutex::new(HashMap::new())),
             config,
         }
     }
 
     pub fn state(&self) -> Arc<Mutex<NodeState>> {
         self.state.clone()
+    }
+
+    /// S33.2: clone the stats map handle. The
+    /// `AdminServer` (Task 4) uses this to read
+    /// live stats when servicing a
+    /// `TaskDiagnostics` request.
+    pub fn stats(&self) -> Arc<Mutex<HashMap<TaskId, TaskRuntimeStats>>> {
+        self.stats.clone()
+    }
+
+    /// S33.2: record that a handler invocation
+    /// for `task_id` succeeded. The caller (the
+    /// `dispatch_handler` site) is responsible
+    /// for trimming the 1-min rolling average
+    /// (we just bump the counter; the rolling
+    /// avg is computed at read time).
+    pub async fn record_task_message(&self, task_id: TaskId) {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let mut stats = self.stats.lock().await;
+        let entry = stats.entry(task_id).or_default();
+        entry.messages_processed = entry.messages_processed.saturating_add(1);
+        entry.last_message_at_ms = now_ms;
+    }
+
+    /// S33.2: record that a handler invocation
+    /// for `task_id` returned an error.
+    /// `error_msg` is truncated to 1 KiB before
+    /// storage.
+    pub async fn record_task_error(&self, task_id: TaskId, error_msg: &str) {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let mut stats = self.stats.lock().await;
+        let entry = stats.entry(task_id).or_default();
+        entry.error_count = entry.error_count.saturating_add(1);
+        entry.last_error_at_ms = now_ms;
+        let mut msg = error_msg.to_string();
+        if msg.len() > 1024 {
+            msg.truncate(1024);
+        }
+        entry.last_error = Some(msg);
     }
 
     pub fn kv(&self) -> Arc<Mutex<KVStateMachine>> {
@@ -647,4 +706,33 @@ impl Node {
                 .await;
         }
     }
+}
+
+
+/// S33.2: compute the 1-min messages/sec rate from
+/// the cumulative counter. We do not have a separate
+/// sliding window; instead, the AdminServer's
+/// `dispatch` calls this on the live stats and
+/// assumes the caller's tick interval is the
+/// observation window. For the 5-min 24h-loop
+/// interval, the displayed rate is the
+/// `messages_processed / elapsed_minutes` (so the
+/// number drifts up over the run as the cumulative
+/// counter accumulates — that is acceptable for
+/// 24h-soak human review; the script's threshold
+/// check uses absolute `klines` and `trades` from
+/// InfluxDB / MongoDB, not this rate).
+pub fn messages_per_sec(messages_processed: u64, started_at_ms: u64) -> f64 {
+    if started_at_ms == 0 {
+        return 0.0;
+    }
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let elapsed_sec = now_ms.saturating_sub(started_at_ms) as f64 / 1000.0;
+    if elapsed_sec < 1.0 {
+        return 0.0;
+    }
+    messages_processed as f64 / elapsed_sec
 }
