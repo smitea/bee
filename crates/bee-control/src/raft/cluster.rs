@@ -209,13 +209,16 @@ impl Cluster {
         config: ClusterConfig,
         specs: &std::collections::HashMap<NodeId, NodeSpec>,
     ) -> Self {
-        // Build a TcpTransport per spec.id. The order
-        // of `connect_peers` matters: the listener is
-        // bound first (so the dial side has a port to
-        // call), then we dial peers in NodeId order.
+        // Two-phase boot: bind ALL listeners first,
+        // then dial ALL peers. This is required
+        // because each Node's peers include the
+        // others; if we bound-and-dialed in a single
+        // loop, node 1's dial of node 2 would race
+        // with node 2's bind.
         let mut tcp_handles: HashMap<NodeId, Arc<TcpTransport>> = HashMap::new();
         let mut ids: Vec<NodeId> = specs.keys().copied().collect();
         ids.sort();
+        // Phase 1: bind.
         for &id in &ids {
             let spec = &specs[&id];
             let transport = match &spec.transport {
@@ -223,13 +226,7 @@ impl Cluster {
                     let t = TcpTransport::bind(id, bind_addr.to_string())
                         .await
                         .expect("TcpTransport::bind");
-                    let peer_addrs: Vec<(NodeId, String)> = peers
-                        .iter()
-                        .map(|(pid, addr)| (*pid, addr.to_string()))
-                        .collect();
-                    t.connect_peers(peer_addrs)
-                        .await
-                        .expect("TcpTransport::connect_peers");
+                    let _ = peers; // peer list is consumed in phase 2
                     Arc::new(t)
                 }
                 None => panic!(
@@ -239,6 +236,21 @@ impl Cluster {
                 ),
             };
             tcp_handles.insert(id, transport);
+        }
+        // Phase 2: dial. Every listener is up; dials
+        // succeed on the first attempt.
+        for &id in &ids {
+            let spec = &specs[&id];
+            if let Some(NodeTransportSpec::Tcp { peers, .. }) = &spec.transport {
+                let peer_addrs: Vec<(NodeId, String)> = peers
+                    .iter()
+                    .map(|(pid, addr)| (*pid, addr.to_string()))
+                    .collect();
+                tcp_handles[&id]
+                    .connect_peers(peer_addrs)
+                    .await
+                    .expect("TcpTransport::connect_peers");
+            }
         }
         let mut slots: Vec<ClusterNodeSlot> = Vec::new();
         for (i, &id) in ids.iter().enumerate() {

@@ -31,6 +31,9 @@ pub mod tcp;
 pub mod transport;
 pub mod types;
 
+#[cfg(test)]
+mod cluster_tcp_integration;
+
 pub use admin_protocol::{
     AdminRequest, AdminResponse, ClusterMetricsDetail, JobDep, JobDetail, JobSummary,
     NodeMetricsSummary, TaskDiagDetail,

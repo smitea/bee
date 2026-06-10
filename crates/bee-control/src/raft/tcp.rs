@@ -112,13 +112,36 @@ impl TcpTransport {
         for (peer_id, peer_addr) in peers {
             let (tx, mut rx) = mpsc::channel::<RpcMessage>(128);
             let self_id = self.self_id;
-            let mut conn = match Connection::connect(&peer_addr).await {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!(
-                        "tcp: dial {peer_id}@{peer_addr} failed: {e} \
-                         (will surface as PeerClosed on first send)"
-                    );
+            // Retry the initial dial: when a 3-node
+            // cluster boots from a single process the
+            // listeners come up sequentially, so the
+            // first dial attempt on a peer whose
+            // accept loop hasn't started yet will fail
+            // with ECONNREFUSED. We retry a handful of
+            // times (50ms × 20 = 1s total) before
+            // giving up and registering a
+            // PeerClosed-fated channel.
+            let mut conn: Option<Connection> = None;
+            for attempt in 0..20 {
+                match Connection::connect(&peer_addr).await {
+                    Ok(c) => {
+                        conn = Some(c);
+                        break;
+                    }
+                    Err(e) => {
+                        if attempt == 19 {
+                            eprintln!(
+                                "tcp: dial {peer_id}@{peer_addr} failed after 20 \
+                                 attempts: {e} (will surface as PeerClosed on first send)"
+                            );
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    }
+                }
+            }
+            let mut conn = match conn {
+                Some(c) => c,
+                None => {
                     self.peers.lock().await.insert(
                         peer_id,
                         PeerLink {
