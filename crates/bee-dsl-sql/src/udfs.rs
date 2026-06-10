@@ -240,18 +240,25 @@ pub fn register_test_fixtures(ctx: &SessionContext) -> DfResult<()> {
         }),
     )));
 
-    // generate_events(schema: Int64, count: Int64, seed: Int64) -> StructArray.
-    // Returns a StructArray with { user_id: Int64, ts: Int64 }.
-    // For the S41 demo, the schema arg is accepted but ignored.
+    // generate_events(schema: Int64, count: Int64, seed: Int64)
+    //   -> List<Struct<user_id, ts>>.
+    // The impl returns a single-row ListArray whose element type
+    // is `Struct<user_id: Int64, ts: Int64>`; UNNEST then flattens
+    // it to `count` rows. For the S41 demo, the schema arg is
+    // accepted but ignored (the output struct is always
+    // { user_id, ts } — the only columns the multi_stream_analytics
+    // SQL references).
     ctx.register_udf(ScalarUDF::from(create_udf(
         "generate_events",
         vec![DataType::Int64, DataType::Int64, DataType::Int64],
-        DataType::Struct(
-            datafusion::arrow::datatypes::Fields::from(vec![
-                datafusion::arrow::datatypes::Field::new("user_id", DataType::Int64, false),
-                datafusion::arrow::datatypes::Field::new("ts", DataType::Int64, false),
-            ]),
-        ),
+        DataType::List(std::sync::Arc::new(Field::new(
+            "item",
+            DataType::Struct(datafusion::arrow::datatypes::Fields::from(vec![
+                Field::new("user_id", DataType::Int64, false),
+                Field::new("ts", DataType::Int64, false),
+            ])),
+            false,
+        ))),
         Volatility::Immutable,
         Arc::new(|args: &[ColumnarValue]| -> DfResult<ColumnarValue> {
             crate::test_fixtures::generate_events_impl(args)

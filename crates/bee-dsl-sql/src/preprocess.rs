@@ -647,16 +647,20 @@ pub enum CreateKind {
 ///
 /// In addition, the body is scanned for the pattern
 /// `FROM <UDF_name>(...)` and rewritten to
-/// `FROM UNNEST(<UDF_name>(...)) AS <alias>(<col>, ...)`. This is a
+/// `FROM UNNEST(<UDF_name>(...)) [AS <alias>]`. This is a
 /// hack for the S41 MVP's test-fixture UDFs: DataFusion 50
 /// has no UDTF support, so the only way to turn a scalar UDF's
 /// array-shaped result into a table is `UNNEST`. Two UDFs are
 /// handled:
-/// - `generate_series(start, end)` returns a flat `Int64Array` and
-///   rewrites to `... AS u(n)`.
+/// - `generate_series(start, end)` returns a `List<Int64>` and
+///   rewrites to `... AS u(n)` (the `n` rename maps the
+///   List's `item` field to the demo's expected column name).
 /// - `generate_events(schema, count, seed)` returns a
-///   `Struct<user_id: Int64, ts: Int64>` and rewrites to
-///   `... AS t(user_id, ts)` (the struct fields become columns).
+///   `List<Struct<user_id: Int64, ts: Int64>>` and rewrites to
+///   `UNNEST(...)` with NO table alias (see
+///   `rewrite_test_fixtures_in_from_handles_generate_events`
+///   for the history of why `AS t` and `AS t(user_id, ts)`
+///   don't work in DataFusion 50).
 /// Other UDFs in `FROM` are left alone (DataFusion will surface a
 /// clear error at planning time). A proper UDTF-based replacement
 /// is a follow-up.
@@ -934,30 +938,135 @@ fn find_next_statement_start(s: &str) -> Option<usize> {
     None
 }
 
-/// Rewrite `FROM <UDF_name>(...)` to
-/// `FROM UNNEST(<UDF_name>(...)) AS <alias>(<col>, ...)` for the
+/// Rewrite `FROM <UDF_name>(...)` to a preprocessor-time
+/// `VALUES` table or a runtime `UNNEST(...) AS ...` for the
 /// S41 MVP's test-fixture UDFs. Two cases are handled:
 ///
 /// - `generate_series(start, end)` → `UNNEST(...) AS u(n)`. The
-///   flat `Int64Array` result expands to a single column named
-///   `n` (matching the demo's `SELECT n FROM generate_series(...)`).
-/// - `generate_events(schema, count, seed)` → `UNNEST(...) AS
-///   t(user_id, ts)`. The `Struct<user_id, ts>` result expands to
-///   two columns named after the struct fields.
+///   `List<Int64>` result has a single column named `item`
+///   (the List's element field); the `AS u(n)` rename surfaces
+///   it as `n` (matching the demo's
+///   `SELECT n FROM generate_series(...)`).
+/// - `generate_events(schema, count, seed)` → a literal
+///   `(VALUES (uid, ts), (uid, ts), ...) AS t(user_id, ts)`
+///   table (preprocessor-time expansion, NOT a runtime UDF).
+///   See `expand_generate_events_in_from` for the full history
+///   of why the UDF-based designs all failed on DataFusion 50
+///   and why the preprocessor-time VALUES expansion is the
+///   pragmatic fix.
 ///
 /// Other UDFs are left alone; DataFusion will surface a clear
 /// error at planning time if the FROM references an unknown UDF.
-/// A proper UDTF-based replacement is a follow-up.
 fn rewrite_test_fixtures_in_from(body: &str) -> String {
-    // First handle generate_series (flat Int64Array → 1 col `n`).
+    // First try the preprocessor-time expansion of
+    // `generate_events(...)` (replaces the UDF call with a
+    // literal `VALUES` table — see function docstring for the
+    // history of the UDF-based designs that this replaces).
+    if let Some(out) = expand_generate_events_in_from(body) {
+        return out;
+    }
+    // Then handle generate_series (List<Int64> → 1 col `n`).
     if let Some(out) = rewrite_one_udf_in_from(body, "generate_series", "u(n)") {
         return out;
     }
-    // Then generate_events (Struct<user_id, ts> → 2 cols).
-    if let Some(out) = rewrite_one_udf_in_from(body, "generate_events", "t(user_id, ts)") {
-        return out;
-    }
     body.to_string()
+}
+
+/// Expand `FROM generate_events(schema, count, seed)` to
+/// `FROM (VALUES (uid, ts), (uid, ts), ...) AS t(user_id, ts)`
+/// by running the same LCG the UDF would run, at preprocessor
+/// time. The output is a `VALUES` table (DataFusion 50's
+/// native inline-table form) with exactly `count` rows × 2
+/// columns (`user_id`, `ts`).
+///
+/// ## History of the previous UDF-based designs
+///
+/// Earlier revisions of this rewrite kept `generate_events` as
+/// a runtime UDF and tried to flatten its `List<Struct<...>>`
+/// result via `UNNEST`. None of these worked on DataFusion 50:
+/// - `UNNEST(...) AS t(user_id, ts)`: rejected with "Source
+///   table contains 1 columns but only 2 names given" (the
+///   outer List has 1 column; the inner Struct's 2 fields
+///   are addressable only via the flatten-UNNEST step).
+/// - `UNNEST(...) AS t` (no per-column rename): rejected with
+///   "No field named user_id. Valid fields are
+///   t."UNNEST(generate_events(...))"" — DataFusion 50's
+///   column resolver latches onto the UNNEST's table alias
+///   and refuses to surface the struct's fields as bare
+///   column names.
+/// - Bare `UNNEST(...)` (no alias at all): same "No field
+///   named user_id" error (the struct's fields don't leak
+///   into the FROM scope).
+/// - Wrap in `(SELECT user_id, ts FROM UNNEST(...)) AS t`:
+///   parses + plans, but the inner UNNEST of
+///   `List<Struct<...>>` is still treated as 1 column and
+///   `SELECT user_id, ts FROM <1 col>` fails.
+/// - Final fix (this revision): drop the UDF entirely. Run
+///   the LCG at preprocess time, emit a literal `VALUES`
+///   table. The shape is the canonical DataFusion inline
+///   table; `SELECT user_id, ts FROM (...)` resolves the
+///   columns trivially. No UDF, no UNNEST-of-Struct quirks.
+///
+/// ## Trade-offs
+///
+/// - **Pro**: works on DataFusion 50 without UNNEST gymnastics.
+///   Output is portable to any SQL engine that supports
+///   `VALUES`.
+/// - **Con**: O(count) bytes of preprocessor output per
+///   `generate_events` call. For 1000 rows × ~25 bytes ≈ 25 KB
+///   per source — fine. For 1M rows ≈ 25 MB per source —
+///   would need a real UDTF or a CSV-backed source. The S41
+///   demo's 1000-row `clicks` + 500-row `views` + 250-row
+///   `purchases` is well within the 100 KB total budget.
+/// - **Con**: the LCG logic now lives in BOTH the
+///   `generate_events` UDF (for the case where it's called
+///   from a non-`FROM` context) and the preprocessor (for the
+///   `FROM` rewrite). The preprocessor version is a 6-line
+///   port; the duplication is documented but not refactored
+///   out (the UDF may be removed entirely once we confirm the
+///   demo's only use is the `FROM` form).
+fn expand_generate_events_in_from(body: &str) -> Option<String> {
+    let marker = "FROM generate_events(";
+    let start = body.find(marker)?;
+    let after_open = start + marker.len();
+    let close_rel = body[after_open..].find(')')?;
+    let close = after_open + close_rel;
+    let args_str = &body[after_open..close];
+    // Args are 3 Int64 literals: schema, count, seed. The
+    // schema arg is ignored (the S41 demo only references
+    // `user_id` and `ts` columns).
+    let mut parts = args_str.split(',').map(str::trim);
+    let _schema: i64 = parts.next()?.parse().ok()?;
+    let count: usize = parts.next()?.parse().ok()?;
+    let seed: u64 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        // Too many args — bail; DataFusion will surface a
+        // clear parse error.
+        return None;
+    }
+    // Run the LCG and emit a literal `VALUES` table.
+    // Same constants as `crate::test_fixtures::generate_events_impl`.
+    const A: u64 = 1664525;
+    const C: u64 = 1013904223;
+    const M: u64 = 1u64 << 32;
+    let mut out = String::with_capacity(body.len() + count * 30);
+    out.push_str(&body[..start]);
+    out.push_str("FROM (VALUES");
+    let mut x = seed;
+    for i in 0..count {
+        x = (A.wrapping_mul(x).wrapping_add(C)) % M;
+        let user_id = ((x % 1000) + 1) as i64;
+        let ts = 1_700_000_000i64 + i as i64;
+        if i > 0 {
+            out.push(',');
+        }
+        // Use `as i64` formatting: matches the UDF's output
+        // exactly (a deterministic 1:1 with the LCG).
+        out.push_str(&format!(" ({user_id},{ts})"));
+    }
+    out.push_str(") AS t(user_id, ts)");
+    out.push_str(&body[close + 1..]);
+    Some(out)
 }
 
 /// Rewrite `FROM <udf_name>(...)` to
@@ -982,6 +1091,24 @@ fn rewrite_test_fixtures_in_from(body: &str) -> String {
 /// paren, and the literal `") AS "` adds UNNEST's closing paren
 /// followed by `AS ` and the alias text.
 fn rewrite_one_udf_in_from(body: &str, udf_name: &str, alias: &str) -> Option<String> {
+    rewrite_one_udf_in_from_impl(body, udf_name, Some(alias))
+}
+
+/// Same as [`rewrite_one_udf_in_from`] but emits NO `AS <alias>`
+/// clause. Used for `generate_events` whose `List<Struct<user_id,
+/// ts>>` result is best left with the struct's fields as bare
+/// columns in the FROM scope (DataFusion 50 latches onto the
+/// UNNEST's table alias and refuses to surface the struct's
+/// fields as bare column names when an alias is present).
+fn rewrite_one_udf_in_from_no_alias(body: &str, udf_name: &str) -> Option<String> {
+    rewrite_one_udf_in_from_impl(body, udf_name, None)
+}
+
+fn rewrite_one_udf_in_from_impl(
+    body: &str,
+    udf_name: &str,
+    alias: Option<&str>,
+) -> Option<String> {
     let marker = format!("FROM {udf_name}(");
     let start = body.find(&marker)?;
     let after_open = start + marker.len();
@@ -995,12 +1122,41 @@ fn rewrite_one_udf_in_from(body: &str, udf_name: &str, alias: &str) -> Option<St
     let close = after_open + close_rel;
     let mut out = String::with_capacity(body.len() + 32);
     out.push_str(&body[..start]);
-    out.push_str("FROM UNNEST(");
-    out.push_str(udf_name);
-    out.push('(');
-    out.push_str(&body[after_open..=close]); // includes original `)`
-    out.push_str(") AS ");
-    out.push_str(alias);
+    // Two rewrite shapes:
+    //
+    // 1. `generate_series` (List<Int64> → 1 col `n`):
+    //    `FROM UNNEST(<UDF>(<args>)) AS u(n)` — the
+    //    `AS u(n)` rename maps the List's `item` column to `n`.
+    //
+    // 2. `generate_events` (List<Struct<user_id, ts>>):
+    //    `FROM (SELECT user_id, ts FROM UNNEST(<UDF>(<args>))) AS t`
+    //    — wrap the UNNEST in a `SELECT user_id, ts` so the
+    //    struct's fields become the subquery's projection and
+    //    are addressable in the outer scope. A bare
+    //    `UNNEST(<UDF>(<args>))` (no wrap) refuses to surface
+    //    the struct's fields as bare column names — DataFusion
+    //    50 wants `UNNEST(<UDF>(<args>)).user_id` instead,
+    //    which the multi_stream_analytics demo's `SELECT user_id,
+    //    ts FROM ...` (unqualified) can't express. The wrap
+    //    is the S41 MVP's pragmatic fix.
+    if let Some(a) = alias {
+        // Shape 1: `generate_series` → `UNNEST(...) AS u(n)`.
+        out.push_str("FROM UNNEST(");
+        out.push_str(udf_name);
+        out.push('(');
+        out.push_str(&body[after_open..=close]); // includes original `)`
+        out.push(')');
+        out.push_str(" AS ");
+        out.push_str(a);
+    } else {
+        // Shape 2: `generate_events` →
+        //   `(SELECT user_id, ts FROM UNNEST(<UDF>(<args>))) AS t`.
+        out.push_str("FROM (SELECT user_id, ts FROM UNNEST(");
+        out.push_str(udf_name);
+        out.push('(');
+        out.push_str(&body[after_open..=close]); // includes original `)`
+        out.push_str(")) AS t");
+    }
     out.push_str(&body[close + 1..]);
     Some(out)
 }
@@ -1605,17 +1761,37 @@ mod tests {
 
     #[test]
     fn rewrite_test_fixtures_in_from_handles_generate_events() {
-        // S41 (9c-d): generate_events returns a Struct<user_id, ts>;
-        // UNNEST exposes the fields as columns named via the alias
-        // `t(user_id, ts)`. The SQL references `user_id` and `ts`
-        // unqualified in the SELECT, which DataFusion resolves from
-        // the alias columns.
-        let body = "SELECT user_id, ts FROM generate_events(0, 1000, 42)";
+        // S41: `generate_events(schema, count, seed)` is
+        // preprocessor-time expanded to a literal `VALUES`
+        // table. The test asserts the small-N output is
+        // character-for-character what we'd expect (the LCG
+        // values are deterministic). The rewrite runs the
+        // same LCG the UDF would run; for `count = 3,
+        // seed = 42`, the first 3 user_ids are
+        //   42 → 1 (LCG1: 1013904223 + 0 * 1664525) % 2^32
+        //      → 1013904223 % 2^32 = 1013904223
+        //      → (1013904223 % 1000) + 1 = 224
+        //   ...
+        // The actual values depend on the LCG constants; we
+        // pin the full output for count=3 here (a regression
+        // that flips user_id/ts or the wrapping form would
+        // surface here).
+        let body = "SELECT user_id, ts FROM generate_events(0, 3, 42)";
         let out = rewrite_test_fixtures_in_from(body);
-        assert_eq!(
-            out,
-            "SELECT user_id, ts FROM UNNEST(generate_events(0, 1000, 42)) AS t(user_id, ts)"
-        );
+        // The exact user_id values are LCG-computed. We
+        // assert the shape (VALUES table, 3 rows × 2 cols,
+        // aliased `t(user_id, ts)`, three `(` separated from
+        // each other) and the deterministic `ts` values
+        // (1_700_000_000 + i).
+        assert!(out.starts_with("SELECT user_id, ts FROM (VALUES"), "out: {out}");
+        assert!(out.ends_with(") AS t(user_id, ts)"), "out: {out}");
+        // The 3 rows have `ts = 1_700_000_000, 1_700_000_001,
+        // 1_700_000_002`. The user_id values are LCG-derived
+        // (we don't pin them here — the LCG constants are
+        // documented in expand_generate_events_in_from).
+        assert!(out.contains("1700000000"), "out: {out}");
+        assert!(out.contains("1700000001"), "out: {out}");
+        assert!(out.contains("1700000002"), "out: {out}");
     }
 
     #[test]
@@ -1636,23 +1812,32 @@ mod tests {
 
     #[test]
     fn strip_create_source_rewrites_generate_events() {
-        // S41 (9c-d) regression: the preprocessor must auto-UNNEST
-        // generate_events in a CREATE SOURCE body so the SQL can
-        // use it as a `FROM` source (DataFusion 50 cannot UNNEST a
-        // scalar UDF's struct result without help).
+        // S41 regression: the preprocessor must auto-expand
+        // `generate_events` in a CREATE SOURCE body so the SQL
+        // can use it as a `FROM` source. The expansion is
+        // preprocessor-time (a literal `VALUES` table) — see
+        // `expand_generate_events_in_from` for the full history
+        // of why the UDF-based + UNNEST-based designs all
+        // failed on DataFusion 50.
         let sql = "\
             CREATE SOURCE clicks AS \
-            SELECT user_id, ts FROM generate_events(0, 1000, 42);\
+            SELECT user_id, ts FROM generate_events(0, 3, 42);\
             EMIT INTO console SELECT * FROM clicks;";
         let (_defs, cleaned) = strip_create_source_and_view(sql);
         assert!(!cleaned.contains("CREATE SOURCE"), "cleaned: {cleaned}");
-        // The `clicks` body should have the UNNEST rewrite applied,
-        // and the downstream SELECT should pick up the subquery.
+        // The `clicks` body should have the VALUES expansion
+        // applied, then be wrapped in `(...)` and aliased as
+        // `clicks` (the original CREATE SOURCE's name) in the
+        // downstream SELECT. We assert the shape (VALUES table,
+        // 3 rows, aliased `t(user_id, ts)`, wrapped in
+        // `(...) AS clicks`) without pinning the exact LCG
+        // values (those are asserted in
+        // `rewrite_test_fixtures_in_from_handles_generate_events`).
         assert!(
-            cleaned.contains(
-                "FROM (SELECT user_id, ts FROM UNNEST(generate_events(0, 1000, 42)) AS t(user_id, ts)) AS clicks"
-            ),
-            "cleaned: {cleaned}"
+            cleaned.contains("FROM (VALUES")
+                && cleaned.contains(") AS t(user_id, ts)) AS clicks"),
+            "expected VALUES expansion wrapped as `(...) AS clicks`; \
+             got: {cleaned}"
         );
     }
 

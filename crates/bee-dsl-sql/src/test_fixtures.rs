@@ -11,7 +11,7 @@ use datafusion::arrow::array::{
     Array, Int64Array, ListArray, StructArray,
 };
 use datafusion::arrow::buffer::OffsetBuffer;
-use datafusion::arrow::datatypes::{DataType, Field};
+use datafusion::arrow::datatypes::{DataType, Field, Fields};
 use datafusion::common::Result as DfResult;
 use datafusion::logical_expr::ColumnarValue;
 
@@ -47,11 +47,18 @@ pub fn generate_series_impl(args: &[ColumnarValue]) -> DfResult<ColumnarValue> {
     Ok(ColumnarValue::Array(std::sync::Arc::new(list)))
 }
 
-/// `generate_events(schema, count, seed) -> Stream<StructType>`: emits
-/// `count` deterministic pseudo-random events. For the S41 demo, the
-/// schema arg is accepted but ignored — the output is always a
-/// `(user_id: Int64, ts: Int64)` struct, since the multi_stream_analytics
-/// SQL only references these two columns.
+/// `generate_events(schema, count, seed) -> List<Struct<user_id, ts>>`:
+/// emits `count` deterministic pseudo-random events as a single-row
+/// `ListArray` whose element type is `Struct<user_id: Int64, ts: Int64>`.
+/// The schema arg is accepted but ignored — the output is always a
+/// `(user_id: Int64, ts: Int64)` struct.
+///
+/// The List-wrapping is required so that
+/// `UNNEST(generate_events(0, N, seed))` (the preprocessor-rewritten
+/// form) expands into `N` rows. A flat `StructArray` of `N` rows would
+/// not: `UNNEST` requires an array-valued scalar (per DataFusion 50),
+/// and the preprocessor's `AS t(user_id, ts)` rename only works on the
+/// element type of a list (not on the row labels of a flat struct).
 pub fn generate_events_impl(args: &[ColumnarValue]) -> DfResult<ColumnarValue> {
     if args.len() != 3 {
         return Err(datafusion::error::DataFusionError::Plan(
@@ -78,18 +85,32 @@ pub fn generate_events_impl(args: &[ColumnarValue]) -> DfResult<ColumnarValue> {
     // Second column: ts — one event per second, starting from epoch 1700000000
     let timestamps: Vec<i64> = (0..count).map(|i| 1_700_000_000i64 + i as i64).collect();
 
-    // Return as a StructArray: { user_id: i64, ts: i64 }
+    // Build a flat StructArray of N rows (the inner content), then
+    // wrap it in a single-row ListArray so `UNNEST(generate_events(...))`
+    // flattens to N rows.
     let user_id_array = std::sync::Arc::new(Int64Array::from(user_ids));
     let ts_array = std::sync::Arc::new(Int64Array::from(timestamps));
     let struct_array = StructArray::try_new(
-        datafusion::arrow::datatypes::Fields::from(vec![
-            datafusion::arrow::datatypes::Field::new("user_id", DataType::Int64, false),
-            datafusion::arrow::datatypes::Field::new("ts", DataType::Int64, false),
+        Fields::from(vec![
+            Field::new("user_id", DataType::Int64, false),
+            Field::new("ts", DataType::Int64, false),
         ]),
         vec![user_id_array, ts_array],
         None,
     )?;
-    Ok(ColumnarValue::Array(std::sync::Arc::new(struct_array)))
+    let struct_field = Field::new(
+        "item",
+        DataType::Struct(struct_array.fields().clone()),
+        false,
+    );
+    let offsets = OffsetBuffer::<i32>::new(vec![0, count as i32].into());
+    let list = ListArray::try_new(
+        Arc::new(struct_field),
+        offsets,
+        Arc::new(struct_array),
+        None,
+    )?;
+    Ok(ColumnarValue::Array(Arc::new(list)))
 }
 
 fn extract_i64(cv: &ColumnarValue, name: &str) -> DfResult<i64> {
@@ -161,12 +182,19 @@ mod generate_events_tests {
             ColumnarValue::Array(a) => a,
             _ => panic!("expected array"),
         };
-        assert_eq!(a1.len(), 100);
-        assert_eq!(a1.len(), a2.len());
+        // Single-row ListArray (UNNEST expands to `count` rows).
+        let l1 = a1.as_any().downcast_ref::<ListArray>().unwrap();
+        let l2 = a2.as_any().downcast_ref::<ListArray>().unwrap();
+        assert_eq!(l1.len(), 1, "ListArray has one outer row");
+        assert_eq!(l1.len(), l2.len());
+        let inner1 = l1.value(0);
+        let inner2 = l2.value(0);
+        let s1 = inner1.as_any().downcast_ref::<StructArray>().unwrap();
+        let s2 = inner2.as_any().downcast_ref::<StructArray>().unwrap();
+        assert_eq!(s1.len(), 100, "inner StructArray has `count` rows");
+        assert_eq!(s1.len(), s2.len());
 
         // Same seed → same data; verify by checking the first 10 user_ids
-        let s1 = a1.as_any().downcast_ref::<StructArray>().unwrap();
-        let s2 = a2.as_any().downcast_ref::<StructArray>().unwrap();
         let col1 = s1.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
         let col2 = s2.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
         for i in 0..10 {
@@ -186,9 +214,15 @@ mod generate_events_tests {
             ColumnarValue::Array(a) => a,
             _ => panic!("expected array"),
         };
-        let struct_arr = arr.as_any().downcast_ref::<StructArray>().unwrap();
+        // Outer ListArray → 1 row, containing a StructArray of 5
+        // rows × 2 columns (user_id, ts).
+        let list_arr = arr.as_any().downcast_ref::<ListArray>().unwrap();
+        assert_eq!(list_arr.len(), 1);
+        let inner = list_arr.value(0);
+        let struct_arr = inner.as_any().downcast_ref::<StructArray>().unwrap();
         assert_eq!(struct_arr.num_columns(), 2);
         assert_eq!(struct_arr.column(0).data_type(), &DataType::Int64);
         assert_eq!(struct_arr.column(1).data_type(), &DataType::Int64);
+        assert_eq!(struct_arr.len(), 5);
     }
 }
