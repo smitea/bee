@@ -36,6 +36,20 @@ sharing, plugin loading, FFI dispatch, SQL pipelines, deployment).
   `crates/bee-control/src/raft/cluster_tcp_integration.rs`
   ::`tcp_3_node_survives_simulated_crash` (the production script
   verifies the OS-level kill + surviving-nodes-up contract).
+- `scripts/soak-quant-24h.sh` — S33.2's 24h live-soak
+  monitoring loop. Starts a 3-node cluster via
+  `scripts/start-cluster.sh`, registers 4 Datasources,
+  deploys 3 SQL pipelines, and runs a per-5-min tick
+  loop (5s for `--smoke`) for 24h. Each tick writes
+  JSON to `/tmp/bee_soak/<RUN_ID>_tick_<TS>.json`.
+  Thresholds (any of which exit non-zero): log_lag >
+  1000, task Orphaned > 60s, InfluxDB / MongoDB rate
+  == 0 for ≥ 10 min. `--failover-midway` injects a
+  SIGKILL at the T+12h mark. Used by the S33
+  sign-off's 3 production-deployment rows (real
+  money signals, InfluxDB data, MongoDB data).
+  See `docs/best-practices/quant/soak-results-template.md`
+  for the human-fillable results table.
 - `specs/2026-06-08-s33-deferred-ffi-design.md` — the design
   spec for the FFI wire format + runtime plugin dispatching.
 - `plans/2026-06-08-s33-deferred-ffi.md` — the implementation
