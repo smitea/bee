@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # scripts/demo-quant-prod.sh — S40 end-to-end demo: 6 production plugins
-# (binance / google-news / influxdb / mongodb / ta-indicators / onnx-ml)
+# (binance / google-news / influxdb / mongodb / ta-lib / onnx-ml)
 # wired into 3 SQL pipelines, deployed against real external services.
 #
 # Usage:
@@ -78,24 +78,70 @@ plugin_hash() {
 }
 
 # Helper: cdylib path for a plugin
+#
+# Cargo workspaces share a single `target/` directory at the
+# workspace root, NOT per-plugin `target/` subdirs. The
+# plugin's source may live under `plugins/quant/<name>/`
+# (the S33 quant-trading reference layout) or `plugins/<name>/`
+# (the main-repo layout). The cdylib's binary name is
+# `lib<name-with-dashes-to-underscores>.dylib|.so` regardless
+# of the source layout. The look-up tries the canonical
+# workspace target dir first, then falls back to per-plugin
+# targets (in case the user invoked `cargo build` inside the
+# plugin's subdir, which would write to that plugin's
+# `target/`).
 plugin_dylib() {
   local plugin="$1"
+  local libname="lib${plugin//-/_}"
+  local ext
   if [ "$(uname)" = "Darwin" ]; then
-    echo "plugins/$plugin/target/release/lib${plugin//-/_}.dylib"
+    ext="dylib"
   else
-    echo "plugins/$plugin/target/release/lib${plugin//-/_}.so"
+    ext="so"
   fi
+  # Workspace-root target (the normal case for a workspace build).
+  if [ -f "$WORKSPACE_ROOT/target/release/${libname}.${ext}" ]; then
+    echo "$WORKSPACE_ROOT/target/release/${libname}.${ext}"
+    return
+  fi
+  # Per-plugin target (only present if the user built inside
+  # the plugin's subdir; rare in a workspace).
+  if [ -f "$WORKSPACE_ROOT/plugins/quant/$plugin/target/release/${libname}.${ext}" ]; then
+    echo "$WORKSPACE_ROOT/plugins/quant/$plugin/target/release/${libname}.${ext}"
+    return
+  fi
+  if [ -f "$WORKSPACE_ROOT/plugins/$plugin/target/release/${libname}.${ext}" ]; then
+    echo "$WORKSPACE_ROOT/plugins/$plugin/target/release/${libname}.${ext}"
+    return
+  fi
+  # Fallback: the original (broken) path. Returned so the
+  # caller's `[ -f ... ]` check produces a clear "missing
+  # cdylib" error pointing at the expected location.
+  echo "$WORKSPACE_ROOT/plugins/$plugin/target/release/${libname}.${ext}"
 }
 
 # 1. Build all 6 production plugins
 step "build 6 production plugins (release)"
 for plugin in bee-plugin-binance bee-plugin-google-news bee-plugin-influxdb \
-              bee-plugin-mongodb bee-plugin-ta-indicators bee-plugin-onnx-ml; do
-  echo "  - $plugin"
-  if (cd "plugins/$plugin" && cargo build --release --quiet); then
-    record "cargo build --release plugins/$plugin" true
+              bee-plugin-mongodb bee-plugin-ta-lib bee-plugin-onnx-ml; do
+  # The S33 quant-trading reference plugins live under
+  # `plugins/quant/<name>/`; the main-repo's plugins live at
+  # `plugins/<name>/`. We try the quant subdir first (this
+  # script's primary purpose) and fall back to the main-repo
+  # layout (so the same script works for either location).
+  if [ -d "plugins/quant/$plugin" ]; then
+    plugin_dir="plugins/quant/$plugin"
+  elif [ -d "plugins/$plugin" ]; then
+    plugin_dir="plugins/$plugin"
   else
-    record "cargo build --release plugins/$plugin" false
+    record "cargo build --release $plugin (no source dir)" false
+    continue
+  fi
+  echo "  - $plugin (in $plugin_dir)"
+  if (cd "$plugin_dir" && cargo build --release --quiet); then
+    record "cargo build --release $plugin" true
+  else
+    record "cargo build --release $plugin" false
   fi
 done
 
@@ -104,7 +150,7 @@ step "stage plugin cdylibs"
 PLUGIN_DIR="${BEE_PLUGIN_DIR:-/tmp/bee_prod_plugins}"
 mkdir -p "$PLUGIN_DIR"
 for plugin in bee-plugin-binance bee-plugin-google-news bee-plugin-influxdb \
-              bee-plugin-mongodb bee-plugin-ta-indicators bee-plugin-onnx-ml; do
+              bee-plugin-mongodb bee-plugin-ta-lib bee-plugin-onnx-ml; do
   dylib="$(plugin_dylib "$plugin")"
   if [ -f "$dylib" ]; then
     cp "$dylib" "$PLUGIN_DIR/"
