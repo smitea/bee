@@ -163,11 +163,27 @@ pub fn translate_asof(sql: &str) -> DfResult<String> {
     let ineq_left_col = &clause.ineq_left_col;
 
     let lateral_subquery = format!(
-        "(SELECT * FROM {right_source} \
+        // The inner `{right_source} AS {right_alias}` is critical:
+        // without the AS clause, the columns of the right-side
+        // subquery (e.g. `user_id`, `ts` from an inlined
+        // `SELECT user_id, ts FROM UNNEST(...) AS t(...)`) are
+        // unqualified inside the LATERAL subquery, but the
+        // equi/ineq column refs the user wrote (`v.user_id`,
+        // `v.ts`) are qualified with the OUTER alias `v`. By
+        // aliasing the inner subquery AS `v`, the inner columns
+        // become addressable as `v.user_id` / `v.ts` and the
+        // user-written column refs resolve correctly.
+        //
+        // For a bare-table right side (e.g. `views v`), the
+        // explicit `AS v` is a no-op (the table already had the
+        // name `views`, and the user-given alias `v` becomes the
+        // row-set's alias).
+        "(SELECT * FROM {right_source} AS {right_alias} \
          WHERE {equi_right_col} = {equi_left_col} \
            AND {ineq_right_col} {translated_ineq_op} {ineq_left_col} \
          ORDER BY {ineq_right_col} {order_direction} LIMIT 1)",
         right_source = right_source,
+        right_alias = right_alias,
         equi_right_col = equi_right_col,
         equi_left_col = equi_left_col,
         ineq_right_col = ineq_right_col,
