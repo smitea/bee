@@ -12,6 +12,7 @@
 //! (S33.3) will add the leader-forwarding path for
 //! writes (e.g. `bee deploy --target`).
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -23,7 +24,7 @@ use crate::control_plane::ControlPlaneStateMachine;
 use crate::kv::KVStateMachine;
 use crate::raft::admin_protocol::{
     AdminRequest, AdminResponse, ClusterMetricsDetail, JobDep, JobDetail, JobSummary,
-    NodeMetricsSummary, TaskDiagDetail,
+    NodeMetricsSummary, TaskDiagDetail, TaskRuntimeStats,
 };
 use crate::raft::types::NodeId;
 
@@ -43,15 +44,25 @@ impl AdminServer {
     /// connections. Spawns one tokio task per accept.
     /// The KV and CP state machines are read under a
     /// brief lock per request.
+    ///
+    /// S33.2: replace the 5 `get_role` /
+    /// `get_term` / ... closures with a single
+    /// handle to the Node's `NodeState`. The
+    /// dispatch loop awaits the lock per
+    /// request; the Node already owns the same
+    /// `Arc<Mutex<NodeState>>` so this is a
+    /// zero-overhead handle. Same idea for `stats`:
+    /// the AdminServer reads the live
+    /// `HashMap<TaskId, TaskRuntimeStats>` under
+    /// the same `Arc<Mutex<...>>` the Node uses.
     pub async fn start(
         addr: SocketAddr,
         kv: Arc<tokio::sync::Mutex<KVStateMachine>>,
         cp: Arc<tokio::sync::Mutex<ControlPlaneStateMachine>>,
-        get_role: Arc<dyn Fn() -> String + Send + Sync>,
-        get_term: Arc<dyn Fn() -> u64 + Send + Sync>,
-        get_commit_index: Arc<dyn Fn() -> u64 + Send + Sync>,
-        get_log_length: Arc<dyn Fn() -> usize + Send + Sync>,
-        get_leader_id: Arc<dyn Fn() -> Option<NodeId> + Send + Sync>,
+        state: Arc<tokio::sync::Mutex<super::node::NodeState>>,
+        stats: Option<
+            Arc<tokio::sync::Mutex<HashMap<u32, TaskRuntimeStats>>>,
+        >,
     ) -> Result<Self, String> {
         let listener = Listener::bind(&addr.to_string())
             .await
@@ -77,21 +88,15 @@ impl AdminServer {
                         };
                         let kv = kv.clone();
                         let cp = cp.clone();
-                        let get_role = get_role.clone();
-                        let get_term = get_term.clone();
-                        let get_commit_index = get_commit_index.clone();
-                        let get_log_length = get_log_length.clone();
-                        let get_leader_id = get_leader_id.clone();
+                        let state = state.clone();
+                        let stats = stats.clone();
                         tokio::spawn(async move {
                             handle_admin_connection(
                                 conn,
                                 kv,
                                 cp,
-                                get_role,
-                                get_term,
-                                get_commit_index,
-                                get_log_length,
-                                get_leader_id,
+                                state,
+                                stats,
                             )
                             .await;
                         });
@@ -129,11 +134,10 @@ async fn handle_admin_connection(
     mut conn: Connection,
     kv: Arc<tokio::sync::Mutex<KVStateMachine>>,
     cp: Arc<tokio::sync::Mutex<ControlPlaneStateMachine>>,
-    get_role: Arc<dyn Fn() -> String + Send + Sync>,
-    get_term: Arc<dyn Fn() -> u64 + Send + Sync>,
-    get_commit_index: Arc<dyn Fn() -> u64 + Send + Sync>,
-    get_log_length: Arc<dyn Fn() -> usize + Send + Sync>,
-    get_leader_id: Arc<dyn Fn() -> Option<NodeId> + Send + Sync>,
+    state: Arc<tokio::sync::Mutex<super::node::NodeState>>,
+    stats: Option<
+        Arc<tokio::sync::Mutex<HashMap<u32, TaskRuntimeStats>>>,
+    >,
 ) {
     loop {
         let frame = match conn.recv_frame().await {
@@ -155,17 +159,7 @@ async fn handle_admin_connection(
                 continue;
             }
         };
-        let response = dispatch(
-            request,
-            &cp,
-            &kv,
-            &get_role,
-            &get_term,
-            &get_commit_index,
-            &get_log_length,
-            &get_leader_id,
-        )
-        .await;
+        let response = dispatch(request, &cp, &kv, &state, stats.as_deref()).await;
         send_response(&mut conn, &response).await;
     }
 }
@@ -184,11 +178,8 @@ async fn dispatch(
     req: AdminRequest,
     cp: &Arc<tokio::sync::Mutex<ControlPlaneStateMachine>>,
     kv: &Arc<tokio::sync::Mutex<KVStateMachine>>,
-    get_role: &Arc<dyn Fn() -> String + Send + Sync>,
-    get_term: &Arc<dyn Fn() -> u64 + Send + Sync>,
-    get_commit_index: &Arc<dyn Fn() -> u64 + Send + Sync>,
-    get_log_length: &Arc<dyn Fn() -> usize + Send + Sync>,
-    get_leader_id: &Arc<dyn Fn() -> Option<NodeId> + Send + Sync>,
+    state: &Arc<tokio::sync::Mutex<super::node::NodeState>>,
+    stats: Option<&tokio::sync::Mutex<HashMap<u32, TaskRuntimeStats>>>,
 ) -> AdminResponse {
     match req {
         AdminRequest::Ping => AdminResponse::Pong,
@@ -232,23 +223,50 @@ async fn dispatch(
         }
         AdminRequest::TaskDiagnostics(id) => {
             let cp = cp.lock().await;
-            match cp.get_task(id) {
-                None => AdminResponse::TaskDiag(None),
-                Some(t) => AdminResponse::TaskDiag(Some(TaskDiagDetail::from(t))),
+            let mut detail = match cp.get_task(id) {
+                None => return AdminResponse::TaskDiag(None),
+                Some(t) => TaskDiagDetail::from(t),
+            };
+            // S33.2: fill the runtime_stats field from
+            // the Node's stats map. We do this after
+            // the `From` conversion because
+            // `From<&TaskRecord>` doesn't have access
+            // to the Node.
+            if let Some(stats_mutex) = stats {
+                let stats = stats_mutex.lock().await;
+                if let Some(rs) = stats.get(&id) {
+                    let mut live = rs.clone();
+                    // Compute the rolling-average rate
+                    // at read time. The Node's
+                    // `messages_processed` is a
+                    // cumulative counter; the rate is
+                    // `count / elapsed_sec_since_started`.
+                    // We use the TaskRecord's
+                    // `started_at_ms` as the timestamp
+                    // baseline.
+                    live.messages_per_sec =
+                        super::node::messages_per_sec(
+                            live.messages_processed,
+                            detail.started_at_ms,
+                        );
+                    detail.runtime_stats = Some(live);
+                }
             }
+            AdminResponse::TaskDiag(Some(detail))
         }
         AdminRequest::ClusterStatus => {
             let cp_locked = cp.lock().await;
+            let state_locked = state.lock().await;
             // For the MVP, the admin server only sees
             // its own Node's metrics. The leader's
             // view of the cluster is the source of
             // truth; a follow-up (S33.3) forwards the
             // request to the leader.
             let node_metrics = NodeMetricsSummary {
-                id: 0, // TODO: pass the node's own id through the closure
-                role: get_role(),
-                commit_index: get_commit_index(),
-                log_length: get_log_length(),
+                id: 0, // TODO(S33.3): pass the node's own id through state
+                role: format!("{:?}", state_locked.role),
+                commit_index: state_locked.commit_index,
+                log_length: state_locked.log.len(),
             };
             // Touch the cp lock so the compiler
             // doesn't warn about unused state in
@@ -257,11 +275,14 @@ async fn dispatch(
             let _job_count = cp_locked.job_count();
             AdminResponse::ClusterMetrics(ClusterMetricsDetail {
                 nodes: vec![node_metrics],
-                leader_id: get_leader_id(),
-                term: get_term(),
-                commit_index: get_commit_index(),
+                leader_id: state_locked.leader_id,
+                term: state_locked.current_term,
+                commit_index: state_locked.commit_index,
             })
         }
+        // S33.2 Task 6: the ListKv arm is added in
+        // a follow-up commit (the KV list is a
+        // direct read; it doesn't need state).
     }
 }
 
