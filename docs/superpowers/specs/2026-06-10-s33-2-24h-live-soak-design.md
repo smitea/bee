@@ -50,20 +50,31 @@ criteria, the human-fillable results template. The actual
        pub last_error: Option<String>, // truncated to 1KB
    }
    ```
-   - Data source: `HandlerVtable::report_stats` hook in
-     `bee-runtime`. After each `invoke()` call, the handler
-     reports `(messages_delta, error_delta, last_error?)`
-     to the Node via the existing PluginAdapter.
+   - **Data source: Node-side auto-instrumentation** (no
+     HandlerVtable changes). The `dispatch_handler` call in
+     `crates/bee-dsl-sql/src/plugin_loader.rs` already
+     returns `Result<_, DataFusionError>`. The Node's
+     per-Task runtime loop wraps that call: on `Ok`, increment
+     `messages_processed` + record `last_message_at_ms`; on
+     `Err`, increment `error_count` + record
+     `last_error_at_ms` + capture the error message.
+   - Why not a `HandlerVtable::report_stats` hook? The FFI
+     shape is `#[repr(C)]`; adding a new fn pointer is a
+     breaking ABI change that every mock plugin (5 today) +
+     every production plugin (S34–S39) would need to wire.
+     Auto-instrumentation at the Node dispatch site gives
+     the same numbers with **0 plugin changes**. The
+     "messages_processed" counter measures the Node → handler
+     call rate, which is 1:1 with messages-per-tick for
+     the strategy pipelines in the S40 demo.
    - Storage: in-memory `Arc<Mutex<HashMap<TaskId,
      TaskRuntimeStats>>>` on the Node. Restart = fresh stats
      (acceptable for the 24h soak; file-backed is 1.x).
    - Wire: `AdminRequest::TaskDiagnostics(id)` returns
      `AdminResponse::TaskDiag(Some(TaskDiagDetail {
      ..., runtime_stats: Some(TaskRuntimeStats) }))`.
-   - MVP mock plugins (binance / google_news / etc.) get
-     manual instrumentation in this story. Production
-     plugins (S34–S39) inherit the hook in their next
-     release.
+   - MVP mock plugins (binance / google_news / etc.) need
+     **no changes** — auto-instrumentation covers them.
 
 3. **KVStateMachine::list + Op::List** (new)
    - `pub fn list(&self, prefix: &str) -> Vec<(String,
