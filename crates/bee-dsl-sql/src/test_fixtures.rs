@@ -5,14 +5,22 @@
 
 #![cfg(feature = "test-fixtures")]
 
-use datafusion::arrow::array::{Array, Int64Array, StructArray};
-use datafusion::arrow::datatypes::DataType;
+use std::sync::Arc;
+
+use datafusion::arrow::array::{
+    Array, Int64Array, ListArray, StructArray,
+};
+use datafusion::arrow::buffer::OffsetBuffer;
+use datafusion::arrow::datatypes::{DataType, Field};
 use datafusion::common::Result as DfResult;
 use datafusion::logical_expr::ColumnarValue;
 
-/// `generate_series(start, end) -> Stream<i64>`: emits one event per
-/// integer in `[start, end]`. Returns a single Int64Array containing
-/// all values.
+/// `generate_series(start, end) -> List<i64>`: emits one event per
+/// integer in `[start, end]`. Returns a single-row `ListArray`
+/// containing all values. Use as `FROM UNNEST(generate_series(1, N))`
+/// to expand into rows (DataFusion 50 has no UDTF support; UNNEST
+/// is the canonical way to turn a scalar UDF's list result into a
+/// table source).
 pub fn generate_series_impl(args: &[ColumnarValue]) -> DfResult<ColumnarValue> {
     if args.len() != 2 {
         return Err(datafusion::error::DataFusionError::Plan(
@@ -26,11 +34,17 @@ pub fn generate_series_impl(args: &[ColumnarValue]) -> DfResult<ColumnarValue> {
             "generate_series: end must be >= start".into(),
         ));
     }
-    let count = (end - start + 1) as usize;
     let values: Vec<i64> = (start..=end).collect();
-    let _ = count;
-    let array = std::sync::Arc::new(Int64Array::from(values));
-    Ok(ColumnarValue::Array(array))
+    let values_array = Int64Array::from(values);
+    let field = Arc::new(Field::new("item", DataType::Int64, true));
+    let offsets = OffsetBuffer::<i32>::new(vec![0, values_array.len() as i32].into());
+    let list = ListArray::try_new(
+        field,
+        offsets,
+        Arc::new(values_array),
+        None,
+    )?;
+    Ok(ColumnarValue::Array(std::sync::Arc::new(list)))
 }
 
 /// `generate_events(schema, count, seed) -> Stream<StructType>`: emits
@@ -112,10 +126,13 @@ mod tests {
         let result = generate_series_impl(&args).unwrap();
         match result {
             ColumnarValue::Array(a) => {
-                let arr = a.as_any().downcast_ref::<Int64Array>().unwrap();
-                assert_eq!(arr.len(), 5);
-                assert_eq!(arr.value(0), 1);
-                assert_eq!(arr.value(4), 5);
+                let arr = a.as_any().downcast_ref::<ListArray>().unwrap();
+                assert_eq!(arr.len(), 1, "ListArray has one row");
+                let values = arr.value(0);
+                let int_arr = values.as_any().downcast_ref::<Int64Array>().unwrap();
+                assert_eq!(int_arr.len(), 5);
+                assert_eq!(int_arr.value(0), 1);
+                assert_eq!(int_arr.value(4), 5);
             }
             _ => panic!("expected array"),
         }
