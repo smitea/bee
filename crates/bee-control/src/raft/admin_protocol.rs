@@ -44,6 +44,42 @@ pub enum AdminRequest {
     /// decodes per known schema or prints
     /// `(key, value_len)`.
     ListKv { prefix: String },
+    /// S33.3: put a key/value into the leader's
+    /// Raft KV. The AdminServer submits a
+    /// `NodeCommand::Submit { op: Op::Put }` to
+    /// itself (this Node); for MVP, we do not
+    /// forward to the leader. The CLI's
+    /// `bee --connect <addr> kv put <key>
+    /// <value>` is the soak-script's tick-write
+    /// path. S33.3 spec: the AdminServer is a
+    /// read+write endpoint; writes are
+    /// `NodeCommand::Submit`-and-await.
+    KvPut { key: String, value: Vec<u8> },
+    /// S33.3: deploy a SQL pipeline. The
+    /// `sql_text` is the full SQL file body. The
+    /// AdminServer runs the SQL through the
+    /// `bee-dsl-sql::run_pipeline_with_config`
+    /// path (the same path the in-process `bee
+    /// run` uses). S33.3 MVP: only the leader
+    /// services this request (followers reply
+    /// with `AdminResponse::Error("not the
+    /// leader")`).
+    Deploy { sql_text: String, owner_node: u32 },
+    /// S33.3: register a Datasource on the
+    /// leader. Sends a `Submit { op:
+    /// Op::RegisterDatasourceProducer }` so the
+    /// DatasourceRegistry is updated through the
+    /// Raft log (consistent across the cluster).
+    /// The 4 fields mirror the existing
+    /// `Datasource::new` signature.
+    RegisterDatasource {
+        name: String,
+        adapter: String,
+        plugin_version: String,
+        config_json: String,
+        tenant: u16,
+        owner_node: u32,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,6 +104,27 @@ pub enum AdminResponse {
     /// how to render (per the optional
     /// `--raw` flag).
     KvList(Vec<(String, Vec<u8>)>),
+    /// S33.3: `KvPut` reply. `ok = true` means the
+    /// Raft log accepted the op; the apply loop
+    /// runs asynchronously. The CLI does not wait
+    /// for the apply (the soak loop is fire-and-
+    /// forget for performance).
+    KvPutAck { ok: bool },
+    /// S33.3: `Deploy` reply. `job_id` is the
+    /// newly-registered Job's id (assigned by the
+    /// ControlPlane SM); 0 means the deploy
+    /// failed and the error string is in
+    /// `error_msg`.
+    DeployAck {
+        job_id: u32,
+        task_ids: Vec<u32>,
+        error_msg: String,
+    },
+    /// S33.3: `RegisterDatasource` reply.
+    RegisterDatasourceAck {
+        ok: bool,
+        error_msg: String,
+    },
 }
 
 /// Compact form of `JobRecord` for the wire. Mirrors
@@ -199,6 +256,31 @@ impl From<AdminRequest> for RpcMessage {
             AdminRequest::ListKv { prefix } => {
                 RpcMessage::AdminListKv(prefix)
             }
+            AdminRequest::KvPut { key, value } => {
+                RpcMessage::AdminKvPut { key, value }
+            }
+            AdminRequest::Deploy {
+                sql_text,
+                owner_node,
+            } => RpcMessage::AdminDeploy {
+                sql_text,
+                owner_node,
+            },
+            AdminRequest::RegisterDatasource {
+                name,
+                adapter,
+                plugin_version,
+                config_json,
+                tenant,
+                owner_node,
+            } => RpcMessage::AdminRegisterDatasource {
+                name,
+                adapter,
+                plugin_version,
+                config_json,
+                tenant,
+                owner_node,
+            },
         }
     }
 }

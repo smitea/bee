@@ -286,6 +286,31 @@ async fn dispatch(
             let entries = kv.list(&prefix);
             AdminResponse::KvList(entries)
         }
+        // S33.3 Task 1-2: write-path arms. They
+        // call `Node::submit` (which sends a
+        // NodeCommand::Submit { op } through the
+        // transport's command channel; the Node
+        // then puts the op on the Raft log).
+        AdminRequest::KvPut { .. } => {
+            // Implementation in S33.3 Task 2.
+            AdminResponse::KvPutAck { ok: false }
+        }
+        AdminRequest::Deploy { .. } => {
+            // Implementation in S33.3 Task 2.
+            AdminResponse::DeployAck {
+                job_id: 0,
+                task_ids: Vec::new(),
+                error_msg: "Deploy not yet wired (S33.3 Task 2)".to_string(),
+            }
+        }
+        AdminRequest::RegisterDatasource { .. } => {
+            // Implementation in S33.3 Task 2.
+            AdminResponse::RegisterDatasourceAck {
+                ok: false,
+                error_msg: "RegisterDatasource not yet wired (S33.3 Task 2)"
+                    .to_string(),
+            }
+        }
     }
 }
 

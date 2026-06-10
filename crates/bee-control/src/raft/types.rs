@@ -72,6 +72,24 @@ pub enum RpcMessage {
     AdminPing,
     /// S33.2: list KV entries by prefix.
     AdminListKv(String),
+    /// S33.3: put a key/value (soak-script tick write).
+    AdminKvPut { key: String, value: Vec<u8> },
+    /// S33.3: deploy a SQL pipeline (the soak
+    /// script's Phase 4, gated on the leader).
+    AdminDeploy {
+        sql_text: String,
+        owner_node: u32,
+    },
+    /// S33.3: register a Datasource (the soak
+    /// script's Phase 3, gated on the leader).
+    AdminRegisterDatasource {
+        name: String,
+        adapter: String,
+        plugin_version: String,
+        config_json: String,
+        tenant: u16,
+        owner_node: u32,
+    },
 }
 
 #[derive(Debug)]

@@ -392,10 +392,13 @@ impl Node {
             | RpcMessage::AdminTaskDiagnostics(_)
             | RpcMessage::AdminClusterStatus
             | RpcMessage::AdminPing
-            | RpcMessage::AdminListKv(_) => {
+            | RpcMessage::AdminListKv(_)
+            | RpcMessage::AdminKvPut { .. }
+            | RpcMessage::AdminDeploy { .. }
+            | RpcMessage::AdminRegisterDatasource { .. } => {
                 // No-op on the Raft channel; the
                 // AdminServer (Task 5) is the entry
-                // point for AdminListKv in MVP.
+                // point for all admin RPCs in MVP.
             }
         }
     }
