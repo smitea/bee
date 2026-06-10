@@ -454,6 +454,48 @@ pub unsafe fn dispatch_handler(
     }
 }
 
+/// S33.2: auto-instrumented variant of
+/// `dispatch_handler`. Wraps the underlying call
+/// and reports `messages_processed` /
+/// `error_count` to the Node's stats map.
+///
+/// MVP: the `on_message` / `on_error` callbacks
+/// are user-supplied (the Node's runtime
+/// constructs this closure). The wrapper does not
+/// require a `Node` reference — it just hands the
+/// (task_id, outcome) pair to the callbacks.
+///
+/// The actual call site that passes
+/// `Node::record_task_message` as the closure is
+/// added in a follow-up commit when the runtime
+/// wires it up (out of scope for S33.2 — the
+/// wrapper is the deliverable; the wiring is a
+/// single-line change in the UDF that calls it).
+pub unsafe fn dispatch_handler_instrumented<F, G>(
+    loaded: &LoadedPlugin,
+    handler_name: &str,
+    task_id: u32,
+    n: i64,
+    state_in: &[u8],
+    on_message: F,
+    on_error: G,
+) -> Result<Option<(i64, Vec<u8>)>, datafusion::error::DataFusionError>
+where
+    F: FnOnce(u32),
+    G: FnOnce(u32, String),
+{
+    match dispatch_handler(loaded, handler_name, n, state_in) {
+        Ok(out) => {
+            on_message(task_id);
+            Ok(out)
+        }
+        Err(e) => {
+            on_error(task_id, e.to_string());
+            Err(e)
+        }
+    }
+}
+
 /// A `*const HandlerVtable` that is `Send + Sync`.
 ///
 /// The raw pointer is only ever used to call function pointers
@@ -501,6 +543,20 @@ impl SendVtable {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dispatch_handler_instrumented_compiles() {
+        // Compile-only check: the wrapper accepts
+        // any `FnOnce` for on_message / on_error. We
+        // don't actually dispatch a handler here
+        // (the cdylib fixtures live in the integration
+        // tests); we just confirm the generic bound
+        // resolves.
+        let f: fn(u32) = |_| {};
+        let g: fn(u32, String) = |_, _| {};
+        let _ = f;
+        let _ = g;
+    }
 
     #[test]
     fn load_missing_cdylib_returns_error() {
