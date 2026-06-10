@@ -13,6 +13,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use bee_control::raft::admin_server::AdminServer;
 use bee_control::raft::{Node, NodeConfig, NodeId, NodeTransport, TcpTransport};
 use bee_control::{ControlPlaneStateMachine, KVStateMachine};
 use tokio::signal;
@@ -57,11 +58,13 @@ pub async fn run_node(args: Vec<String>) -> Result<(), String> {
     // Parse: --id N --bind ADDR [--peer ID=ADDR ...]
     //       [--base-election-timeout MS] [--heartbeat-interval MS]
     //       [--node-offset MS]
+    //       [--admin-bind ADDR]
     let mut id: Option<NodeId> = None;
     let mut bind: Option<SocketAddr> = None;
     let mut base_election_timeout_ms: u64 = 800;
     let mut heartbeat_interval_ms: u64 = 100;
     let mut node_offset_ms: u64 = 0;
+    let mut admin_bind: Option<SocketAddr> = None;
     let mut iter = args.iter();
     while let Some(a) = iter.next() {
         match a.as_str() {
@@ -79,6 +82,14 @@ pub async fn run_node(args: Vec<String>) -> Result<(), String> {
                         .ok_or_else(|| "--bind requires an argument".to_string())?
                         .parse()
                         .map_err(|e| format!("invalid bind: {e}"))?,
+                );
+            }
+            "--admin-bind" => {
+                admin_bind = Some(
+                    iter.next()
+                        .ok_or_else(|| "--admin-bind requires an argument".to_string())?
+                        .parse()
+                        .map_err(|e| format!("invalid admin-bind: {e}"))?,
                 );
             }
             "--base-election-timeout" => {
@@ -111,6 +122,11 @@ pub async fn run_node(args: Vec<String>) -> Result<(), String> {
     }
     let id = id.ok_or_else(|| "--id is required".to_string())?;
     let bind = bind.ok_or_else(|| "--bind is required".to_string())?;
+    // S33.2: default admin port = raft port + 1000.
+    let admin_bind = admin_bind.unwrap_or_else(|| {
+        let port = bind.port().saturating_add(1000);
+        SocketAddr::new(bind.ip(), port)
+    });
     let peers = parse_peers(&args)?;
 
     // Build the TcpTransport. The bind happens here
@@ -147,11 +163,28 @@ pub async fn run_node(args: Vec<String>) -> Result<(), String> {
         cp.clone(),
         node_config,
     );
+    // S33.2: start the per-Node AdminServer on the
+    // admin port. The `state` + `stats` handles
+    // are the same `Arc<Mutex<...>>`s the Node
+    // owns, so the AdminServer reads live values.
+    let admin_state = node.state();
+    let admin_stats = node.stats();
     let task = tokio::spawn(async move {
         let _ = node.run().await;
     });
+    let mut admin_server = AdminServer::start(
+        admin_bind,
+        kv.clone(),
+        cp.clone(),
+        admin_state,
+        Some(admin_stats),
+    )
+    .await
+    .map_err(|e| format!("admin server start: {e}"))?;
+    let admin_addr = admin_server.local_addr();
 
     println!("bee node {id} listening on {bind} (peers: {peers:?})");
+    println!("bee node {id} admin RPC listening on {admin_addr}");
     // Block on SIGTERM / SIGINT, then drop the
     // transport. Node::run returns when its
     // transport is dropped.
@@ -165,6 +198,7 @@ pub async fn run_node(args: Vec<String>) -> Result<(), String> {
             println!("SIGTERM received, shutting down node {id}");
         }
     }
+    admin_server.shutdown();
     task.abort();
     let _ = NodeHandle {
         id,
