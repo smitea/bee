@@ -11,7 +11,7 @@ name = "bee"
 path = "src/main.rs"
 
 [dependencies]
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["signal"] }
 bytes = { workspace = true }
 bee-codec = { workspace = true }
 bee-transport = { workspace = true }

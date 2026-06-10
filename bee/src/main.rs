@@ -42,11 +42,15 @@ use bee_control::cluster_status;
 use bee_control::diagnostics_view;
 use bee_control::datasource::{Datasource, DatasourceInspection, DatasourceRegistry};
 use bee_control::jobs_view;
+use bee_control::raft::admin_client::AdminClient;
+use bee_control::raft::admin_protocol::{AdminRequest, AdminResponse};
 use bee_control::raft::cluster::{Cluster, ClusterConfig};
 use bee_control::secret_store::{InMemorySecretStore, SecretStore};
 use bee_dsl_sql::{run_pipeline_with_config, RunConfig};
 use bee_plugin_sdk::{compute_plugin_id, VersionSpec};
 use bee_transport::Connection;
+
+mod run_node;
 
 const PKG_NAME: &str = env!("CARGO_PKG_NAME");
 const PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -183,6 +187,26 @@ async fn main() -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("{}: plugin failed: {}", PKG_NAME, e);
+                ExitCode::from(1)
+            }
+        },
+        Some("node") => match run_node::run_node(args[1..].to_vec()).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("{}: node failed: {}", PKG_NAME, e);
+                ExitCode::from(1)
+            }
+        },
+        // S33.1: `bee --connect <addr> <subcommand>` is the
+        // client-side of the admin RPC. We intercept the
+        // --connect flag at the top level so the existing
+        // subcommand dispatch (jobs/cluster/diagnostics)
+        // can read from a remote Node, not just the local
+        // in-process demo cluster.
+        Some("--connect") => match run_connect_cli(&args[1..]).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("{}: --connect failed: {}", PKG_NAME, e);
                 ExitCode::from(1)
             }
         },
@@ -782,6 +806,133 @@ fn print_datasource_inspect(registry: &DatasourceRegistry, name: &str) {
         "  error_message_recent:        {}",
         h.error_message_recent.as_deref().unwrap_or("(none)")
     );
+}
+
+/// S33.1: `bee --connect <addr> <subcommand>` —
+/// admin RPC client. Connects to a Node's AdminServer
+/// (Task 7) over the same `bee-transport` TCP
+/// connection, sends the matching `AdminRequest`,
+/// prints the response.
+///
+/// Supported subcommands (MVP):
+///   - `ping`        — `AdminRequest::Ping` → `Pong`.
+///   - `jobs`        — `AdminRequest::ListJobs` → list.
+///   - `jobs inspect <id>` — `AdminRequest::JobInspect(id)` → detail.
+///   - `diagnostics <task_id>` — `AdminRequest::TaskDiagnostics(id)`.
+///   - `cluster`     — `AdminRequest::ClusterStatus` → metrics.
+///
+/// MVP: AdminServer is not yet wired into a running
+/// `bee node` (Task 7 ships the server, but
+/// `run_node` doesn't start one yet — that's a
+/// follow-up). The CLI is exercised in tests and
+/// against a manually-launched server.
+async fn run_connect_cli(args: &[String]) -> Result<(), String> {
+    let addr_str = args
+        .first()
+        .ok_or_else(|| "--connect requires <addr>".to_string())?;
+    let addr: std::net::SocketAddr = addr_str
+        .parse()
+        .map_err(|e| format!("invalid connect addr `{addr_str}`: {e}"))?;
+    let sub = args.get(1).map(String::as_str);
+    let mut client = AdminClient::connect(addr)
+        .await
+        .map_err(|e| format!("admin connect {addr}: {e}"))?;
+    match sub {
+        Some("ping") => {
+            let resp = client
+                .call(AdminRequest::Ping)
+                .await
+                .map_err(|e| e.to_string())?;
+            println!("{resp:?}");
+        }
+        Some("jobs") => match args.get(2).map(String::as_str) {
+            None => {
+                let resp = client
+                    .call(AdminRequest::ListJobs)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                if let AdminResponse::JobList(summaries) = resp {
+                    if summaries.is_empty() {
+                        println!("(no jobs)");
+                    } else {
+                        for s in summaries {
+                            println!(
+                                "job {:>3}  owner={}  tasks={}  mode={:>11}  lifecycle={:?}",
+                                s.job_id, s.owner_node, s.task_count, s.mode, s.lifecycle,
+                            );
+                        }
+                    }
+                } else {
+                    return Err(format!("unexpected response: {resp:?}"));
+                }
+            }
+            Some("inspect") => {
+                let id: u32 = args
+                    .get(3)
+                    .ok_or_else(|| "jobs inspect requires <id>".to_string())?
+                    .parse()
+                    .map_err(|e| format!("invalid job_id: {e}"))?;
+                let resp = client
+                    .call(AdminRequest::JobInspect(id))
+                    .await
+                    .map_err(|e| e.to_string())?;
+                if let AdminResponse::JobDetail(Some(d)) = resp {
+                    println!("job {} ({})", d.job_id, d.dag_hash);
+                    println!("  lifecycle: {:?}", d.lifecycle);
+                    println!("  owner:     {}", d.owner_node);
+                    println!("  tasks:     {}", d.tasks.len());
+                    for t in &d.tasks {
+                        println!(
+                            "    task {:>3}  phase={}  status={:?}  owner={}",
+                            t.task_id, t.phase_id, t.status, t.owner_node,
+                        );
+                    }
+                    for dep in &d.dependencies {
+                        println!("    dep upstream_job={} stream={}", dep.upstream_job, dep.stream);
+                    }
+                } else {
+                    return Err(format!("unexpected response: {resp:?}"));
+                }
+            }
+            Some(other) => return Err(format!("unknown jobs subcommand `{other}`")),
+        },
+        Some("diagnostics") => {
+            let id: u32 = args
+                .get(2)
+                .ok_or_else(|| "diagnostics requires <task_id>".to_string())?
+                .parse()
+                .map_err(|e| format!("invalid task_id: {e}"))?;
+            let resp = client
+                .call(AdminRequest::TaskDiagnostics(id))
+                .await
+                .map_err(|e| e.to_string())?;
+            if let AdminResponse::TaskDiag(Some(d)) = resp {
+                println!(
+                    "task {:>3}  job={}  phase={}  status={:?}  owner={}  started_at_ms={}",
+                    d.task_id, d.job_id, d.phase_id, d.status, d.owner_node, d.started_at_ms,
+                );
+            } else {
+                return Err(format!("unexpected response: {resp:?}"));
+            }
+        }
+        Some("cluster") => {
+            let resp = client
+                .call(AdminRequest::ClusterStatus)
+                .await
+                .map_err(|e| e.to_string())?;
+            if let AdminResponse::ClusterMetrics(m) = resp {
+                println!("cluster term={} commit_index={} leader={:?}", m.term, m.commit_index, m.leader_id);
+                for n in &m.nodes {
+                    println!("  node {}  role={}  commit_index={}  log_length={}", n.id, n.role, n.commit_index, n.log_length);
+                }
+            } else {
+                return Err(format!("unexpected response: {resp:?}"));
+            }
+        }
+        Some(other) => return Err(format!("unknown --connect subcommand `{other}`")),
+        None => return Err("--connect requires a subcommand: ping|jobs|diagnostics|cluster".to_string()),
+    }
+    Ok(())
 }
 
 fn print_help() {
