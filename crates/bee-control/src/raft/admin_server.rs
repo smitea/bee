@@ -598,30 +598,30 @@ async fn dispatch(
                             );
                         }
                     };
-                    // Build the wire: bincode the
-                    // inner Forward with the
-                    // request_id we just got.
-                    let forward_envelope = match bincode::serialize(
-                        &AdminRequest::Forward {
-                            to: leader,
-                            request: request.clone(),
-                        },
-                    ) {
-                        Ok(b) => b,
-                        Err(e) => {
-                            return AdminResponse::Error(format!(
-                                "Forward: bincode inner: {e}"
-                            ));
-                        }
-                    };
-                    // Send via transport.
+                    // Send the inner `request`
+                    // bytes verbatim in the
+                    // `RpcMessage::AdminForward`.
+                    // The `request_id` lives in
+                    // the transport-layer envelope
+                    // (not inside the inner
+                    // request). The leader's
+                    // `Node::handle_admin_forward`
+                    // bincode-deserializes `request`
+                    // as the inner `AdminRequest`
+                    // and dispatches to its
+                    // `admin_callback`. The
+                    // `request_id` is used to
+                    // correlate the
+                    // `AdminForwardReply` back
+                    // to the follower's pending
+                    // oneshot.
                     if let Err(e) = transport
                         .unwrap()
                         .send(
                             leader,
                             RpcMessage::AdminForward {
                                 to: leader,
-                                request: forward_envelope,
+                                request: request.clone(),
                                 request_id,
                             },
                         )

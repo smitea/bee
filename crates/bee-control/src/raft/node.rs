@@ -57,6 +57,61 @@ pub type AdminReplyRegistrar = Arc<
         + Sync,
 >;
 
+/// S33.5.1: handle to the live Node's
+/// `pending_admin_replies` map. The AdminServer's
+/// `register_reply` closure uses
+/// `PendingAdminReplies::register()` to mint a new
+/// `(request_id, rx)` pair; the leader's reply
+/// (carried by `RpcMessage::AdminForwardReply`) is
+/// matched by `request_id` and sent back to `rx`.
+#[derive(Clone)]
+pub struct PendingAdminReplies {
+    next_id: Arc<std::sync::atomic::AtomicU64>,
+    map: Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<Vec<u8>>>>>,
+}
+
+impl PendingAdminReplies {
+    /// Build a fresh, empty handle. The
+    /// `request_id` counter starts at 1.
+    /// Used by the S33.5.1 admin_no_leader
+    /// test (which needs a `register_reply`
+    /// closure for an AdminServer that is
+    /// not wired to a live Node).
+    pub fn new() -> Self {
+        Self {
+            next_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            map: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    pub async fn register(
+        &self,
+    ) -> (u64, tokio::sync::oneshot::Receiver<Vec<u8>>) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let request_id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let mut map = self.map.lock().await;
+        map.insert(request_id, tx);
+        (request_id, rx)
+    }
+
+    /// Deliver a leader reply. Called by
+    /// `Node::handle_admin_forward_reply`. Public
+    /// so the test can simulate leader replies
+    /// without the full Node recv loop.
+    pub async fn deliver(
+        &self,
+        request_id: u64,
+        response: Vec<u8>,
+    ) {
+        let mut map = self.map.lock().await;
+        if let Some(tx) = map.remove(&request_id) {
+            let _ = tx.send(response);
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct NodeConfig {
     pub base_election_timeout: Duration,
@@ -280,6 +335,23 @@ impl Node {
         self.transport.clone()
     }
 
+    /// S33.5.1: hand out a clone of the
+    /// `pending_admin_replies` map (and the
+    /// monotonic `request_id` counter) so the
+    /// AdminServer (or a test) can build a
+    /// `register_reply` closure that delegates to
+    /// the live Node's `register_admin_reply()`
+    /// method. The returned handle is `Clone` and
+    /// can be captured by an AdminServer closure.
+    pub fn pending_admin_replies_handle(
+        &self,
+    ) -> PendingAdminReplies {
+        PendingAdminReplies {
+            next_id: self.next_admin_request_id.clone(),
+            map: self.pending_admin_replies.clone(),
+        }
+    }
+
     /// S33.4: register a pending admin-forward
     /// reply. Returns the `request_id` the
     /// follower should attach to the `Forward`
@@ -289,15 +361,7 @@ impl Node {
     pub async fn register_admin_reply(
         &self,
     ) -> (u64, tokio::sync::oneshot::Receiver<Vec<u8>>) {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let request_id = self
-            .next_admin_request_id
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        self.pending_admin_replies
-            .lock()
-            .await
-            .insert(request_id, tx);
-        (request_id, rx)
+        self.pending_admin_replies_handle().register().await
     }
 
     /// S33.5: the leader receives a forwarded
@@ -342,25 +406,19 @@ impl Node {
             }
         };
         // Send AdminForwardReply back to the
-        // requester. The `request_id` is
-        // hard-coded 0 for the S33.5 MVP —
-        // the follower's `register_admin_reply`
-        // generates a unique id per call, but
-        // the leader's `handle_admin_forward`
-        // doesn't see the id (it's encoded in
-        // the outer `Forward` envelope, which
-        // is the follower's transport-layer
-        // wrapper, not the inner `AdminRequest`).
-        // S33.5.1 will thread the request_id
-        // through the wire so the follower can
-        // match by id (not by `to`).
+        // requester. The `request_id` was passed
+        // in by the follower's dispatch path
+        // (Task 2 wires the full id flow);
+        // forward it verbatim so the follower's
+        // `handle_admin_forward_reply` can
+        // match it against the pending oneshot.
         if let Err(e) = self
             .transport
             .send(
                 to,
                 super::types::RpcMessage::AdminForwardReply {
                     to,
-                    request_id: 0,
+                    request_id,
                     response: response_bytes,
                 },
             )
@@ -459,8 +517,8 @@ impl Node {
                     }
                     Some(NodeCommand::Shutdown) | None => break,
                 },
-                rpc = self.transport.recv_rpc() => if let Some((_from, msg)) = rpc {
-                    self.handle_rpc(msg).await;
+                rpc = self.transport.recv_rpc() => if let Some((from, msg)) = rpc {
+                    self.handle_rpc(from, msg).await;
                     let mut state = self.state.lock().await;
                     state.last_heartbeat = Instant::now();
                     if state.role == Role::Follower {
@@ -574,7 +632,7 @@ impl Node {
         }
     }
 
-    async fn handle_rpc(&self, msg: RpcMessage) {
+    async fn handle_rpc(&self, from: NodeId, msg: RpcMessage) {
         match msg {
             RpcMessage::RequestVote {
                 term,
@@ -646,14 +704,18 @@ impl Node {
                 // forward to the leader via
                 // AdminForward (Task 4).
             }
-            RpcMessage::AdminForward { to, request, request_id } => {
+            RpcMessage::AdminForward { to: _, request, request_id } => {
                 // Leader side: dispatch the
                 // forwarded request with the
                 // follower's request_id (so the
                 // AdminForwardReply correlates
                 // back to the follower's pending
-                // oneshot).
-                self.handle_admin_forward(to, request, request_id).await;
+                // oneshot). The reply is sent to
+                // `from` (the envelope source),
+                // not the wire `to` (which is
+                // this Node's id and would loop
+                // the reply back to ourselves).
+                self.handle_admin_forward(from, request, request_id).await;
             }
             RpcMessage::AdminForwardReply { to, request_id, response } => {
                 // Follower side: forward the

@@ -101,6 +101,22 @@ pub struct ClusterNodeHandle {
     pub state: Arc<Mutex<NodeState>>,
     pub kv: Arc<Mutex<KVStateMachine>>,
     pub cp: Arc<Mutex<ControlPlaneStateMachine>>,
+    /// S33.5.1: clone of the live Node's
+    /// admin-forward reply registry. The
+    /// AdminServer's `register_reply` closure
+    /// delegates to this. Exposed so the test (or
+    /// `run_node`) can wire the AdminServer
+    /// without owning the Node.
+    pub pending_replies:
+        crate::raft::node::PendingAdminReplies,
+    /// S33.5.1: the live Node's
+    /// `NodeTransport` (the
+    /// `InMemoryTransport` or `TcpTransport`
+    /// that the cluster wired). The
+    /// AdminServer's `dispatch(Forward)` arm
+    /// uses this to send `RpcMessage::AdminForward`
+    /// to the leader.
+    pub node_transport: Arc<dyn NodeTransport>,
 }
 
 #[derive(Clone)]
@@ -169,6 +185,16 @@ impl Cluster {
             };
             let node = Node::new(id, peer_ids, transport, kv.clone(), cp.clone(), node_config);
             let state = node.state();
+            // S33.5.1: snapshot the Node's
+            // admin-forwarding handles BEFORE
+            // moving the Node into `run`, so the
+            // test (or `run_node`) can build a
+            // `register_reply` closure that
+            // delegates to the live Node's
+            // `register_admin_reply()`.
+            let pending_replies =
+                node.pending_admin_replies_handle();
+            let node_transport = node.node_transport();
             // S33.4: the slot's `cmd_tx` is the
             // same channel the InMemoryTransport
             // uses. The slot uses it for
@@ -185,7 +211,14 @@ impl Cluster {
                 task_done_inner.notify_one();
             });
             slots.push(ClusterNodeSlot {
-                handle: ClusterNodeHandle { id, state, kv, cp },
+                handle: ClusterNodeHandle {
+                    id,
+                    state,
+                    kv,
+                    cp,
+                    pending_replies,
+                    node_transport,
+                },
                 cmd_tx: slot_cmd_tx,
                 task_done,
                 alive: Arc::new(AtomicBool::new(true)),
@@ -304,6 +337,12 @@ impl Cluster {
                 node_config,
             );
             let state = node.state();
+            // S33.5.1: snapshot admin-forwarding
+            // handles before moving the Node into
+            // `run` (mirrors the in-memory path).
+            let pending_replies =
+                node.pending_admin_replies_handle();
+            let node_transport = node.node_transport();
             let task_done = Arc::new(Notify::new());
             let task_done_inner = task_done.clone();
             tokio::spawn(async move {
@@ -311,7 +350,14 @@ impl Cluster {
                 task_done_inner.notify_one();
             });
             slots.push(ClusterNodeSlot {
-                handle: ClusterNodeHandle { id, state, kv, cp },
+                handle: ClusterNodeHandle {
+                    id,
+                    state,
+                    kv,
+                    cp,
+                    pending_replies,
+                    node_transport,
+                },
                 cmd_tx: slot_cmd_tx,
                 task_done,
                 alive: Arc::new(AtomicBool::new(true)),
