@@ -169,6 +169,7 @@ pub async fn run_node(args: Vec<String>) -> Result<(), String> {
     // owns, so the AdminServer reads live values.
     let admin_state = node.state();
     let admin_stats = node.stats();
+    let admin_transport = node.node_transport();
     let task = tokio::spawn(async move {
         let _ = node.run().await;
     });
@@ -178,6 +179,7 @@ pub async fn run_node(args: Vec<String>) -> Result<(), String> {
         cp.clone(),
         admin_state,
         Some(admin_stats),
+        Some(admin_transport),
     )
     .await
     .map_err(|e| format!("admin server start: {e}"))?;
