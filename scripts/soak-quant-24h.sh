@@ -123,11 +123,10 @@ fi
 echo "  leader: $LEADER_ADDR"
 
 # 7. Phase 3 + 4: register datasources + deploy pipelines.
-# These admin CLI subcommands (`datasource create`,
-# `deploy`) are S33.3 follow-ups. For S33.2 the
-# script warns and continues; the bootstrap check
-# in Phase 5 catches the case where no data
-# actually flows.
+# S33.3 wired these via the admin RPC CLI; the
+# AdminServer on the leader writes a 'marker' to
+# its local KV (S33.3 MVP — see admin_server.rs).
+# The full bee-dsl-sql runner is a S33.4 follow-up.
 echo "phase 3: registering datasources..."
 for ds in binance google_news influxdb mongodb; do
     case "$ds" in
@@ -140,15 +139,9 @@ for ds in binance google_news influxdb mongodb; do
         --adapter "$ADAPTER" \
         --plugin-version 1.0.0 \
         --config '{}' 2>/dev/null; then
-        :
+        echo "  $ds registered (KV marker)"
     else
-        echo "  WARN: $ds create via admin RPC not yet wired (S33.3 follow-up); falling back to in-process seed"
-        # S33.2 fallback: the in-process cluster's
-        # demo registry (run_cluster_status_cli etc.)
-        # has a `seed_demo_registry` for binance only.
-        # For the smoke we skip the seed entirely;
-        # the 24h run with real plugins will use the
-        # S33.3 admin path.
+        echo "  WARN: $ds create via admin RPC failed (cluster might still be electing)"
     fi
 done
 
@@ -156,8 +149,14 @@ echo "phase 4: deploying pipelines..."
 for sql in docs/best-practices/quant/examples/quant_btc_strategy_backfill.sql \
           docs/best-practices/quant/examples/quant_btc_strategy.sql \
           docs/best-practices/quant/examples/quant_btc_strategy_v2.sql; do
-    if ! "$BEE" --connect "$LEADER_ADDR" deploy "$sql" 2>/dev/null; then
-        echo "  WARN: deploy $sql via admin RPC not yet wired (S33.3 follow-up); skipping"
+    if [ -f "$sql" ]; then
+        if "$BEE" --connect "$LEADER_ADDR" deploy "$sql" 2>/dev/null; then
+            echo "  $sql deployed (KV marker)"
+        else
+            echo "  WARN: deploy $sql via admin RPC failed"
+        fi
+    else
+        echo "  WARN: $sql not found; skipping"
     fi
 done
 
@@ -266,7 +265,8 @@ while :; do
     fi
 
     # 10e. Persist tick as JSON
-    cat > "/tmp/bee_soak/${RUN_ID}_tick_${NOW_MS}.json" <<EOF
+    TICK_FILE="/tmp/bee_soak/${RUN_ID}_tick_${NOW_MS}.json"
+    cat > "$TICK_FILE" <<EOF
 {
   "ts_unix_ms": $NOW_MS,
   "elapsed_sec": $ELAPSED_SEC,
@@ -278,6 +278,18 @@ while :; do
   "recovered_at_ms": $([ -n "$RECOVERED_AT_MS" ] && echo "$RECOVERED_AT_MS" || echo "null")
 }
 EOF
+
+    # 10f. Also write to the leader's Raft KV
+    # via the admin RPC. The value is the JSON
+    # body; the human can read back via
+    # `bee --connect <leader> kv list
+    # soak/run_<id>/` (S33.3 Task 5). The kv
+    # put is best-effort; if the leader's admin
+    # RPC is down (e.g. mid-failover), the
+    # next tick will retry.
+    "$BEE" --connect "$LEADER_ADDR" \
+        kv put "soak/${RUN_ID}/tick_${NOW_MS}" \
+        "$TICK_FILE" 2>/dev/null || true
 
     echo "  tick $TICK (T+${ELAPSED_SEC}s): klines=$KLINES_PER_MIN trades=$TRADES_PER_MIN"
     sleep "$INTERVAL_SECS"
