@@ -195,6 +195,142 @@ async fn send_response(conn: &mut Connection, resp: &AdminResponse) {
     let _ = conn.send_frame(&frame).await;
 }
 
+/// S33.5: the leader's apply path. Builds the
+/// appropriate `Op` (or `Op::Txn` for atomic
+/// multi-op deploys), submits via
+/// `NodeCommand::Submit`, awaits the reply,
+/// and returns the `AdminResponse` shape.
+///
+/// Called by `Node::handle_admin_forward` after
+/// the inner `AdminRequest` is decoded. Also
+/// called directly by `dispatch(Forward)` when
+/// the local node is the leader (skipping the
+/// Raft-channel hop).
+///
+/// `pub(crate)` so `run_node.rs` can build a
+/// closure around it.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn dispatch_with_apply(
+    req: AdminRequest,
+    kv: &Arc<tokio::sync::Mutex<KVStateMachine>>,
+    cp: &Arc<tokio::sync::Mutex<ControlPlaneStateMachine>>,
+    state: &Arc<tokio::sync::Mutex<super::node::NodeState>>,
+    transport: &dyn NodeTransport,
+) -> AdminResponse {
+    match req {
+        AdminRequest::KvPut { key, value } => {
+            let op = crate::kv::Op::Put { key, value };
+            submit_and_await(transport, op).await
+        }
+        AdminRequest::RegisterDatasource {
+            name,
+            adapter: _,
+            plugin_version: _,
+            config_json: _,
+            tenant: _,
+            owner_node: _,
+        } => {
+            // S33.5 MVP: register a
+            // datasource as a
+            // `Op::RegisterDatasourceProducer`
+            // with a unique signature. Full
+            // validation (cdylib check +
+            // strict mode) is a S33.5.2
+            // follow-up.
+            let cp_locked = cp.lock().await;
+            let next_job_id = cp_locked
+                .list_jobs()
+                .iter()
+                .map(|j| j.job_id)
+                .max()
+                .unwrap_or(0)
+                + 1;
+            drop(cp_locked);
+            let signature = format!("datasource/{}", &name);
+            let op = crate::kv::Op::RegisterDatasourceProducer {
+                signature,
+                job_id: next_job_id,
+            };
+            submit_and_await(transport, op).await
+        }
+        AdminRequest::Deploy {
+            sql_text,
+            owner_node,
+        } => {
+            // S33.5 MVP: register a single
+            // Job (no Tasks). The full
+            // bee-dsl-sql runner that parses
+            // the DAG into Tasks is a
+            // S33.5.3 follow-up.
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(sql_text.as_bytes());
+            let dag_hash = format!("{:x}", hasher.finalize());
+            let cp_locked = cp.lock().await;
+            let next_job_id = cp_locked
+                .list_jobs()
+                .iter()
+                .map(|j| j.job_id)
+                .max()
+                .unwrap_or(0)
+                + 1;
+            drop(cp_locked);
+            let op = crate::kv::Op::RegisterJob {
+                job_id: next_job_id,
+                dag_hash,
+                owner_node,
+                tenant: 0,
+            };
+            let response = submit_and_await(transport, op).await;
+            if matches!(response, AdminResponse::Error(_)) {
+                return response;
+            }
+            AdminResponse::DeployAck {
+                job_id: next_job_id,
+                task_ids: vec![],
+                error_msg: String::new(),
+            }
+        }
+        // Read arms should never reach here;
+        // they're handled by `dispatch`.
+        AdminRequest::Ping
+        | AdminRequest::ListJobs
+        | AdminRequest::JobInspect(_)
+        | AdminRequest::TaskDiagnostics(_)
+        | AdminRequest::ClusterStatus
+        | AdminRequest::ListKv { .. }
+        | AdminRequest::Forward { .. } => AdminResponse::Error(
+            "read-only arm routed to dispatch_with_apply (S33.5 bug)"
+                .to_string(),
+        ),
+    }
+}
+
+/// S33.5: helper. Build a
+/// `NodeCommand::Submit`, push it through the
+/// transport's command channel, await the
+/// oneshot reply, and convert the result into
+/// an `AdminResponse`.
+async fn submit_and_await(
+    transport: &dyn NodeTransport,
+    op: crate::kv::Op,
+) -> AdminResponse {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    if let Err(e) = transport
+        .submit_command(crate::raft::types::NodeCommand::Submit { op, reply: tx })
+        .await
+    {
+        return AdminResponse::Error(format!("submit failed: {e}"));
+    }
+    match rx.await {
+        Ok(Ok(())) => AdminResponse::KvPutAck { ok: true },
+        Ok(Err(e)) => AdminResponse::Error(format!("apply failed: {e}")),
+        Err(_) => AdminResponse::Error(
+            "submit reply channel closed".to_string(),
+        ),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn dispatch(
     req: AdminRequest,
