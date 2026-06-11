@@ -305,8 +305,18 @@ impl Node {
     /// `AdminRequest` and dispatch to the
     /// admin callback (which is the
     /// `AdminServer::dispatch_with_apply`
-    /// machinery on the leader side).
-    pub async fn handle_admin_forward(&self, to: u32, request: Vec<u8>) {
+    /// machinery on the leader side). The
+    /// `request_id` is the follower's
+    /// `register_admin_reply()` id; we use it
+    /// verbatim in the `AdminForwardReply` so
+    /// the follower can match by id (not by
+    /// `to`).
+    pub async fn handle_admin_forward(
+        &self,
+        to: u32,
+        request: Vec<u8>,
+        request_id: u64,
+    ) {
         let inner: AdminRequest = match bincode::deserialize(&request) {
             Ok(r) => r,
             Err(e) => {
@@ -636,10 +646,14 @@ impl Node {
                 // forward to the leader via
                 // AdminForward (Task 4).
             }
-            RpcMessage::AdminForward { to, request } => {
+            RpcMessage::AdminForward { to, request, request_id } => {
                 // Leader side: dispatch the
-                // forwarded request.
-                self.handle_admin_forward(to, request).await;
+                // forwarded request with the
+                // follower's request_id (so the
+                // AdminForwardReply correlates
+                // back to the follower's pending
+                // oneshot).
+                self.handle_admin_forward(to, request, request_id).await;
             }
             RpcMessage::AdminForwardReply { to, request_id, response } => {
                 // Follower side: forward the

@@ -542,40 +542,138 @@ async fn dispatch(
         // leader's `dispatch_with_apply` (in
         // admin_protocol.rs) handles the actual
         // op. For now, the leader's handle is
-        // a stub that just acks (Task 5c wires
-        // the real Raft-log apply).
-        AdminRequest::Forward { to, request } => {
-            // Decode the inner request so we can
-            // inspect it (for the
-            // "no leader elected" early-out).
-            let inner: Result<AdminRequest, _> =
-                bincode::deserialize(&request);
-            let _ = inner; // MVP: ignore for now
-            // For the MVP, the leader's reply
-            // comes back via the Node's
-            // `handle_admin_forward_reply` (Task
-            // 4 wires that). We send a
-            // `RpcMessage::AdminForward` to the
-            // leader via the transport; the
-            // follower's Node is responsible
-            // for registering the pending reply
-            // and waiting.
-            //
-            // TODO(S33.4 Task 5b follow-up):
-            // use Node::register_admin_reply to
-            // get a (request_id, oneshot), embed
-            // the request_id in the wire, await
-            // the oneshot, return the result.
-            // For now, return a generic "queued
-            // for leader" response.
-            let _ = to;
-            AdminResponse::Error(
-                "Forward queued for leader (Task 5c wires the leader apply)".to_string(),
-            )
+        // S33.5.1: the follower's real
+        // forwarding path. Detect
+        // leader-vs-self; either call
+        // dispatch_with_apply directly (if
+        // local leader) or forward to the
+        // leader via the Raft channel.
+        AdminRequest::Forward { to: _, request } => {
+            // We need self_id to compare with
+            // leader_id. Read from the transport.
+            let self_id = match transport {
+                Some(t) => t.self_id(),
+                None => {
+                    return AdminResponse::Error(
+                        "Forward without transport (test mode)".to_string(),
+                    );
+                }
+            };
+            // Read the leader id.
+            let leader_id_opt = {
+                let state_locked = state.lock().await;
+                state_locked.leader_id
+            };
+            match leader_id_opt {
+                Some(leader) if leader == self_id => {
+                    // Local leader. Decode the
+                    // inner request and apply
+                    // directly (no Raft-channel
+                    // hop).
+                    let inner: AdminRequest = match bincode::deserialize(&request) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            return AdminResponse::Error(format!(
+                                "Forward: decode failed: {e}"
+                            ));
+                        }
+                    };
+                    return Box::pin(dispatch_with_apply(
+                        inner,
+                        kv,
+                        cp,
+                        state,
+                        transport.unwrap(),
+                    ))
+                    .await;
+                }
+                Some(leader) => {
+                    // Forward to the leader.
+                    let (request_id, rx) = match register_reply {
+                        Some(rr) => rr().await,
+                        None => {
+                            return AdminResponse::Error(
+                                "Forward without register_reply (test mode)"
+                                    .to_string(),
+                            );
+                        }
+                    };
+                    // Build the wire: bincode the
+                    // inner Forward with the
+                    // request_id we just got.
+                    let forward_envelope = match bincode::serialize(
+                        &AdminRequest::Forward {
+                            to: leader,
+                            request: request.clone(),
+                        },
+                    ) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            return AdminResponse::Error(format!(
+                                "Forward: bincode inner: {e}"
+                            ));
+                        }
+                    };
+                    // Send via transport.
+                    if let Err(e) = transport
+                        .unwrap()
+                        .send(
+                            leader,
+                            RpcMessage::AdminForward {
+                                to: leader,
+                                request: forward_envelope,
+                                request_id,
+                            },
+                        )
+                        .await
+                    {
+                        return AdminResponse::Error(format!(
+                            "Forward: send failed: {e}"
+                        ));
+                    }
+                    // Await the leader's reply
+                    // (with a 5s timeout).
+                    let response_bytes = match tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        rx,
+                    )
+                    .await
+                    {
+                        Ok(Ok(bytes)) => bytes,
+                        Ok(Err(_)) => {
+                            return AdminResponse::Error(
+                                "Forward: reply channel closed"
+                                    .to_string(),
+                            );
+                        }
+                        Err(_) => {
+                            return AdminResponse::Error(
+                                "Forward: leader reply timeout (5s)"
+                                    .to_string(),
+                            );
+                        }
+                    };
+                    // Unwrap the inner response
+                    // (the leader's reply is
+                    // bincode-serialized
+                    // AdminResponse). The CLI
+                    // gets the inner reply
+                    // (e.g. KvPutAck), not the
+                    // Forwarded wrapper.
+                    return match bincode::deserialize(&response_bytes) {
+                        Ok(r) => r,
+                        Err(e) => AdminResponse::Error(format!(
+                            "Forward: decode leader reply: {e}"
+                        )),
+                    };
+                }
+                None => AdminResponse::Error(
+                    "no leader elected; retry in 3s".to_string(),
+                ),
+            }
         }
     }
 }
-
 /// Suppress unused warnings on the `kv` parameter
 /// (kept in the signature for parity with the Raft
 /// server, which reads KV state on writes).

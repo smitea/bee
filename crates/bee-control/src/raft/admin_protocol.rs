@@ -300,7 +300,7 @@ impl From<AdminRequest> for RpcMessage {
                 owner_node,
             },
             AdminRequest::Forward { to, request } => {
-                RpcMessage::AdminForward { to, request }
+                RpcMessage::AdminForward { to, request, request_id: 0 }
             }
         }
     }
