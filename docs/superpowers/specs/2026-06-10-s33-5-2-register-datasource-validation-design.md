@@ -60,8 +60,10 @@ The 9 checks are independent (no cross-check dependencies) but ordered for fail-
 
 1-4: cheap, no I/O. Fail-fast on bad name.
 5-7: cheap, no I/O. Fail-fast on bad input format.
-8: O(N_adapters) in-memory lookup. Fail if adapter is unknown.
-9: O(N_plugins × version_match) in-memory lookup. Fail if no Plugin matches.
+8: in-memory lookup (O(N_plugins)). `plugin_manager.list_adapters()` returns `(PluginId, AdapterDescriptor)` for every adapter in every loaded plugin. Check if **any plugin's `manifest.name` equals the request's `adapter`** (the "adapter" in the request is actually the plugin's logical name per ADR-0010; the `AdapterDescriptor.name` field is the method name, e.g. "subscribe"). Fail with a "load plugin first" message that lists loaded plugin names.
+9: `plugin_manager.resolve(adapter, &version_spec)` returns `Some(PluginId)` (a Plugin with matching name + a version that satisfies the spec exists). Fail with a "no plugin matches 'X' @ 'Y'" message.
+
+(Steps 8 and 9 both lookup by plugin name, not adapter-descriptor name. The binance.subscribe() example: "binance" is the plugin name / datasource name; "subscribe" is the adapter method on the binance plugin.)
 
 ### Wire types
 
