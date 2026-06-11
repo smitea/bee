@@ -36,7 +36,7 @@ pub use macros::Factory;
 /// logical plugin (even with the same version string) have distinct
 /// `PluginId`s (ADR-0009). KV state keys include the hash so old
 /// plugin state survives a swap.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct PluginId(pub String);
 
 impl std::fmt::Display for PluginId {
@@ -67,7 +67,7 @@ pub fn compute_plugin_id(content: &[u8]) -> PluginId {
 
 /// Logical name of a Plugin (e.g. "binance"). Author-chosen, not
 /// guaranteed unique — the binding truth is the [`PluginId`] hash.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PluginName(pub String);
 
 impl std::fmt::Display for PluginName {
@@ -78,14 +78,14 @@ impl std::fmt::Display for PluginName {
 
 /// Description of one Adapter provided by a Plugin. MVP: a name
 /// plus an `is_input` flag. S19+ will add typed signatures.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AdapterDescriptor {
     pub name: String,
     pub is_input: bool,
 }
 
 /// Description of one Handler provided by a Plugin.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HandlerDescriptor {
     pub name: String,
 }
@@ -95,7 +95,7 @@ pub struct HandlerDescriptor {
 /// The host (Bee) stores one `PluginManifest` per loaded `PluginId`.
 /// The Compiler validates Pipeline definitions against the available
 /// Plugins' manifests before submit.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PluginManifest {
     /// Logical name (e.g. "binance"). Human-friendly, not unique.
     pub name: PluginName,
@@ -478,7 +478,7 @@ impl AbiVersion {
 /// ADR-0009, the major number is what the host accepts). Feature
 /// version follows SemVer and is used by [`VersionSpec`] for
 /// `binance:^1.0` / `binance:latest` style references in Pipelines.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub struct Version {
     pub major: u32,
     pub minor: u32,
@@ -535,7 +535,7 @@ impl Version {
 /// - [`VersionSpec::Patch`]: `~1.2` → `>=1.2.0, <1.3.0`.
 /// - [`VersionSpec::Latest`]: any version; the resolver picks the
 ///   highest one loaded.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum VersionSpec {
     Exact(Version),
     Compatible(Version),

@@ -35,7 +35,7 @@ use bee_plugin_sdk::{PluginId, VersionSpec};
 /// (per ADR-0010 pause semantics). New Pipelines can't `use` it.
 /// `Disabled` = tombstoned; same as Paused but the user marked
 /// the Datasource for deletion.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum DatasourceStatus {
     #[default]
     Active,
@@ -55,7 +55,7 @@ impl std::fmt::Display for DatasourceStatus {
 
 /// S29 managed-entity data model. The runtime Phase-with-Adapter
 /// is a derived view (per ADR-0010).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Datasource {
     /// User-facing name (e.g., "binance"). Unique within a tenant.
     pub name: String,
