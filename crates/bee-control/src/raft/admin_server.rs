@@ -29,6 +29,7 @@ use crate::raft::admin_protocol::{
 use crate::raft::node::AdminReplyRegistrar;
 use crate::raft::transport::NodeTransport;
 use crate::raft::types::{NodeId, RpcMessage};
+use bee_registry::PluginManager;
 
 /// S33.1: shutdown signal sender held by the
 /// `AdminServer`. The accept loop `select!`s on it
@@ -76,6 +77,14 @@ impl AdminServer {
         // for forwarded admin writes. `None` for
         // tests that don't exercise forwarding.
         register_reply: Option<AdminReplyRegistrar>,
+        // S33.5.2: the local `PluginManager`
+        // (loaded with the Plugins from the
+        // host's plugin directory). The
+        // `RegisterDatasource` arm uses it for
+        // steps 8-9 of the validation chain.
+        // `None` for tests that don't exercise
+        // plugin-existence checks.
+        plugin_manager: Option<Arc<PluginManager>>,
     ) -> Result<Self, String> {
         let listener = Listener::bind(&addr.to_string())
             .await
@@ -105,6 +114,7 @@ impl AdminServer {
                         let stats = stats.clone();
                         let transport = node_transport.clone();
                         let register_reply = register_reply.clone();
+                        let plugin_manager = plugin_manager.clone();
                         tokio::spawn(async move {
                             handle_admin_connection(
                                 conn,
@@ -114,6 +124,7 @@ impl AdminServer {
                                 stats,
                                 transport,
                                 register_reply,
+                                plugin_manager,
                             )
                             .await;
                         });
@@ -164,6 +175,10 @@ async fn handle_admin_connection(
     // (request_id, oneshot::Receiver) pairs
     // for forwarded admin writes.
     register_reply: Option<AdminReplyRegistrar>,
+    // S33.5.2: passed to `dispatch` →
+    // `dispatch_with_apply` for the
+    // RegisterDatasource validation chain.
+    plugin_manager: Option<Arc<PluginManager>>,
 ) {
     loop {
         let frame = match conn.recv_frame().await {
@@ -193,6 +208,7 @@ async fn handle_admin_connection(
             stats.as_deref(),
             transport.as_deref(),
             register_reply.as_ref(),
+            plugin_manager.as_deref(),
         )
         .await;
         send_response(&mut conn, &response).await;
@@ -224,12 +240,17 @@ async fn send_response(conn: &mut Connection, resp: &AdminResponse) {
 /// can build a closure around it for the
 /// admin callback.
 #[allow(clippy::too_many_arguments)]
-pub async fn dispatch_with_apply(
+ pub async fn dispatch_with_apply(
     req: AdminRequest,
     kv: &Arc<tokio::sync::Mutex<KVStateMachine>>,
     cp: &Arc<tokio::sync::Mutex<ControlPlaneStateMachine>>,
     state: &Arc<tokio::sync::Mutex<super::node::NodeState>>,
     transport: &dyn NodeTransport,
+    // S33.5.2: the `PluginManager` for steps
+    // 8-9 of the RegisterDatasource
+    // validation chain. `None` for tests
+    // that don't exercise plugin-existence.
+    plugin_manager: Option<&PluginManager>,
 ) -> AdminResponse {
     match req {
         AdminRequest::KvPut { key, value } => {
@@ -360,6 +381,10 @@ async fn dispatch(
     // (request_id, oneshot::Receiver) pairs
     // for forwarded admin writes.
     register_reply: Option<&AdminReplyRegistrar>,
+    // S33.5.2: passed through to
+    // dispatch_with_apply for the
+    // RegisterDatasource validation chain.
+    plugin_manager: Option<&PluginManager>,
 ) -> AdminResponse {
     match req {
         AdminRequest::Ping => AdminResponse::Pong,
@@ -584,6 +609,7 @@ async fn dispatch(
                         cp,
                         state,
                         transport.unwrap(),
+                        plugin_manager,
                     ))
                     .await;
                 }

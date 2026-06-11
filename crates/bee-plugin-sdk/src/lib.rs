@@ -304,6 +304,17 @@ impl BeeHostV1 {
 /// Opaque handle the plugin owns. The plugin's `bee_plugin_init`
 /// returns a `*mut PluginHandle` and `bee_plugin_drop` consumes it.
 /// The host treats the pointer as opaque — it never dereferences it.
+// SAFETY: The raw `*const Vtable` pointers in `input_adapters`,
+// `output_adapters`, and `handlers` point to `#[repr(C)]` vtable
+// `static`s owned by the plugin's cdylib. The vtables are
+// immutable for the plugin's lifetime, and the host never
+// mutates them. Sharing the handle across threads is sound
+// because (a) the `inner: Arc<dyn Any + Send + Sync>` is already
+// Sync, and (b) the vtable pointers are only read (via FFI
+// call) under controlled unsafe blocks.
+unsafe impl Send for PluginHandle {}
+unsafe impl Sync for PluginHandle {}
+
 pub struct PluginHandle {
     /// The plugin's manifest (so the host can introspect without
     /// calling back into the plugin).

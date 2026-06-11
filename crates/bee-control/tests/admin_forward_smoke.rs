@@ -48,6 +48,7 @@ async fn forward_arm_returns_queued() {
         None,
         None,
         None,
+        None,  // plugin_manager (S33.5.2)
     )
     .await
     .expect("AdminServer::start");

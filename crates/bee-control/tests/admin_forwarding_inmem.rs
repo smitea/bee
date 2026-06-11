@@ -101,6 +101,7 @@ async fn admin_forwarding_inmem() {
             None,
             Some(node_transport),
             Some(register_reply),
+            None,  // plugin_manager (S33.5.2)
         )
         .await
         .expect("AdminServer::start");
@@ -317,6 +318,7 @@ async fn admin_no_leader_inmem() {
         None,
         Some(transport),
         Some(register_reply),
+        None,  // plugin_manager (S33.5.2)
     )
     .await
     .expect("AdminServer::start");

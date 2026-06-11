@@ -35,6 +35,7 @@ async fn admin_kv_put_roundtrip() {
         None,
         None,
         None,
+        None,  // plugin_manager (S33.5.2)
     )
     .await
     .expect("AdminServer::start");
@@ -78,6 +79,7 @@ async fn admin_register_datasource_roundtrip() {
         None,
         None,
         None,
+        None,  // plugin_manager (S33.5.2)
     )
     .await
     .expect("AdminServer::start");
@@ -133,6 +135,7 @@ async fn admin_deploy_roundtrip() {
         None,
         None,
         None,
+        None,  // plugin_manager (S33.5.2)
     )
     .await
     .expect("AdminServer::start");

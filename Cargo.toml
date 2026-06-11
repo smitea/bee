@@ -41,6 +41,7 @@ bee-types = { path = "crates/bee-types" }
 bee-dsl-sql = { path = "crates/bee-dsl-sql" }
 bee-adapter = { path = "crates/bee-adapter" }
 bee-plugin-sdk = { path = "crates/bee-plugin-sdk" }
+bee-registry = { path = "crates/bee-registry" }
 
 [workspace.lints.rust]
 unsafe_code = "warn"

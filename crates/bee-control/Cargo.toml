@@ -15,6 +15,7 @@ bee-plugin-sdk = { workspace = true }
 bee-dsl-sql = { workspace = true }
 bee-transport = { workspace = true }
 bee-codec = { workspace = true }
+bee-registry = { workspace = true }
 async-trait = "0.1"
 bincode = "1"
 thiserror = "2"
