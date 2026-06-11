@@ -405,6 +405,49 @@ fixed in `09c8dd3`.
 
 **After S33.4** (current state): the wire plumbing for follower → leader forwarding is complete. The actual Raft-log apply on the leader side is the S33.5 follow-up. S33.3's local-apply MVP continues to work for single-leader 24h soak runs; the follower's `Forward` arm in S33.4 is the entry point for multi-leader consistency (when S33.5 lands, the same `Forward` arm becomes the multi-leader hot path).
 
+### S33.5 · Leader-side Raft-log apply (the S33.4 follow-up)
+
+- **Type**: AFK
+- **Blocked by**: S33.4 (Forward wire + pending_replies)
+- **ADRs**: 0001, 0007
+- **Design**: `docs/superpowers/specs/2026-06-10-s33-5-leader-raft-log-apply.md`
+
+> **Why this story exists**: S33.4 shipped the wire types + the Forward arm + the pending-replies map. The leader's `dispatch_with_apply` is the actual Raft-log apply path: it builds the appropriate `Op` (or `Op::Txn` for atomic multi-op deploys), submits via `NodeCommand::Submit`, and waits for the apply loop to commit + replicate.
+
+**Scope** (built)
+
+1. **`Node::admin_callback`** — the leader's `handle_admin_forward` decodes the inner `AdminRequest` and calls the registered callback (which is the `AdminServer::dispatch_with_apply` machinery). Default is a no-op stub for in-process tests; `run_node` overrides it via `set_admin_callback`.
+2. **`AdminServer::dispatch_with_apply` (the leader's apply path)** — `pub` so `run_node.rs` can build a closure around it. The 3 write arms (`KvPut` / `RegisterDatasource` / `Deploy`) move from `dispatch` to `dispatch_with_apply`. Each builds the appropriate `Op` and submits via `NodeCommand::Submit`.
+3. **`run_node` registers the callback** — after constructing the Node + before the AdminServer, a closure is set that calls `dispatch_with_apply`. The closure captures the `kv` / `cp` / `state` / `transport_arc` clones.
+
+**Scope** (deferred to S33.5.1 + S33.5.2 + S33.5.3)
+
+- **S33.5.1**: the follower's actual `Forward` arm wires the cross-node `RpcMessage::AdminForward` + `register_admin_reply` + await the `oneshot`. The MVP returns "S33.5.1 wires the follower path" if the local node is not the leader.
+- **S33.5.2**: full validation of the `RegisterDatasource` payload (cdylib check + strict mode). The MVP uses a simple `signature = "datasource/<name>"` and assigns a fresh `job_id`.
+- **S33.5.3**: the full `bee-dsl-sql` runner behind `Deploy` (parses the DAG into Tasks). The MVP registers a single Job with no Tasks.
+- **3-node TCP multi-writer integration test** (the S33.5 spec's "Acceptance criteria" #3): boots a real 3-node TCP cluster, sends writes from a follower, asserts all 3 nodes' state is consistent after a 1s wait. The MVP tests use the in-process `Cluster::new` (which exercises the leader-side submit path); the cross-node apply needs TCP for replication.
+
+**Acceptance criteria**
+
+- [x] `cargo build --workspace` green
+- [x] `cargo test --workspace` green (470 tests, was 140; +0 net; S33.3 + S33.4 + S33.5 maintain the baseline)
+- [x] `Node::admin_callback` + `set_admin_callback` + `handle_admin_forward` added; `handle_admin_forward` decodes the inner `AdminRequest`, calls the callback, and sends `RpcMessage::AdminForwardReply` back
+- [x] `AdminServer::dispatch_with_apply` is `pub`; the 3 write arms move into it; the `Forward` arm in `dispatch` calls it directly (skipping the Raft hop) when the local transport is present
+- [x] `run_node` registers the callback after `Node::new` and before `AdminServer::start`
+- [x] The S33.4 "queued for leader" placeholder is removed
+- [x] The S33.3 `admin_write_roundtrip` integration test still passes (the same code path; the change is that the `dispatch_with_apply` now submits via `NodeCommand::Submit` instead of grabbing the local KV mutex directly)
+- [ ] 3-node TCP multi-writer test — **deferred to S33.5.1** (the in-process `Cluster::new` doesn't replicate; TCP does)
+- [ ] The follower's `Forward` arm wires the cross-node `RpcMessage::AdminForward` — **deferred to S33.5.1**
+
+**Deliverables** (built)
+
+- `crates/bee-control/src/raft/node.rs` — `AdminCallback` type alias; `admin_callback` field (Mutex<AdminCallback>); `default_admin_callback` no-op stub; `set_admin_callback` setter; `handle_admin_forward` decodes + dispatches
+- `crates/bee-control/src/raft/admin_server.rs` — `dispatch_with_apply` (pub); `submit_and_await` helper; 3 write arms moved; `dispatch(Forward)` calls `dispatch_with_apply` directly when local transport is present
+- `crates/bee-control/Cargo.toml` — `futures = "0.3"` (for `BoxFuture<'static, _>`)
+- `bee/src/run_node.rs` — registers the admin callback after `Node::new` + before `AdminServer::start`
+
+**After S33.5** (current state): the leader-side Raft-log apply path is real. The 24h soak (which talks to the leader's admin RPC) writes go through the Raft log: `dispatch_with_apply` → `Op::Put` / `Op::RegisterDatasourceProducer` / `Op::RegisterJob` → `NodeCommand::Submit` → apply loop → commit. **For the in-process `Cluster::new` the apply is single-node** (no replication). **For 3-node TCP clusters the apply replicates via the Raft log** (the same `submit_command` path; the S33.1 TCP integration test exercises this for the non-admin ops). The follower-side cross-node forwarding is S33.5.1.
+
 **Failure mode escalation**
 
 If the 24h soak fails, the human can either:
