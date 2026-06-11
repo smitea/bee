@@ -354,6 +354,57 @@ fixed in `09c8dd3`.
 
 **After S33.3** (current state): the 24h soak loop is end-to-end. The remaining open items are S33.4 (proper Raft-log forwarding for writes; the bee-dsl-sql runner behind `Deploy`; the 24h wall-clock run itself is HITL).
 
+### S33.4 · Admin RPC write paths via Raft-log forwarding (the S33.3 MVP follow-up)
+
+- **Type**: AFK
+- **Blocked by**: S33.3 (admin RPC write-path MVP)
+- **ADRs**: 0001, 0007
+- **Design**: `docs/superpowers/specs/2026-06-10-s33-4-raft-log-forwarding-for-admin-writes.md`
+
+> **Why this story exists**: S33.3 ships the `KvPut` / `Deploy` / `RegisterDatasource` write arms with a "direct local apply" simplification. For the 24h soak (single-writer / single-leader) this is correct, but in production a follower can receive an admin RPC and silently apply a write the other 2 nodes don't see. S33.4 introduces the Forward arm so a follower's AdminServer relays a write to the leader, and the leader handles it.
+
+**Scope**
+
+1. **`NodeTransport::submit_command` trait method** — the AdminServer's apply path uses this to push `NodeCommand::Submit { op, reply }` into the local Node's command channel.
+2. **`InMemoryTransport::cmd_tx`** — the in-memory transport's command channel is now shared between the Node and the AdminServer (the same `mpsc::Sender` is cloned).
+3. **Wire types: `AdminRequest::Forward` + `RpcMessage::AdminForward` + `RpcMessage::AdminForwardReply`** — the follower → leader + leader → follower round-trip.
+4. **`Node::pending_admin_replies` + `register_admin_reply` + `handle_admin_forward_reply`** — the follower's mechanism for waiting on the leader's reply.
+5. **`AdminServer::start` takes `Option<Arc<dyn NodeTransport>>`** — the leader's apply path uses it to send the `AdminRequest::Forward` via `transport.send`.
+6. **`run_node`** passes the new arg.
+7. **Integration test** (`admin_forward_smoke`) locks down the Forward wire path.
+
+**Out of scope** (deferred to S33.5)
+
+- The actual leader-side Raft-log apply: build the appropriate `Op` (`Op::Put`, `Op::RegisterDatasourceProducer`, or `Op::RegisterJob` + N × `Op::RegisterTask`) and submit via `NodeCommand::Submit`. The MVP `dispatch_with_apply` is a placeholder that returns "queued for leader" — the wire types are correct, the data flow is right, but the leader's Raft commit is not yet implemented. **S33.5 wires the leader's `dispatch_with_apply` to actually submit the op to the local Raft log + await the apply**.
+- The full `bee-dsl-sql` runner behind `Deploy` (currently a marker; S33.5 calls `run_pipeline_with_config` + submits `Op::RegisterJob` + N × `Op::RegisterTask`).
+- The 3-node TCP integration test (currently a 1-process test) — S33.5 boots a real 3-node TCP cluster and exercises follower → leader forwarding end-to-end.
+
+**Acceptance criteria**
+
+- [x] `cargo build --workspace` green
+- [x] `cargo test --workspace` green (140 tests, was 139; +1 admin_forward_smoke)
+- [x] `NodeTransport::submit_command` trait method added; both `InMemoryTransport` and `TcpTransport` impl it
+- [x] `InMemoryTransport::cmd_tx` field added; the slot + the transport share the same `mpsc::Sender`
+- [x] `AdminRequest::Forward { to, request }` + `RpcMessage::AdminForward` + `RpcMessage::AdminForwardReply` wire types added
+- [x] `Node::pending_admin_replies` map + `register_admin_reply` + `handle_admin_forward_reply` implemented
+- [x] `AdminServer::start` takes `node_transport: Option<Arc<dyn NodeTransport>>`; `bee node` passes `Some(...)`
+- [x] `admin_forward_smoke` integration test passes (locks down the Forward wire path)
+- [ ] Leader's `dispatch_with_apply` actually submits to the Raft log — **deferred to S33.5**
+- [ ] 3-node TCP multi-writer integration test — **deferred to S33.5**
+
+**Deliverables** (built)
+
+- `crates/bee-control/src/raft/transport.rs` — `submit_command` trait method + `InMemoryTransport::cmd_tx` field
+- `crates/bee-control/src/raft/cluster.rs` — `Cluster::new` plumbs `cmd_tx` to the transport (cloned) + the slot
+- `crates/bee-control/src/raft/admin_protocol.rs` — `AdminRequest::Forward` + `AdminResponse::Forwarded` + `From<AdminRequest> for RpcMessage` arm
+- `crates/bee-control/src/raft/types.rs` — `RpcMessage::AdminForward` + `RpcMessage::AdminForwardReply`
+- `crates/bee-control/src/raft/node.rs` — `pending_admin_replies` + `next_admin_request_id` + `node_transport()` + `register_admin_reply()` + `handle_admin_forward_reply()` + `handle_rpc` arms
+- `crates/bee-control/src/raft/admin_server.rs` — `start` signature + `dispatch` Forward arm (placeholder) + `node_transport` threaded through
+- `bee/src/run_node.rs` — passes `node_transport` to `AdminServer::start`
+- `crates/bee-control/tests/admin_forward_smoke.rs` — Forward wire path smoke test
+
+**After S33.4** (current state): the wire plumbing for follower → leader forwarding is complete. The actual Raft-log apply on the leader side is the S33.5 follow-up. S33.3's local-apply MVP continues to work for single-leader 24h soak runs; the follower's `Forward` arm in S33.4 is the entry point for multi-leader consistency (when S33.5 lands, the same `Forward` arm becomes the multi-leader hot path).
+
 **Failure mode escalation**
 
 If the 24h soak fails, the human can either:
