@@ -227,6 +227,83 @@ async fn send_response(conn: &mut Connection, resp: &AdminResponse) {
 /// S33.5: the leader's apply path. Builds the
 /// appropriate `Op` (or `Op::Txn` for atomic
 /// multi-op deploys), submits via
+/// S33.5.2: 9-step validation for
+/// `AdminRequest::RegisterDatasource`. Returns
+/// `Err(msg)` on the first failure. Steps:
+/// 1-4: name format
+/// 5:   version_spec parses
+/// 6:   config is valid JSON
+/// 7:   config has no per-call args
+/// 8:   adapter is a loaded plugin
+/// 9:   plugin resolves with version_spec
+async fn validate_register_datasource(
+    name: &str,
+    adapter: &str,
+    plugin_version: &str,
+    config_json: &str,
+    tenant: u16,
+    plugin_manager: Option<&PluginManager>,
+) -> Result<bee_plugin_sdk::VersionSpec, String> {
+    // 1: non-empty
+    if name.is_empty() {
+        return Err("name must be non-empty".to_string());
+    }
+    // 2: length
+    if name.len() > 64 {
+        return Err("name too long (max 64 chars)".to_string());
+    }
+    // 3: charset
+    for c in name.chars() {
+        if !(c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-') {
+            return Err(format!(
+                "name '{name}' has invalid chars; allowed: a-z A-Z 0-9 _ . -"
+            ));
+        }
+    }
+    // 4: tenant
+    if tenant > 65535 {
+        return Err("tenant must be in 0..=65535".to_string());
+    }
+    // 5: version_spec
+    let version_spec = bee_plugin_sdk::VersionSpec::parse(plugin_version)
+        .map_err(|e| format!("invalid plugin-version '{plugin_version}': {e}"))?;
+    // 6: config is valid JSON
+    let cfg_value: serde_json::Value = serde_json::from_str(config_json)
+        .map_err(|e| format!("config is not valid JSON: {e}"))?;
+    // 7: config has no per-call args
+    bee_dsl_sql::preprocess::validate_datasource_config(&cfg_value)
+        .map_err(|e| format!("config: {e}"))?;
+    // 8 + 9: adapter loaded + plugin resolves
+    let pm = match plugin_manager {
+        Some(pm) => pm,
+        None => {
+            return Err(
+                "plugin_manager not wired; cannot validate adapter (S33.5.2: run_node sets the real PluginManager)"
+                    .to_string(),
+            );
+        }
+    };
+    // Use resolve directly: it covers both
+    // steps 8 and 9 (a Plugin with matching
+    // name + a version that satisfies the
+    // spec must exist).
+    if pm.resolve(adapter, &version_spec).is_none() {
+        let loaded_names: Vec<String> = pm
+            .list_adapters()
+            .into_iter()
+            .map(|(id, _)| id.0)
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        return Err(format!(
+            "adapter '{adapter}' is not loaded (no plugin with that name + matching plugin-version); \
+             loaded plugins: [{}]. Load a plugin first (e.g. `bee plugin load <path>`).",
+            loaded_names.join(", ")
+        ));
+    }
+    Ok(version_spec)
+}
+
 /// `NodeCommand::Submit`, awaits the reply,
 /// and returns the `AdminResponse` shape.
 ///
@@ -259,34 +336,85 @@ async fn send_response(conn: &mut Connection, resp: &AdminResponse) {
         }
         AdminRequest::RegisterDatasource {
             name,
-            adapter: _,
-            plugin_version: _,
-            config_json: _,
-            tenant: _,
+            adapter,
+            plugin_version,
+            config_json,
+            tenant,
             owner_node: _,
         } => {
-            // S33.5 MVP: register a
-            // datasource as a
-            // `Op::RegisterDatasourceProducer`
-            // with a unique signature. Full
-            // validation (cdylib check +
-            // strict mode) is a S33.5.2
-            // follow-up.
-            let cp_locked = cp.lock().await;
-            let next_job_id = cp_locked
-                .list_jobs()
-                .iter()
-                .map(|j| j.job_id)
-                .max()
-                .unwrap_or(0)
-                + 1;
-            drop(cp_locked);
-            let signature = format!("datasource/{}", &name);
-            let op = crate::kv::Op::RegisterDatasourceProducer {
-                signature,
-                job_id: next_job_id,
+            // S33.5.2: 9-step validation. On
+            // success, build a `Datasource`
+            // and store at `ds/{tenant}/{name}`
+            // per ADR-0010.
+            let version_spec = match validate_register_datasource(
+                &name,
+                &adapter,
+                &plugin_version,
+                &config_json,
+                tenant,
+                plugin_manager,
+            )
+            .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    return AdminResponse::RegisterDatasourceAck {
+                        ok: false,
+                        error_msg: e,
+                    };
+                }
             };
-            submit_and_await(transport, op).await
+            // Resolve the PluginId (step 9
+            // already validated it).
+            let plugin_id = plugin_manager
+                .and_then(|pm| pm.resolve(&adapter, &version_spec))
+                .unwrap_or_else(|| {
+                    // Should not happen — step 9
+                    // would have returned Err.
+                    bee_plugin_sdk::PluginId("unknown".to_string())
+                });
+            let ds = crate::datasource::Datasource::new(
+                name.clone(),
+                tenant,
+                adapter.clone(),
+                plugin_id,
+                version_spec,
+                config_json.clone(),
+            );
+            let ds_bytes = match bincode::serialize(&ds) {
+                Ok(b) => b,
+                Err(e) => {
+                    return AdminResponse::RegisterDatasourceAck {
+                        ok: false,
+                        error_msg: format!(
+                            "bincode serialize Datasource: {e}"
+                        ),
+                    };
+                }
+            };
+            let key = format!("ds/{tenant}/{name}");
+            let op = crate::kv::Op::Put {
+                key: key.clone(),
+                value: ds_bytes,
+            };
+            match submit_and_await(transport, op).await {
+                AdminResponse::KvPutAck { ok: true } => {
+                    AdminResponse::RegisterDatasourceAck {
+                        ok: true,
+                        error_msg: String::new(),
+                    }
+                }
+                AdminResponse::KvPutAck { ok: false } => {
+                    AdminResponse::RegisterDatasourceAck {
+                        ok: false,
+                        error_msg: "KV put failed".to_string(),
+                    }
+                }
+                other => AdminResponse::RegisterDatasourceAck {
+                    ok: false,
+                    error_msg: format!("unexpected KV reply: {other:?}"),
+                },
+            }
         }
         AdminRequest::Deploy {
             sql_text,
@@ -542,19 +670,64 @@ async fn dispatch(
             tenant,
             owner_node: _,
         } => {
-            // Same MVP simplification: write a
-            // marker to the leader's KV.
+            // S33.5.2: 9-step validation.
+            // The S33.3 MVP path wrote a flat
+            // 'soak/datasource/{name}' marker.
+            // S33.5.2 stores a real
+            // `Datasource` at `ds/{tenant}/{name}`
+            // per ADR-0010. The apply path
+            // stays as direct local write
+            // (S33.3 MVP) for tests that
+            // don't wire a `node_transport`;
+            // production goes through
+            // `dispatch_with_apply` (the
+            // Forward local-leader branch
+            // and `run_node`'s callback).
+            let version_spec = match validate_register_datasource(
+                &name,
+                &adapter,
+                &plugin_version,
+                &config_json,
+                tenant,
+                plugin_manager,
+            )
+            .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    return AdminResponse::RegisterDatasourceAck {
+                        ok: false,
+                        error_msg: e,
+                    };
+                }
+            };
+            let plugin_id = plugin_manager
+                .and_then(|pm| pm.resolve(&adapter, &version_spec))
+                .unwrap_or_else(|| {
+                    bee_plugin_sdk::PluginId("unknown".to_string())
+                });
+            let ds = crate::datasource::Datasource::new(
+                name.clone(),
+                tenant,
+                adapter.clone(),
+                plugin_id,
+                version_spec,
+                config_json.clone(),
+            );
+            let ds_bytes = match bincode::serialize(&ds) {
+                Ok(b) => b,
+                Err(e) => {
+                    return AdminResponse::RegisterDatasourceAck {
+                        ok: false,
+                        error_msg: format!(
+                            "bincode serialize Datasource: {e}"
+                        ),
+                    };
+                }
+            };
             let mut kv = kv.lock().await;
-            let payload = serde_json::json!({
-                "name": &name,
-                "adapter": &adapter,
-                "plugin_version": &plugin_version,
-                "config_json": &config_json,
-                "tenant": tenant,
-            });
-            let body = serde_json::to_vec(&payload).unwrap_or_default();
-            let key = format!("soak/datasource/{}", &name);
-            kv.put(key, body);
+            let key = format!("ds/{tenant}/{name}");
+            kv.put(key, ds_bytes);
             AdminResponse::RegisterDatasourceAck {
                 ok: true,
                 error_msg: String::new(),
