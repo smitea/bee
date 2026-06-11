@@ -67,19 +67,26 @@ async fn admin_kv_put_roundtrip() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn admin_register_datasource_roundtrip() {
+async fn admin_register_datasource_no_plugin_manager() {
+    // S33.5.2: with plugin_manager = None,
+    // the validation chain returns the
+    // "plugin_manager not wired" error
+    // before the happy-path code runs. The
+    // happy path is now in
+    // admin_datasource_validation.rs
+    // (test: register_datasource_full_happy_path).
     let kv = Arc::new(Mutex::new(KVStateMachine::new()));
     let cp = Arc::new(Mutex::new(ControlPlaneStateMachine::new()));
     let state = Arc::new(Mutex::new(NodeState::default()));
     let mut admin = AdminServer::start(
         "127.0.0.1:0".parse().unwrap(),
-        kv.clone(),
-        cp.clone(),
+        kv,
+        cp,
         state,
         None,
         None,
         None,
-        None,  // plugin_manager (S33.5.2)
+        None,  // plugin_manager
     )
     .await
     .expect("AdminServer::start");
@@ -97,22 +104,13 @@ async fn admin_register_datasource_roundtrip() {
         .await
         .expect("RegisterDatasource call");
     if let AdminResponse::RegisterDatasourceAck { ok, error_msg } = resp {
-        assert!(ok, "expected ok=true, got error: {error_msg}");
+        assert!(!ok, "expected ok=false with no plugin_manager");
+        assert!(
+            error_msg.contains("plugin_manager not wired"),
+            "expected 'plugin_manager not wired' error, got: {error_msg}"
+        );
     } else {
         panic!("expected RegisterDatasourceAck");
-    }
-    // Read back via list: should be in KV
-    let resp = client
-        .call(AdminRequest::ListKv {
-            prefix: "soak/datasource/".to_string(),
-        })
-        .await
-        .expect("ListKv call");
-    if let AdminResponse::KvList(entries) = resp {
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].0, "soak/datasource/binance");
-    } else {
-        panic!("expected KvList");
     }
     admin.shutdown();
 }
