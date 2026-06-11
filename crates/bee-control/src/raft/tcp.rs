@@ -235,6 +235,16 @@ impl NodeTransport for TcpTransport {
         let mut rx = self.cmd_rx.lock().await;
         rx.recv().await
     }
+
+    async fn submit_command(&self, cmd: NodeCommand) -> Result<(), TransportError> {
+        // Reuse the existing `pub fn submit_command`.
+        // Translate the bee-transport error
+        // type to our `TransportError` so the
+        // trait signature is uniform.
+        self.submit_command(cmd).await.map_err(|e| {
+            TransportError::Io(format!("tcp submit_command: {e:?}"))
+        })
+    }
 }
 
 // silence unused import if the codec API changes shape during S33.x

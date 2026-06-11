@@ -82,6 +82,16 @@ pub trait NodeTransport: Send + Sync + 'static {
     /// reply }` or a `Shutdown`). `None` on graceful
     /// shutdown.
     async fn recv_cmd(&self) -> Option<NodeCommand>;
+
+    /// S33.4: push a `NodeCommand` (typically
+    /// `Submit { op, reply }`) into the local
+    /// Node's command channel. The leader's
+    /// AdminServer uses this to submit ops to
+    /// the Raft log. The `TcpTransport` impl
+    /// already has a `pub fn submit_command`;
+    /// we just add it to the trait so the
+    /// AdminServer can call it generically.
+    async fn submit_command(&self, cmd: NodeCommand) -> Result<(), TransportError>;
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -115,5 +125,20 @@ impl NodeTransport for InMemoryTransport {
 
     async fn recv_cmd(&self) -> Option<NodeCommand> {
         InMemoryTransport::recv_cmd(self).await
+    }
+
+    async fn submit_command(&self, cmd: NodeCommand) -> Result<(), TransportError> {
+        // S33.4 MVP: the in-memory transport's
+        // command channel is shared with the
+        // Node. We add a `cmd_tx: Sender<NodeCommand>`
+        // field in Task 2; the impl here sends
+        // through it. For Task 1 the impl is a
+        // placeholder error (the S33.3 tests
+        // don't exercise write-through-the-
+        // transport).
+        Err(TransportError::Io(
+            "submit_command: in-memory transport not yet wired (S33.4 Task 2)"
+                .to_string(),
+        ))
     }
 }
