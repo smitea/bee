@@ -114,6 +114,27 @@ pub struct Node {
     /// `dispatch_handler` call site). Read by
     /// `AdminServer::dispatch(TaskDiagnostics)`.
     stats: Arc<Mutex<HashMap<TaskId, TaskRuntimeStats>>>,
+    /// S33.4: pending admin-forward replies. When
+    /// a follower forwards a write to the leader,
+    /// it records `(request_id, oneshot_sender)`
+    /// here. The leader's reply (carried by
+    /// `RpcMessage::AdminForwardReply`) is matched
+    /// by `request_id` and the `Vec<u8>` response
+    /// is sent to the original CLI client.
+    pending_admin_replies: Arc<
+        Mutex<
+            HashMap<
+                u64,
+                tokio::sync::oneshot::Sender<Vec<u8>>,
+            >,
+        >,
+    >,
+    /// S33.4: monotonic counter for admin-forward
+    /// `request_id` values. The follower's
+    /// `AdminServer::dispatch` allocates a fresh
+    /// id via `register_admin_reply` and embeds
+    /// it in the `AdminRequest::Forward` payload.
+    next_admin_request_id: Arc<std::sync::atomic::AtomicU64>,
     config: NodeConfig,
 }
 
@@ -134,6 +155,8 @@ impl Node {
             kv,
             cp,
             stats: Arc::new(Mutex::new(HashMap::new())),
+            pending_admin_replies: Arc::new(Mutex::new(HashMap::new())),
+            next_admin_request_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             config,
         }
     }
@@ -204,6 +227,26 @@ impl Node {
         self.transport.clone()
     }
 
+    /// S33.4: register a pending admin-forward
+    /// reply. Returns the `request_id` the
+    /// follower should attach to the `Forward`
+    /// payload, and a `oneshot::Receiver<Vec<u8>>`
+    /// that resolves when the leader's reply
+    /// arrives (via `handle_admin_forward_reply`).
+    pub async fn register_admin_reply(
+        &self,
+    ) -> (u64, tokio::sync::oneshot::Receiver<Vec<u8>>) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let request_id = self
+            .next_admin_request_id
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.pending_admin_replies
+            .lock()
+            .await
+            .insert(request_id, tx);
+        (request_id, rx)
+    }
+
     /// S33.4: the leader receives a forwarded
     /// admin write. Decode the inner
     /// `AdminRequest` and dispatch to the
@@ -230,10 +273,17 @@ impl Node {
     pub async fn handle_admin_forward_reply(
         &self,
         _to: u32,
-        _request_id: u64,
-        _response: Vec<u8>,
+        request_id: u64,
+        response: Vec<u8>,
     ) {
-        // Task 4 wires the pending-replies map.
+        let mut map = self.pending_admin_replies.lock().await;
+        if let Some(tx) = map.remove(&request_id) {
+            let _ = tx.send(response);
+        } else {
+            eprintln!(
+                "handle_admin_forward_reply: no pending reply for request_id={request_id}"
+            );
+        }
     }
 
     pub fn self_id(&self) -> NodeId {
