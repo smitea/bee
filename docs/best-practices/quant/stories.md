@@ -1077,4 +1077,76 @@ MONGODB_URI=mongodb://localhost:27017
 
 ---
 
+### S33.5.2 · RegisterDatasource 完整校验 (the S33.5.1 follow-up)
+
+- **Type**: AFK
+- **Blocked by**: S33.5.1 (cross-node forwarding)
+- **ADRs**: 0001, 0007, 0010
+- **Design**: `docs/superpowers/specs/2026-06-10-s33-5-2-register-datasource-validation-design.md`
+- **Plan**: `docs/superpowers/plans/2026-06-10-s33-5-2-register-datasource-validation.md`
+
+> **Why this story exists**: S33.3 added the `RegisterDatasource` arm and S33.5 wired the leader-side apply, but validation was minimal — the arm accepted any request and submitted `Op::RegisterDatasourceProducer` to a flat `soak/datasource/{name}` key. The user could register a Datasource that points at an adapter that does not exist; the failure only surfaces when a Pipeline tries to start a Phase on it. S33.5.2 closes the gap with a 9-step validation chain and uses the real `Datasource` struct (S29) instead of a placeholder.
+
+**Implementation (code-level ✓, production-level N)**:
+
+- `crates/bee-plugin-sdk/src/lib.rs`: `Serialize, Deserialize` derives on `PluginId`, `PluginName`, `PluginManifest`, `AdapterDescriptor`, `HandlerDescriptor`, `Version` (local struct), `VersionSpec` (Task 1). Plus `unsafe impl Send + Sync for PluginHandle` (Task 2) — the vtable pointers in PluginHandle are immutable for the plugin's lifetime.
+- `crates/bee-control/src/datasource.rs`: `Serialize, Deserialize` derives on `Datasource` and `DatasourceStatus` (Task 1).
+- `Cargo.toml`: workspace dep `bee-registry` (Task 2).
+- `crates/bee-control/Cargo.toml`: `bee-registry` dep (Task 2).
+- `crates/bee-control/src/raft/admin_server.rs`:
+  - `use bee_registry::PluginManager` (Task 2).
+  - `AdminServer::start` gains an 8th arg `plugin_manager: Option<Arc<PluginManager>>` (Task 2).
+  - `AdminServer::dispatch_with_apply` gains a 6th arg `plugin_manager: Option<&PluginManager>` (Task 2).
+  - `AdminServer::dispatch` gains an 8th arg `plugin_manager: Option<&PluginManager>` (Task 2).
+  - `handle_admin_connection` + listener accept loop pass the new arg through (Task 2).
+  - New helper `validate_register_datasource` (Task 4) runs the 9-step chain.
+  - The `RegisterDatasource` arm in `dispatch_with_apply`: validates, builds a `Datasource`, submits `Op::Put { key: "ds/{tenant}/{name}", value: bincode(Datasource) }` via the Raft log. On success returns `RegisterDatasourceAck { ok: true, error_msg: "" }`. On failure returns `{ ok: false, error_msg }`.
+  - The `RegisterDatasource` arm in `dispatch` (the wire-direct path): validates, then writes the same `bincode(Datasource)` to the local KV at `ds/{tenant}/{name}` (Task 4).
+- `bee/Cargo.toml`: `bee-registry` dep (Task 6).
+- `bee/src/run_node.rs`: passes `Some(Arc::new(PluginManager::new()))` to `AdminServer::start` (Task 6). The Node-side admin callback (passed to `set_admin_callback`) calls `dispatch_with_apply` with `plugin_manager = None` (the AdminServer-side path is the one that does the full validation).
+- `crates/bee-control/tests/admin_datasource_validation.rs` (new): 4 tests (Tasks 3, 5).
+- `crates/bee-control/tests/serde_compat.rs` (new): 1 test (Task 1).
+- `crates/bee-control/tests/admin_write_roundtrip.rs`: `admin_register_datasource_roundtrip` renamed to `admin_register_datasource_no_plugin_manager` (Task 3) and asserts the "not wired" error.
+- 5 other call sites in `admin_forward_smoke.rs` (1) and `admin_forwarding_inmem.rs` (2) updated to pass `None` for `plugin_manager` (Task 2).
+
+**9-step validation chain** (the heart of this story):
+
+1. `name` is non-empty → `name must be non-empty`
+2. `name` length ≤ 64 → `name too long (max 64 chars)`
+3. `name` matches `[a-zA-Z0-9_.-]+` → `name 'X' has invalid chars; allowed: a-z A-Z 0-9 _ . -`
+4. `tenant` is in `0..=65535` (struct field is `u16`; the check is defensive)
+5. `plugin_version` parses as `VersionSpec` → `invalid plugin-version 'X': ...`
+6. `config_json` is valid JSON → `config is not valid JSON: ...`
+7. `config_json` has no per-call-arg keys → delegated to `bee_dsl_sql::preprocess::validate_datasource_config` (rejects `symbol`, `interval`, `query`)
+8. `adapter` is in loaded plugins (covered by step 9) → folded into step 9 for efficiency
+9. `plugin_manager.resolve(adapter, &version_spec)` returns `Some(PluginId)` → `adapter 'X' is not loaded (no plugin with that name + matching plugin-version); loaded plugins: [binance, ...]. Load a plugin first (e.g. \`bee plugin load <path>\`).`
+
+**Tests** (4 in `admin_datasource_validation.rs`):
+
+- `register_datasource_validates_name_empty`: name = "" → `error_msg` contains "name must be non-empty".
+- `register_datasource_validates_name_chars`: name = "binance!" → `error_msg` contains "invalid chars".
+- `register_datasource_no_plugin_manager_returns_error`: with `plugin_manager = None`, → `error_msg` contains "plugin_manager not wired".
+- `register_datasource_full_happy_path`: builds a `PluginManager` with a `StubBinancePlugin`; sends a valid request; asserts `ok = true`; reads back via `ListKv("ds/0/")` and verifies the `Datasource` deserializes to the expected fields (name, tenant, adapter, plugin_id = `sha256("stub-binance-v1")`).
+
+**Result** (this commit): 477 workspace tests pass, 0 failed, 4 ignored. Net +5 from S33.5.1 baseline of 472 (1 serde_compat + 3 validation failures + 1 happy path; the renamed `admin_register_datasource_no_plugin_manager` is a net-zero replacement for the S33.3 happy path which is no longer reachable with `plugin_manager = None`).
+
+**Status (production-level, N)**:
+
+- Code-level: the validation chain is enforced for both AdminServer-direct writes and cross-node forwards. 477/477 tests pass.
+- Production-level: requires a 24h wall-clock run on a real 3-node cluster (BEE_MULTINODE gate) with at least 1 real cdylib plugin loaded. The MVP wires an **empty** `PluginManager` into `run_node` (a `--plugin-dir` flag + `load_directory` is the S33.6 follow-up). Until that lands, `bee node` rejects every `RegisterDatasource` call with "adapter 'X' is not loaded" — which is the correct, safe behavior. Deferred to S33 HITL.
+
+**Follow-ups** (deferred to S33.5.x / S33.6):
+
+- S33.5.3: full `bee-dsl-sql` runner behind `Deploy` (DAG → Tasks parsing + `Op::RegisterJob` + N × `Op::RegisterTask`).
+- Conflict detection (same `(tenant, name)` twice → `Error("datasource 'X' already exists in tenant Y")`).
+- S33.6: `--plugin-dir` flag + `load_directory` in `run_node` so production can load real cdylib plugins.
+- `Datasource::update` (the `PUT` semantic) — S30+ per S29 docs.
+
+**Sign-off honesty**:
+
+- ✓ Code-level: 477/477 tests pass; the validation chain is locked down for the AdminServer-direct + cross-node paths.
+- ✗ Production-level: requires 24h wall-clock run + S33 HITL review.
+
+---
+
 
