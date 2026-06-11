@@ -199,6 +199,15 @@ pub async fn run_node(args: Vec<String>) -> Result<(), String> {
         };
         node.set_admin_callback(cb).await;
     }
+    // S33.5.1: snapshot the live Node's
+    // `pending_admin_replies` handle BEFORE
+    // moving the Node into `tokio::spawn`.
+    // The AdminServer's `register_reply`
+    // closure delegates to this; the
+    // `Node::handle_admin_forward_reply`
+    // (running in the spawned task) writes
+    // to the same Arc.
+    let pending_replies = node.pending_admin_replies_handle();
     // S33.2: start the per-Node AdminServer on the
     // admin port. The `state` + `stats` handles
     // are the same `Arc<Mutex<...>>`s the Node
@@ -209,6 +218,15 @@ pub async fn run_node(args: Vec<String>) -> Result<(), String> {
     let task = tokio::spawn(async move {
         let _ = node.run().await;
     });
+    // Build the `register_reply` closure.
+    // Each call mints a new
+    // `(request_id, oneshot::Receiver)` pair
+    // via `PendingAdminReplies::register()`.
+    let register_reply: bee_control::raft::node::AdminReplyRegistrar =
+        std::sync::Arc::new(move || {
+            let pr = pending_replies.clone();
+            Box::pin(async move { pr.register().await })
+        });
     let mut admin_server = AdminServer::start(
         admin_bind,
         kv.clone(),
@@ -216,6 +234,7 @@ pub async fn run_node(args: Vec<String>) -> Result<(), String> {
         admin_state,
         Some(admin_stats),
         Some(admin_transport),
+        Some(register_reply),
     )
     .await
     .map_err(|e| format!("admin server start: {e}"))?;
