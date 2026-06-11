@@ -308,6 +308,52 @@ fixed in `09c8dd3`.
 
 **After S33.2** (current state): the S33 sign-off form has 3 of the 4 production-deployment rows (real money signals, InfluxDB data, MongoDB data) verifiable via the new 24h soak. The 4th (Failover verified) was already closed by S33.1. The actual 24h wall-clock run + the human's verdict is HITL — out of scope for the agent. The remaining open item is `bee --connect <addr> deploy` (the S33.3 follow-up; the soak script handles the no-op gracefully).
 
+### S33.3 · Admin RPC write paths (the S33.2 follow-ups closed)
+
+- **Type**: AFK
+- **Blocked by**: S33.2 (multi-node + failover + 24h soak plumbing)
+- **ADRs**: 0001, 0007, 0010
+- **Design**: `docs/superpowers/specs/2026-06-10-s33-2-24h-live-soak-design.md` ("Out of scope" → "deferred to S33.3")
+
+> **Why this story exists**: S33.2's `scripts/soak-quant-24h.sh` Phases 3+4 (`datasource create` + `deploy`) had to be best-effort WARN-and-continue because the admin CLI didn't have those subcommands. S33.3 wires them through the AdminServer so the 24h loop is end-to-end.
+
+**Scope**
+
+1. **`AdminRequest::KvPut` / `Deploy` / `RegisterDatasource`** — 3 new variants on the wire; the AdminServer's `dispatch` gains 3 arms that write to the local KV/CP SM under the existing mutexes (S33.3 MVP bypasses the Raft log; the leader is the only writer; S33.4 adds proper leader-forwarding via the Raft log so multi-writer consistency is preserved).
+2. **`bee --connect <addr> deploy <sql_file>`** CLI subcommand — reads the .sql file, sends `AdminRequest::Deploy`, prints the result. For the S33.3 MVP the Deploy handler writes a `soak/deploy/<sql_hash>` marker to the leader's KV; the full bee-dsl-sql runner is S33.4.
+3. **`bee --connect <addr> datasource create <name> --adapter --plugin-version --config [--tenant]`** CLI subcommand — sends `AdminRequest::RegisterDatasource`, which writes a `soak/datasource/<name>` JSON entry.
+4. **`bee --connect <addr> kv put <key> <value-file>`** CLI subcommand — reads a file (so bincode bodies work), sends `AdminRequest::KvPut`. The soak script's per-tick path uses this.
+5. **`scripts/soak-quant-24h.sh`** is updated to use the new CLI subcommands; the WARN-and-continue fallbacks are removed.
+6. **3 new integration tests** (`crates/bee-control/tests/admin_write_roundtrip.rs`) verify the round-trip: spin up AdminServer + AdminClient in the same process, send each of the 3 new admin RPCs, assert the response + the KV side effect.
+
+**Out of scope**
+
+- Leader-forwarding via the Raft log for writes (S33.4) — the S33.3 MVP is single-leader only.
+- The full `bee-dsl-sql` runner behind `Deploy` (S33.4) — S33.3 writes a marker; the soak loop is meaningful even without the real runner because the bootstrap check still gates "did the deploy succeed?" via the InfluxDB / MongoDB rate queries.
+- File-backed KV (still 1.x).
+
+**Acceptance criteria**
+
+- [x] `cargo build --workspace` green
+- [x] `cargo test --workspace` green (466 + 3 new = 469; baseline preserved)
+- [x] `bee --connect <addr> kv put <key> <value-file>` writes to the leader's KV; `bee --connect <addr> kv list <prefix>` reads it back
+- [x] `bee --connect <addr> datasource create <name> --adapter <a> --plugin-version <v> --config <json>` writes a `soak/datasource/<name>` marker
+- [x] `bee --connect <addr> deploy <sql_file>` writes a `soak/deploy/<sql_hash>` marker
+- [x] `bash scripts/soak-quant-24h.sh` (default mode, no `--smoke`) reaches Phase 5 (the bootstrap check) without WARN messages about missing CLI subcommands
+- [x] The 3 admin_write_roundtrip integration tests pass
+
+**Deliverables** (built)
+
+- `crates/bee-control/src/raft/admin_protocol.rs` — 3 new `AdminRequest` + 3 new `AdminResponse` variants
+- `crates/bee-control/src/raft/types.rs` — 3 new `RpcMessage::Admin*` variants
+- `crates/bee-control/src/raft/admin_server.rs` — 3 new `dispatch` arms (direct KV/CP apply, MVP)
+- `crates/bee-control/src/raft/node.rs` — `NodeState: Default` (so the test crate can build one)
+- `crates/bee-control/tests/admin_write_roundtrip.rs` — 3 integration tests
+- `bee/src/main.rs::run_connect_cli` — 3 new subcommands (`deploy`, `datasource create`, `kv put`)
+- `scripts/soak-quant-24h.sh` — phases 3+4 use the new admin CLI; per-tick also writes via `kv put`
+
+**After S33.3** (current state): the 24h soak loop is end-to-end. The remaining open items are S33.4 (proper Raft-log forwarding for writes; the bee-dsl-sql runner behind `Deploy`; the 24h wall-clock run itself is HITL).
+
 **Failure mode escalation**
 
 If the 24h soak fails, the human can either:
