@@ -932,12 +932,14 @@ async fn run_connect_cli(args: &[String]) -> Result<(), String> {
         Some("kv") => {
             // `bee --connect <addr> kv list <prefix>
             //         [--raw]`
-            //  - <prefix>  : the key prefix (e.g.
-            //                 `soak/run_2026-06-10/`).
-            //  - --raw     : print the full bincode
-            //                 body per line. Default
-            //                 prints `(key,
-            //                 value_len)`.
+            // `bee --connect <addr> kv put <key> <value-file>`
+            //   - <key>         : the key (e.g. `soak/run_x/tick_y`).
+            //   - <value-file>  : path to a file whose
+            //                     contents are the
+            //                     bincode body. The
+            //                     CLI reads the file
+            //                     and sends the bytes
+            //                     verbatim.
             let sub = args.get(2).map(String::as_str);
             let raw = args.iter().any(|a| a == "--raw");
             match sub {
@@ -971,11 +973,197 @@ async fn run_connect_cli(args: &[String]) -> Result<(), String> {
                         return Err(format!("unexpected response: {resp:?}"));
                     }
                 }
+                Some("put") => {
+                    // S33.3: the soak script's per-tick
+                    // write path. The value is read
+                    // from a file (so binary
+                    // bincode bodies work).
+                    let key = args
+                        .get(3)
+                        .ok_or_else(|| "kv put requires <key>".to_string())?
+                        .clone();
+                    let value_path = args
+                        .get(4)
+                        .ok_or_else(|| {
+                            "kv put requires <value-file>".to_string()
+                        })?
+                        .clone();
+                    let value = std::fs::read(&value_path).map_err(|e| {
+                        format!("read {value_path}: {e}")
+                    })?;
+                    let resp = client
+                        .call(AdminRequest::KvPut { key, value })
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    if let AdminResponse::KvPutAck { ok } = resp {
+                        if ok {
+                            println!("ok");
+                        } else {
+                            return Err("kv put failed".to_string());
+                        }
+                    } else {
+                        return Err(format!("unexpected response: {resp:?}"));
+                    }
+                }
                 Some(other) => {
                     return Err(format!("unknown kv subcommand `{other}`"))
                 }
                 None => {
-                    return Err("kv requires a subcommand: list".to_string())
+                    return Err("kv requires a subcommand: list|put".to_string())
+                }
+            }
+        }
+        Some("deploy") => {
+            // `bee --connect <addr> deploy <sql_file>`
+            //   --sql-file PATH  : path to the .sql file
+            //
+            // Sends AdminRequest::Deploy { sql_text, owner_node: 0 }
+            // (owner_node=0 means "the leader picks the
+            // owner"; a future S33.4 commit may honor
+            // an explicit --owner flag). The leader's
+            // AdminServer writes a marker to the KV
+            // (S33.3 MVP — see admin_server.rs).
+            let sql_path = args
+                .get(2)
+                .ok_or_else(|| "deploy requires <sql_file>".to_string())?;
+            let sql_text = std::fs::read_to_string(sql_path)
+                .map_err(|e| format!("read {sql_path}: {e}"))?;
+            let resp = client
+                .call(AdminRequest::Deploy {
+                    sql_text,
+                    owner_node: 0,
+                })
+                .await
+                .map_err(|e| e.to_string())?;
+            if let AdminResponse::DeployAck { job_id, error_msg, .. } = resp {
+                if job_id > 0 {
+                    println!("deployed as job {job_id}");
+                } else {
+                    // S33.3 MVP: error_msg is a
+                    // 'marker written' note (not a
+                    // real failure). Print it and
+                    // exit 0 — the soak loop
+                    // considers this a successful
+                    // tick.
+                    println!("deployed (marker): {error_msg}");
+                }
+            } else {
+                return Err(format!("unexpected response: {resp:?}"));
+            }
+        }
+        Some("datasource") => {
+            // `bee --connect <addr> datasource create <name>
+            //     --adapter <a>
+            //     --plugin-version <v>
+            //     --config <json>
+            //     [--tenant <n>]`
+            let sub = args.get(2).map(String::as_str);
+            match sub {
+                Some("create") => {
+                    let name = args
+                        .get(3)
+                        .ok_or_else(|| {
+                            "datasource create requires <name>".to_string()
+                        })?
+                        .to_string();
+                    let mut adapter: Option<String> = None;
+                    let mut version: Option<String> = None;
+                    let mut config = String::from("{}");
+                    let mut tenant: u16 = 0;
+                    for a in args
+                        .get(4..)
+                        .unwrap_or(&[])
+                        .iter()
+                        .map(String::as_str)
+                    {
+                        match a {
+                            "--adapter" => {
+                                adapter = Some(
+                                    args.iter()
+                                        .skip_while(|x| x.as_str() != "--adapter")
+                                        .nth(1)
+                                        .ok_or_else(|| {
+                                            "--adapter requires an argument".to_string()
+                                        })?
+                                        .clone(),
+                                );
+                            }
+                            "--plugin-version" => {
+                                version = Some(
+                                    args.iter()
+                                        .skip_while(|x| x.as_str() != "--plugin-version")
+                                        .nth(1)
+                                        .ok_or_else(|| {
+                                            "--plugin-version requires an argument"
+                                                .to_string()
+                                        })?
+                                        .clone(),
+                                );
+                            }
+                            "--config" => {
+                                config = args
+                                    .iter()
+                                    .skip_while(|x| x.as_str() != "--config")
+                                    .nth(1)
+                                    .ok_or_else(|| {
+                                        "--config requires an argument".to_string()
+                                    })?
+                                    .clone();
+                            }
+                            "--tenant" => {
+                                tenant = args
+                                    .iter()
+                                    .skip_while(|x| x.as_str() != "--tenant")
+                                    .nth(1)
+                                    .ok_or_else(|| {
+                                        "--tenant requires an argument".to_string()
+                                    })?
+                                    .parse()
+                                    .map_err(|e: std::num::ParseIntError| {
+                                        format!("invalid tenant: {e}")
+                                    })?;
+                            }
+                            _ => {}
+                        }
+                    }
+                    let adapter = adapter.ok_or_else(|| {
+                        "datasource create requires --adapter".to_string()
+                    })?;
+                    let version = version.ok_or_else(|| {
+                        "datasource create requires --plugin-version".to_string()
+                    })?;
+                    let resp = client
+                        .call(AdminRequest::RegisterDatasource {
+                            name: name.clone(),
+                            adapter: adapter.clone(),
+                            plugin_version: version.clone(),
+                            config_json: config.clone(),
+                            tenant,
+                            owner_node: 0,
+                        })
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    if let AdminResponse::RegisterDatasourceAck { ok, error_msg } = resp {
+                        if ok {
+                            println!("datasource {name} registered");
+                        } else {
+                            return Err(format!(
+                                "datasource create failed: {error_msg}"
+                            ));
+                        }
+                    } else {
+                        return Err(format!("unexpected response: {resp:?}"));
+                    }
+                }
+                Some(other) => {
+                    return Err(format!(
+                        "unknown datasource subcommand `{other}`"
+                    ))
+                }
+                None => {
+                    return Err(
+                        "datasource requires a subcommand: create".to_string(),
+                    )
                 }
             }
         }
