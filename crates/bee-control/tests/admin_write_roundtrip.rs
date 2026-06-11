@@ -34,6 +34,7 @@ async fn admin_kv_put_roundtrip() {
         state,
         None,
         None,
+        None,
     )
     .await
     .expect("AdminServer::start");
@@ -74,6 +75,7 @@ async fn admin_register_datasource_roundtrip() {
         kv.clone(),
         cp.clone(),
         state,
+        None,
         None,
         None,
     )
@@ -128,6 +130,7 @@ async fn admin_deploy_roundtrip() {
         kv.clone(),
         cp.clone(),
         state,
+        None,
         None,
         None,
     )

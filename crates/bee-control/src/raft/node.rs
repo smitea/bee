@@ -38,6 +38,25 @@ pub type AdminCallback = Arc<
         + Sync,
 >;
 
+/// S33.5.1: the type of the closure that
+/// wraps `Node::register_admin_reply` so the
+/// `AdminServer` (which doesn't have a direct
+/// `Node` handle) can request a fresh
+/// `(request_id, oneshot::Receiver)` pair
+/// per forwarded write. Returns a
+/// `BoxFuture` so the closure is async-fn-
+/// in-trait-position compatible.
+pub type AdminReplyRegistrar = Arc<
+    dyn Fn() -> futures::future::BoxFuture<
+            'static,
+            (
+                u64,
+                tokio::sync::oneshot::Receiver<Vec<u8>>,
+            ),
+        > + Send
+        + Sync,
+>;
+
 #[derive(Debug, Clone)]
 pub struct NodeConfig {
     pub base_election_timeout: Duration,

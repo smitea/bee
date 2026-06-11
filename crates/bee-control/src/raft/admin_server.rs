@@ -26,8 +26,9 @@ use crate::raft::admin_protocol::{
     AdminRequest, AdminResponse, ClusterMetricsDetail, JobDep, JobDetail, JobSummary,
     NodeMetricsSummary, TaskDiagDetail, TaskRuntimeStats,
 };
+use crate::raft::node::AdminReplyRegistrar;
 use crate::raft::transport::NodeTransport;
-use crate::raft::types::NodeId;
+use crate::raft::types::{NodeId, RpcMessage};
 
 /// S33.1: shutdown signal sender held by the
 /// `AdminServer`. The accept loop `select!`s on it
@@ -70,6 +71,11 @@ impl AdminServer {
         // for tests that don't exercise
         // forwarding.
         node_transport: Option<Arc<dyn NodeTransport>>,
+        // S33.5.1: closure that produces
+        // (request_id, oneshot::Receiver) pairs
+        // for forwarded admin writes. `None` for
+        // tests that don't exercise forwarding.
+        register_reply: Option<AdminReplyRegistrar>,
     ) -> Result<Self, String> {
         let listener = Listener::bind(&addr.to_string())
             .await
@@ -98,6 +104,7 @@ impl AdminServer {
                         let state = state.clone();
                         let stats = stats.clone();
                         let transport = node_transport.clone();
+                        let register_reply = register_reply.clone();
                         tokio::spawn(async move {
                             handle_admin_connection(
                                 conn,
@@ -106,6 +113,7 @@ impl AdminServer {
                                 state,
                                 stats,
                                 transport,
+                                register_reply,
                             )
                             .await;
                         });
@@ -152,6 +160,10 @@ async fn handle_admin_connection(
     // write to the leader. `None` for read-only
     // tests.
     transport: Option<Arc<dyn NodeTransport>>,
+    // S33.5.1: closure that produces
+    // (request_id, oneshot::Receiver) pairs
+    // for forwarded admin writes.
+    register_reply: Option<AdminReplyRegistrar>,
 ) {
     loop {
         let frame = match conn.recv_frame().await {
@@ -180,6 +192,7 @@ async fn handle_admin_connection(
             &state,
             stats.as_deref(),
             transport.as_deref(),
+            register_reply.as_ref(),
         )
         .await;
         send_response(&mut conn, &response).await;
@@ -343,6 +356,10 @@ async fn dispatch(
     // by the Forward arm to relay a write to
     // the leader. `None` for read-only tests.
     transport: Option<&dyn NodeTransport>,
+    // S33.5.1: closure that produces
+    // (request_id, oneshot::Receiver) pairs
+    // for forwarded admin writes.
+    register_reply: Option<&AdminReplyRegistrar>,
 ) -> AdminResponse {
     match req {
         AdminRequest::Ping => AdminResponse::Pong,
