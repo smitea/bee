@@ -195,6 +195,47 @@ impl Node {
         self.cp.clone()
     }
 
+    /// S33.4: the AdminServer uses this to push
+    /// `NodeCommand::Submit { op, reply }` into
+    /// the local Node's command channel. Returns
+    /// the same `Arc<dyn NodeTransport>` that
+    /// `Node::new` accepted.
+    pub fn node_transport(&self) -> Arc<dyn NodeTransport> {
+        self.transport.clone()
+    }
+
+    /// S33.4: the leader receives a forwarded
+    /// admin write. Decode the inner
+    /// `AdminRequest` and dispatch to the
+    /// `dispatch_with_apply` fn (defined in
+    /// `admin_server.rs`; the actual submit-
+    /// to-Raft path). For Task 3 (wire types)
+    /// the impl is a stub: Task 5 wires the
+    /// real path.
+    pub async fn handle_admin_forward(&self, to: u32, request: Vec<u8>) {
+        eprintln!(
+            "handle_admin_forward: to={to}, request={} bytes \
+             (Task 5 wires the real path)",
+            request.len()
+        );
+    }
+
+    /// S33.4: the follower receives the leader's
+    /// reply to a forwarded admin write.
+    /// Match by `request_id` and send the
+    /// `Vec<u8>` response to the pending
+    /// `oneshot::Sender` registered by the
+    /// follower's `AdminServer::dispatch`
+    /// (the one waiting for the leader's reply).
+    pub async fn handle_admin_forward_reply(
+        &self,
+        _to: u32,
+        _request_id: u64,
+        _response: Vec<u8>,
+    ) {
+        // Task 4 wires the pending-replies map.
+    }
+
     pub fn self_id(&self) -> NodeId {
         self.self_id
     }
@@ -403,8 +444,22 @@ impl Node {
             | RpcMessage::AdminDeploy { .. }
             | RpcMessage::AdminRegisterDatasource { .. } => {
                 // No-op on the Raft channel; the
-                // AdminServer (Task 5) is the entry
-                // point for all admin RPCs in MVP.
+                // AdminServer on a separate port
+                // is the entry point. Followers
+                // forward to the leader via
+                // AdminForward (Task 4).
+            }
+            RpcMessage::AdminForward { to, request } => {
+                // Leader side: dispatch the
+                // forwarded request.
+                self.handle_admin_forward(to, request).await;
+            }
+            RpcMessage::AdminForwardReply { to, request_id, response } => {
+                // Follower side: forward the
+                // response to the pending
+                // `oneshot` for this request_id.
+                self.handle_admin_forward_reply(to, request_id, response)
+                    .await;
             }
         }
     }

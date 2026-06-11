@@ -355,6 +355,14 @@ async fn dispatch(
                 error_msg: String::new(),
             }
         }
+        // S33.4 Task 3: the Forward arm is a
+        // placeholder. Task 5b wires the real
+        // forwarding logic (read state.leader_id,
+        // build RpcMessage::AdminForward, send
+        // via transport.send).
+        AdminRequest::Forward { .. } => AdminResponse::Error(
+            "Forward not yet wired (S33.4 Task 5b)".to_string(),
+        ),
     }
 }
 

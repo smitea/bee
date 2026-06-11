@@ -90,6 +90,16 @@ pub enum RpcMessage {
         tenant: u16,
         owner_node: u32,
     },
+    /// S33.4: follower -> leader admin write
+    /// forward. `request` is
+    /// bincode(AdminRequest).
+    AdminForward { to: u32, request: Vec<u8> },
+    /// S33.4: leader -> follower admin write
+    /// reply. The follower's `Node::handle_rpc`
+    /// matches the `request_id` and forwards
+    /// the `response` to a pending `oneshot`
+    /// sender.
+    AdminForwardReply { to: u32, request_id: u64, response: Vec<u8> },
 }
 
 #[derive(Debug)]
