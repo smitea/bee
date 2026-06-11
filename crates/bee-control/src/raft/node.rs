@@ -55,6 +55,12 @@ pub struct NodeState {
     pub match_index: HashMap<NodeId, LogIndex>,
 }
 
+impl Default for NodeState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NodeState {
     fn new() -> Self {
         Self {
