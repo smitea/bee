@@ -192,6 +192,33 @@ pub async fn run_node(args: Vec<String>) -> Result<(), String> {
                     &cp,
                     &state,
                     transport.as_ref(),
+                    // The Node-side callback is
+                    // invoked from
+                    // `Node::handle_admin_forward`
+                    // on the leader. The
+                    // validation chain in
+                    // `dispatch_with_apply` will
+                    // use the
+                    // `plugin_manager` passed by
+                    // the AdminServer that sent
+                    // the Forward — not the
+                    // callback closure's
+                    // captures. (S33.5.2 wires
+                    // this end-to-end via
+                    // `bee::run_node` setting
+                    // the per-Node AdminServer's
+                    // `plugin_manager` arg.)
+                    // For the Node callback
+                    // path, we pass `None` and
+                    // the validation chain's
+                    // step 8-9 will return
+                    // 'plugin_manager not wired'.
+                    // The AdminServer-side
+                    // RegisterDatasource path
+                    // (the typical entry point
+                    // for production) does the
+                    // full validation.
+                    None,
                 )
                 .await
             });
@@ -235,6 +262,17 @@ pub async fn run_node(args: Vec<String>) -> Result<(), String> {
         Some(admin_stats),
         Some(admin_transport),
         Some(register_reply),
+        // S33.5.2: wire the
+        // `PluginManager` so the
+        // `RegisterDatasource` validation
+        // chain can check steps 8-9
+        // (adapter loaded + plugin
+        // resolves). MVP: empty
+        // PluginManager — the S33.6
+        // follow-up will add a
+        // `--plugin-dir` flag +
+        // `load_directory` here.
+        Some(Arc::new(bee_registry::PluginManager::new())),
     )
     .await
     .map_err(|e| format!("admin server start: {e}"))?;
