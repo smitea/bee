@@ -158,11 +158,47 @@ pub async fn run_node(args: Vec<String>) -> Result<(), String> {
     let node = Node::new(
         id,
         peer_ids,
-        transport_arc,
+        transport_arc.clone(),
         kv.clone(),
         cp.clone(),
         node_config,
     );
+    // S33.5: register the admin callback.
+    // The closure captures the `kv`, `cp`,
+    // `state`, and `transport_arc` (clones)
+    // and dispatches to the apply path. When
+    // the leader's `Node::handle_admin_forward`
+    // receives a forwarded admin write, it
+    // calls this callback.
+    {
+        let kv_for_cb = kv.clone();
+        let cp_for_cb = cp.clone();
+        let state_for_cb = node.state();
+        let transport_for_cb = transport_arc.clone();
+        let cb = move |req: bee_control::raft::admin_protocol::AdminRequest| {
+            let kv = kv_for_cb.clone();
+            let cp = cp_for_cb.clone();
+            let state = state_for_cb.clone();
+            let transport = transport_for_cb.clone();
+            let fut: std::pin::Pin<
+                Box<
+                    dyn std::future::Future<Output = bee_control::raft::admin_protocol::AdminResponse>
+                        + Send,
+                >,
+            > = Box::pin(async move {
+                bee_control::raft::admin_server::dispatch_with_apply(
+                    req,
+                    &kv,
+                    &cp,
+                    &state,
+                    transport.as_ref(),
+                )
+                .await
+            });
+            fut
+        };
+        node.set_admin_callback(cb).await;
+    }
     // S33.2: start the per-Node AdminServer on the
     // admin port. The `state` + `stats` handles
     // are the same `Arc<Mutex<...>>`s the Node

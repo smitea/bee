@@ -207,10 +207,11 @@ async fn send_response(conn: &mut Connection, resp: &AdminResponse) {
 /// the local node is the leader (skipping the
 /// Raft-channel hop).
 ///
-/// `pub(crate)` so `run_node.rs` can build a
-/// closure around it.
+/// `pub` so `run_node.rs` (a separate crate)
+/// can build a closure around it for the
+/// admin callback.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn dispatch_with_apply(
+pub async fn dispatch_with_apply(
     req: AdminRequest,
     kv: &Arc<tokio::sync::Mutex<KVStateMachine>>,
     cp: &Arc<tokio::sync::Mutex<ControlPlaneStateMachine>>,
