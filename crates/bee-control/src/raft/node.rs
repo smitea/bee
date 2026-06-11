@@ -7,7 +7,7 @@ use tokio::sync::Mutex;
 use crate::control_plane::ControlPlaneStateMachine;
 use crate::kv::{KVStateMachine, Op, TxnError};
 
-use super::admin_protocol::TaskRuntimeStats;
+use super::admin_protocol::{AdminRequest, AdminResponse, TaskRuntimeStats};
 use super::transport::{InMemoryTransport, NodeTransport};
 use super::types::{LogEntry, NodeCommand, NodeId, RpcMessage, Role, Term, LogIndex};
 
@@ -16,6 +16,27 @@ use super::types::{LogEntry, NodeCommand, NodeId, RpcMessage, Role, Term, LogInd
 /// directly throughout (matching the
 /// `AdminServer::dispatch` and `TaskRecord`).
 pub type TaskId = u32;
+
+/// S33.5: the type of the admin callback
+/// registered on a `Node`. When the leader's
+/// `Node::handle_admin_forward` decodes an
+/// inner `AdminRequest`, it calls this
+/// callback to dispatch to the apply path
+/// (which submits the op to the local Raft
+/// log).
+///
+/// The callback returns a boxed future
+/// (async fn in trait positions isn't
+/// stable, so we use a boxed future). The
+/// callback's closure is `Send + Sync` so the
+/// `Node` (which is `Send + Sync` via its
+/// `Arc<Mutex<...>>` fields) can clone and
+/// share it across tasks.
+pub type AdminCallback = Arc<
+    dyn Fn(AdminRequest) -> futures::future::BoxFuture<'static, AdminResponse>
+        + Send
+        + Sync,
+>;
 
 #[derive(Debug, Clone)]
 pub struct NodeConfig {
@@ -135,6 +156,18 @@ pub struct Node {
     /// id via `register_admin_reply` and embeds
     /// it in the `AdminRequest::Forward` payload.
     next_admin_request_id: Arc<std::sync::atomic::AtomicU64>,
+    /// S33.5: the AdminServer's callback for
+    /// handling forwarded admin writes. When
+    /// the leader's `Node::handle_admin_forward`
+    /// decodes the inner `AdminRequest`, it
+    /// calls this callback to dispatch to the
+    /// apply path (which submits the op to the
+    /// local Raft log). The default is a no-op
+    /// stub that returns `Error("no admin
+    /// callback registered")`; `run_node`
+    /// overrides it via `set_admin_callback`
+    /// after constructing the Node.
+    admin_callback: tokio::sync::Mutex<AdminCallback>,
     config: NodeConfig,
 }
 
@@ -157,6 +190,7 @@ impl Node {
             stats: Arc::new(Mutex::new(HashMap::new())),
             pending_admin_replies: Arc::new(Mutex::new(HashMap::new())),
             next_admin_request_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            admin_callback: tokio::sync::Mutex::new(Self::default_admin_callback()),
             config,
         }
     }
@@ -247,20 +281,66 @@ impl Node {
         (request_id, rx)
     }
 
-    /// S33.4: the leader receives a forwarded
+    /// S33.5: the leader receives a forwarded
     /// admin write. Decode the inner
     /// `AdminRequest` and dispatch to the
-    /// `dispatch_with_apply` fn (defined in
-    /// `admin_server.rs`; the actual submit-
-    /// to-Raft path). For Task 3 (wire types)
-    /// the impl is a stub: Task 5 wires the
-    /// real path.
+    /// admin callback (which is the
+    /// `AdminServer::dispatch_with_apply`
+    /// machinery on the leader side).
     pub async fn handle_admin_forward(&self, to: u32, request: Vec<u8>) {
-        eprintln!(
-            "handle_admin_forward: to={to}, request={} bytes \
-             (Task 5 wires the real path)",
-            request.len()
-        );
+        let inner: AdminRequest = match bincode::deserialize(&request) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!(
+                    "handle_admin_forward: bincode decode failed: {e}"
+                );
+                return;
+            }
+        };
+        // Read the (potentially updated) callback.
+        let callback = {
+            let guard = self.admin_callback.lock().await;
+            guard.clone()
+        };
+        let response: AdminResponse = callback(inner).await;
+        let response_bytes = match bincode::serialize(&response) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!(
+                    "handle_admin_forward: bincode encode failed: {e}"
+                );
+                return;
+            }
+        };
+        // Send AdminForwardReply back to the
+        // requester. The `request_id` is
+        // hard-coded 0 for the S33.5 MVP —
+        // the follower's `register_admin_reply`
+        // generates a unique id per call, but
+        // the leader's `handle_admin_forward`
+        // doesn't see the id (it's encoded in
+        // the outer `Forward` envelope, which
+        // is the follower's transport-layer
+        // wrapper, not the inner `AdminRequest`).
+        // S33.5.1 will thread the request_id
+        // through the wire so the follower can
+        // match by id (not by `to`).
+        if let Err(e) = self
+            .transport
+            .send(
+                to,
+                super::types::RpcMessage::AdminForwardReply {
+                    to,
+                    request_id: 0,
+                    response: response_bytes,
+                },
+            )
+            .await
+        {
+            eprintln!(
+                "handle_admin_forward: send AdminForwardReply failed: {e}"
+            );
+        }
     }
 
     /// S33.4: the follower receives the leader's
@@ -288,6 +368,44 @@ impl Node {
 
     pub fn self_id(&self) -> NodeId {
         self.self_id
+    }
+
+    /// S33.5: the default `admin_callback` for
+    /// Nodes that don't have a per-Node
+    /// AdminServer wired up (e.g. the in-process
+    /// test cluster). The default returns
+    /// `Error("no admin callback registered")`
+    /// for every request.
+    fn default_admin_callback() -> AdminCallback {
+        Arc::new(|_req: AdminRequest| {
+            Box::pin(async {
+                AdminResponse::Error(
+                    "no admin callback registered (S33.5: run_node \
+                     sets the real callback)"
+                        .to_string(),
+                )
+            })
+        })
+    }
+
+    /// S33.5: replace the admin callback. The
+    /// `run_node` process calls this after
+    /// constructing the Node + the AdminServer,
+    /// wiring the AdminServer's
+    /// `dispatch_with_apply` as the callback.
+    /// Interior mutability (a `Mutex`) makes
+    /// this safe to call from a `&self` (the
+    /// Node is shared via `Arc`).
+    pub async fn set_admin_callback<F>(&self, f: F)
+    where
+        F: Fn(AdminRequest) -> futures::future::BoxFuture<'static, AdminResponse>
+            + Send
+            + Sync
+            + 'static,
+    {
+        let arc: AdminCallback = Arc::new(f);
+        let mut guard = self.admin_callback.lock().await;
+        *guard = arc;
     }
 
     pub fn config(&self) -> &NodeConfig {
