@@ -150,8 +150,15 @@ impl Cluster {
             let peer_ids: Vec<NodeId> = ids.iter().copied().filter(|&x| x != id).collect();
             let (_, rpc_rx) = inboxes.remove(0);
             let (_, cmd_rx) = cmd_inboxes.remove(0);
+            let (_, cmd_tx) = cmd_txs.remove(0);
             let transport: Arc<dyn NodeTransport> = Arc::new(
-                InMemoryTransport::new(id, router.clone(), rpc_rx, cmd_rx),
+                InMemoryTransport::new(
+                    id,
+                    router.clone(),
+                    rpc_rx,
+                    cmd_rx,
+                    cmd_tx.clone(),
+                ),
             );
             let kv = Arc::new(Mutex::new(KVStateMachine::new()));
             let cp = Arc::new(Mutex::new(ControlPlaneStateMachine::new()));
@@ -162,7 +169,15 @@ impl Cluster {
             };
             let node = Node::new(id, peer_ids, transport, kv.clone(), cp.clone(), node_config);
             let state = node.state();
-            let (_, ctx) = cmd_txs.remove(0);
+            // S33.4: the slot's `cmd_tx` is the
+            // same channel the InMemoryTransport
+            // uses. The slot uses it for
+            // `shutdown_node` (which sends
+            // `NodeCommand::Shutdown`); the
+            // AdminServer uses the transport's
+            // `submit_command` (which is the same
+            // channel via the cloned `cmd_tx`).
+            let slot_cmd_tx = cmd_tx;
             let task_done = Arc::new(Notify::new());
             let task_done_inner = task_done.clone();
             tokio::spawn(async move {
@@ -171,7 +186,7 @@ impl Cluster {
             });
             slots.push(ClusterNodeSlot {
                 handle: ClusterNodeHandle { id, state, kv, cp },
-                cmd_tx: ctx,
+                cmd_tx: slot_cmd_tx,
                 task_done,
                 alive: Arc::new(AtomicBool::new(true)),
             });

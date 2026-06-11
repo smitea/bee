@@ -16,6 +16,12 @@ pub struct InMemoryTransport {
     router: Arc<Router>,
     inbox: Arc<tokio::sync::Mutex<mpsc::Receiver<(NodeId, RpcMessage)>>>,
     cmd_inbox: Arc<tokio::sync::Mutex<mpsc::Receiver<NodeCommand>>>,
+    /// S33.4: the sender side of the command
+    /// channel. The AdminServer uses this to push
+    /// `NodeCommand::Submit { op, reply }` into
+    /// the same channel the Node reads from
+    /// `cmd_inbox`.
+    cmd_tx: mpsc::Sender<NodeCommand>,
 }
 
 impl InMemoryTransport {
@@ -24,12 +30,14 @@ impl InMemoryTransport {
         router: Arc<Router>,
         inbox: mpsc::Receiver<(NodeId, RpcMessage)>,
         cmd_inbox: mpsc::Receiver<NodeCommand>,
+        cmd_tx: mpsc::Sender<NodeCommand>,
     ) -> Self {
         Self {
             self_id,
             router,
             inbox: Arc::new(tokio::sync::Mutex::new(inbox)),
             cmd_inbox: Arc::new(tokio::sync::Mutex::new(cmd_inbox)),
+            cmd_tx,
         }
     }
 
@@ -128,17 +136,14 @@ impl NodeTransport for InMemoryTransport {
     }
 
     async fn submit_command(&self, cmd: NodeCommand) -> Result<(), TransportError> {
-        // S33.4 MVP: the in-memory transport's
-        // command channel is shared with the
-        // Node. We add a `cmd_tx: Sender<NodeCommand>`
-        // field in Task 2; the impl here sends
-        // through it. For Task 1 the impl is a
-        // placeholder error (the S33.3 tests
-        // don't exercise write-through-the-
-        // transport).
-        Err(TransportError::Io(
-            "submit_command: in-memory transport not yet wired (S33.4 Task 2)"
-                .to_string(),
-        ))
+        // S33.4: the in-memory transport's command
+        // channel is shared with the Node. The
+        // `cmd_tx` was passed in at construction
+        // (the same mpsc::Sender the Node reads
+        // from); we send through it here.
+        self.cmd_tx
+            .send(cmd)
+            .await
+            .map_err(|_| TransportError::Io("cmd channel closed".to_string()))
     }
 }
