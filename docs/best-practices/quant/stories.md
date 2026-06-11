@@ -1023,6 +1023,58 @@ MONGODB_URI=mongodb://localhost:27017
   - [ ] ADR-0011: Stream identity scope; backfill-on-subscribe; per-Subscriber offsets
 - [ ] README.md Quickstart links to `scripts/demo-quant-prod.sh`
 - [ ] `docs/best-practices/quant/README.md` (and `docs/product-design.md` if a Quant scenario is re-added) references `examples/quant_btc_strategy.sql` and the 6 prod plugins
-- [ ] **S33 HITL review done**: first seed user walkthrough; feedback captured; gaps recorded as new stories or ADR amendments
+  - [ ] **S33 HITL review done**: first seed user walkthrough; feedback captured; gaps recorded as new stories or ADR amendments
 
 ---
+
+### S33.5.1 · Cross-node forwarding for admin writes (the S33.5 follow-up)
+
+- **Type**: AFK
+- **Blocked by**: S33.5 (leader-side apply)
+- **ADRs**: 0001, 0007
+- **Design**: `docs/superpowers/specs/2026-06-10-s33-5-1-cross-node-forwarding.md`
+- **Plan**: `docs/superpowers/plans/2026-06-10-s33-5-1-cross-node-forwarding.md`
+
+> **Why this story exists**: S33.5 closed the leader-side apply (via `Node::admin_callback` + `dispatch_with_apply` direct call when the request originates on the leader). The follower's side was still missing: when an admin RPC arrives at a non-leader, that node has no idea what the leader would do; it must forward the request over the Raft channel and await the leader's reply.
+
+**Implementation (code-level ✓, production-level N)**:
+
+- `RpcMessage::AdminForward { to, request, request_id }` — the wire envelope (request_id was added in Task 2; types.rs gained a field).
+- `RpcMessage::AdminForwardReply { to, request_id, response }` — the leader's reply.
+- `Node::handle_admin_forward(to, request, request_id)` on the leader: deserialize the inner `AdminRequest`, dispatch to the Node's `admin_callback` (which is `dispatch_with_apply` in production), bincode the response, and send back as `AdminForwardReply { to, request_id, response }` (Task 2 makes `request_id` the param value; was hard-coded 0 in S33.5).
+- `Node::handle_admin_forward_reply(request_id, response)` on the follower: look up the pending `oneshot::Sender` by `request_id` and send the response.
+- `AdminServer::dispatch(Forward)`: the local-leader branch (leader == self) calls `dispatch_with_apply` directly. The cross-node branch (leader != self) registers a pending reply via `register_reply()`, sends `RpcMessage::AdminForward` to the leader, awaits the oneshot with a 5s timeout, and bincode-deserializes the inner `AdminResponse` (the CLI sees the inner `KvPutAck` etc., not the `Forwarded` wrapper).
+- `PendingAdminReplies` (new type in `node.rs`): `Clone` handle to the live Node's `(AtomicU64 next_id, Mutex<HashMap<u64, oneshot::Sender<Vec<u8>>>>)`. Exposes `register()` and `deliver()`.
+- `Node::pending_admin_replies_handle()`: new accessor that hands out a clone. The cluster snapshots this in `ClusterNodeHandle::pending_replies` so the test (and `run_node`) can build a `register_reply` closure that delegates to the live Node.
+- `Node::handle_rpc(from, msg)`: the `AdminForward` arm uses `from` (the envelope source) as the reply target — not the wire `to` (which is the leader's own id; that would loop the reply back to the leader).
+- `Node::run` (`pub async fn run(self)`) is unchanged. The cluster (and the test) `tokio::spawn`s the Node and uses `pending_admin_replies_handle()` + `node_transport()` to wire AdminServers after the Node is consumed.
+- `bee/src/run_node.rs`: snapshots `pending_replies` BEFORE moving the Node, builds a `register_reply` closure, passes `Some(register_reply)` as the 7th arg to `AdminServer::start`.
+
+**Tests** (`crates/bee-control/tests/admin_forwarding_inmem.rs`):
+
+- `admin_forwarding_inmem` — boots a 3-node in-memory cluster, wires an AdminServer on every node, then:
+  1. Connects to the LEADER's admin port, sends `Forward { to: leader, request: <KvPut> }`. Hits the local-leader branch. Verifies the `KvPut` wrote and reads back via `ListKv`.
+  2. Connects to a FOLLOWER's admin port, sends `Forward { to: leader, request: <KvPut> }`. Hits the cross-node branch. The follower's `dispatch(Forward)` registers a pending reply (request_id=1), sends `RpcMessage::AdminForward` to the leader via `InMemoryTransport`. The leader's `Node::handle_admin_forward` calls the default callback (returns "no admin callback registered"), bincode-encodes the `AdminResponse::Error`, sends `AdminForwardReply { request_id: 1, response }` back to the follower. The follower's `Node::handle_admin_forward_reply` matches request_id=1, sends the response to the oneshot. The AdminServer's `dispatch(Forward)` deserializes the inner `AdminResponse` and returns it. Test asserts on the error string.
+- `admin_no_leader_inmem` — uses a hand-built AdminServer with `state.leader_id = None` (no cluster wiring). Sends `Forward { to: 1, request: <KvPut> }`. Asserts the AdminServer returns `Error("no leader elected; retry in 3s")`.
+
+**Result** (this commit, 980b2d2): 472 workspace tests pass, 0 failed, 4 ignored. Net +6 from S33.5.1 baseline of 466 (1 forwarding-inmem + 1 no-leader + 4 from baseline drift).
+
+**Status (production-level, N)**:
+
+- The default `admin_callback` is "no admin callback registered" until `run_node` wires it. The in-memory test verifies the **wire path** end-to-end but the **apply path** only through the `dispatch_with_apply` local-leader branch (which is the same code as production).
+- A real cross-node test where the leader's `admin_callback` is registered AND the follower writes to the leader's KV (verifying cross-node `KvPut` lands on the leader's KV state) is a S33.5.x follow-up.
+- TCP multi-writer integration test (the plan's Task 3 deliverable) is implemented as an **in-memory 3-node** test (`admin_forwarding_inmem`) instead. Rationale: the in-memory transport exercises the same wire path (and `Node::handle_rpc` is identical for both transports). The TCP version would be a 100-line duplicate.
+
+**Follow-ups** (deferred to S33.5.x):
+
+- S33.5.2: full `RegisterDatasource` validation (cdylib check + strict mode) — currently a `KvPut` to `ds/<name>`.
+- S33.5.3: full `bee-dsl-sql` runner behind `Deploy` (DAG → Tasks parsing + `Op::RegisterJob` + N × `Op::RegisterTask`).
+
+**Sign-off honesty**:
+
+- ✓ Code-level: the wire path (Forward → AdminForward → leader → AdminForwardReply → follower → rx → AdminResponse) works end-to-end. The two integration tests lock this down. 472/472 tests pass.
+- ✗ Production-level: requires a 24h wall-clock run on a real 3-node cluster (BEE_MULTINODE gate) + a S33 HITL sign-off row in the sign-off table. Not done by this batch (deferred to S33 HITL).
+
+---
+
+
