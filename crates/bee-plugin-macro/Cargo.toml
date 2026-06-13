@@ -1,0 +1,15 @@
+[package]
+name = "bee-plugin-macro"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Bee Plugin SDK: proc-macro for declarative cdylib plugin authoring (S33.6)"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full", "extra-traits"] }
