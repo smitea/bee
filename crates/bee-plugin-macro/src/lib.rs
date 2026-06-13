@@ -314,8 +314,150 @@ fn gen_input_adapter(impl_block: ItemImpl) -> TokenStream {
     .into()
 }
 
-fn gen_output_adapter(_impl_block: ItemImpl) -> TokenStream {
-    err("bee_adapter(output): not yet implemented (S33.6 Task 3)")
+fn gen_output_adapter(impl_block: ItemImpl) -> TokenStream {
+    let struct_name = match get_struct_name(&impl_block) {
+        Ok(n) => n,
+        Err(e) => return e.to_compile_error().into(),
+    };
+    let vtable_name = vtable_ident(&struct_name);
+
+    let mut open_fn: Option<ImplItemFn> = None;
+    let mut emit_fn: Option<ImplItemFn> = None;
+    let mut close_fn: Option<ImplItemFn> = None;
+    for item in &impl_block.items {
+        if let ImplItem::Fn(f) = item {
+            let slot = match extract_slot(&f.attrs) {
+                Ok(s) => s,
+                Err(e) => return e.to_compile_error().into(),
+            };
+            match slot.as_deref() {
+                Some("open") => open_fn = Some(f.clone()),
+                Some("emit") => emit_fn = Some(f.clone()),
+                Some("close") => close_fn = Some(f.clone()),
+                _ => {}
+            }
+        }
+    }
+    let open_fn = match open_fn {
+        Some(f) => f,
+        None => return err("`#[bee_method(slot = \"open\")]` not found"),
+    };
+    let emit_fn = match emit_fn {
+        Some(f) => f,
+        None => return err("`#[bee_method(slot = \"emit\")]` not found"),
+    };
+    let close_fn = match close_fn {
+        Some(f) => f,
+        None => return err("`#[bee_method(slot = \"close\")]` not found"),
+    };
+
+    let ctx_ty = format_ident!("{}OutputCtx", struct_name);
+    let open_ffi = ffi_ident(&struct_name, "output_open");
+    let emit_ffi = ffi_ident(&struct_name, "output_emit");
+    let close_ffi = ffi_ident(&struct_name, "output_close");
+    let open_rust = &open_fn.sig.ident;
+    let emit_rust = &emit_fn.sig.ident;
+    let close_rust = &close_fn.sig.ident;
+
+    let mut impl_block = impl_block;
+    for item in &mut impl_block.items {
+        if let ImplItem::Fn(f) = item {
+            f.attrs.retain(|a| !is_bee_method_attr(a));
+        }
+    }
+
+    quote! {
+        struct #ctx_ty {
+            inner: ::tokio::sync::Mutex<Option<#struct_name>>,
+        }
+
+        unsafe extern "C" fn #open_ffi(
+            config_ptr: *const u8,
+            config_len: usize,
+            _err_out: *mut bee_plugin_sdk::event::EventBytes,
+        ) -> *mut ::std::ffi::c_void {
+            let config = unsafe {
+                ::std::slice::from_raw_parts(config_ptr, config_len).to_vec()
+            };
+            let fut = async move {
+                <#struct_name>::#open_rust(config).await
+            };
+            let adapter = match ::tokio::runtime::Handle::try_current() {
+                Ok(h) => ::tokio::task::block_in_place(|| h.block_on(fut)),
+                Err(_) => ::futures::executor::block_on(fut),
+            };
+            let adapter = match adapter {
+                Ok(a) => a,
+                Err(_) => return ::std::ptr::null_mut(),
+            };
+            let ctx = #ctx_ty {
+                inner: ::tokio::sync::Mutex::new(Some(adapter)),
+            };
+            ::std::boxed::Box::into_raw(::std::boxed::Box::new(ctx))
+                as *mut ::std::ffi::c_void
+        }
+
+        unsafe extern "C" fn #emit_ffi(
+            ctx: *mut ::std::ffi::c_void,
+            event_ptr: *const u8,
+            event_len: usize,
+        ) -> i32 {
+            let ctx = unsafe { &*(ctx as *const #ctx_ty) };
+            let bytes = unsafe {
+                ::std::slice::from_raw_parts(event_ptr, event_len)
+            };
+            let event: bee_adapter::Event = match bincode::deserialize(bytes) {
+                Ok(e) => e,
+                Err(_) => return -1,
+            };
+            let mut guard = match ctx.inner.try_lock() {
+                Ok(g) => g,
+                Err(_) => return -1,
+            };
+            let adapter = match guard.as_mut() {
+                Some(a) => a,
+                None => return -1,
+            };
+            let fut = adapter.#emit_rust(event);
+            match ::tokio::runtime::Handle::try_current() {
+                Ok(h) => ::tokio::task::block_in_place(|| h.block_on(fut)),
+                Err(_) => ::futures::executor::block_on(fut),
+            }
+            .map(|_| 0)
+            .unwrap_or(-1)
+        }
+
+        unsafe extern "C" fn #close_ffi(
+            ctx: *mut ::std::ffi::c_void,
+        ) -> i32 {
+            if ctx.is_null() { return 0; }
+            let ctx = unsafe {
+                ::std::boxed::Box::from_raw(ctx as *mut #ctx_ty)
+            };
+            let adapter = match ctx.inner.try_lock() {
+                Ok(mut g) => g.take(),
+                Err(_) => return -1,
+            };
+            if let Some(adapter) = adapter {
+                let fut = adapter.#close_rust();
+                let _ = match ::tokio::runtime::Handle::try_current() {
+                    Ok(h) => ::tokio::task::block_in_place(|| h.block_on(fut)),
+                    Err(_) => ::futures::executor::block_on(fut),
+                };
+            }
+            0
+        }
+
+        pub static #vtable_name: bee_plugin_sdk::vtable::OutputAdapterVtable =
+            bee_plugin_sdk::vtable::OutputAdapterVtable {
+                open: #open_ffi,
+                emit: #emit_ffi,
+                close: #close_ffi,
+            };
+
+        #impl_block
+    }
+    .into()
 }
 
 fn gen_handler(_impl_block: ItemImpl) -> TokenStream {
