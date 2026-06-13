@@ -185,6 +185,11 @@ fn gen_input_adapter(impl_block: ItemImpl) -> TokenStream {
         Some(f) => f,
         None => return err("`#[bee_method(slot = \"open\")]` not found"),
     };
+    if open_fn.sig.asyncness.is_none() {
+        return err(
+            "bee_adapter(input): `open` must be `async fn` (S33.6 signature check)",
+        );
+    }
     let next_fn = match next_fn {
         Some(f) => f,
         None => return err("`#[bee_method(slot = \"next\")]` not found"),
@@ -342,6 +347,11 @@ fn gen_output_adapter(impl_block: ItemImpl) -> TokenStream {
         Some(f) => f,
         None => return err("`#[bee_method(slot = \"open\")]` not found"),
     };
+    if open_fn.sig.asyncness.is_none() {
+        return err(
+            "bee_adapter(output): `open` must be `async fn` (S33.6 signature check)",
+        );
+    }
     let emit_fn = match emit_fn {
         Some(f) => f,
         None => return err("`#[bee_method(slot = \"emit\")]` not found"),
@@ -486,6 +496,11 @@ fn gen_handler(impl_block: ItemImpl) -> TokenStream {
         Some(f) => f,
         None => return err("`#[bee_method(slot = \"handle\")]` not found"),
     };
+    if handle_fn.sig.asyncness.is_none() {
+        return err(
+            "bee_adapter(handler): `handle` must be `async fn` (S33.6 signature check)",
+        );
+    }
 
     // Extract the user's state type (the first
     // arg of `handle`) and event type (the second

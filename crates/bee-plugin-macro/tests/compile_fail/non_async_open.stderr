@@ -1,0 +1,21 @@
+error: bee_adapter(input): `open` must be `async fn` (S33.6 signature check)
+  --> tests/compile_fail/non_async_open.rs:10:1
+   |
+10 | #[bee_adapter(input, name = "bad")]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `bee_adapter` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused imports: `AdapterError`, `AdapterResult`, and `Event`
+ --> tests/compile_fail/non_async_open.rs:5:19
+  |
+5 | use bee_adapter::{AdapterError, AdapterResult, Event};
+  |                   ^^^^^^^^^^^^  ^^^^^^^^^^^^^  ^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `bee_method`
+ --> tests/compile_fail/non_async_open.rs:6:37
+  |
+6 | use bee_plugin_macro::{bee_adapter, bee_method};
+  |                                     ^^^^^^^^^^
