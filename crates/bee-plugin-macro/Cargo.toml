@@ -17,6 +17,7 @@ syn = { version = "2", features = ["full", "extra-traits"] }
 [dev-dependencies]
 bee-adapter = { workspace = true }
 bee-plugin-sdk = { workspace = true }
+bee-registry = { workspace = true }
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
 bincode = "1"

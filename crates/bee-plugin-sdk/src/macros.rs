@@ -181,3 +181,50 @@ mod tests {
         bee_plugin_drop(std::ptr::null_mut());
     }
 }
+
+/// S33.6: register a sequence of plugin
+/// vtables into the 3 `HashMap` fields of a
+/// `PluginHandle` (input_adapters /
+/// output_adapters / handlers).
+///
+/// Usage:
+/// ```ignore
+/// let mut input_adapters = HashMap::new();
+/// let mut output_adapters = HashMap::new();
+/// let mut handlers = HashMap::new();
+/// register_vtable! {
+///     input_adapters, output_adapters, handlers;
+///     input  "subscribe" => &SUBSCRIBE_VTABLE,
+///     output "ohlcv"     => &OHLCV_VTABLE,
+///     handler "fib"      => &FIB_VTABLE,
+/// }
+/// ```
+#[macro_export]
+macro_rules! register_vtable {
+    (
+        $input:ident, $output:ident, $handlers:ident;
+        $( $kind:ident $name:literal => $vtable:expr ),* $(,)?
+    ) => {
+        $(
+            $crate::register_vtable!(@branch $kind, $input, $output, $handlers, $name, $vtable);
+        )*
+    };
+    (@branch input, $input:ident, $output:ident, $handlers:ident, $name:literal, $vtable:expr) => {
+        $input.insert(
+            ::std::string::String::from($name),
+            $vtable as *const ::bee_plugin_sdk::vtable::InputAdapterVtable,
+        );
+    };
+    (@branch output, $input:ident, $output:ident, $handlers:ident, $name:literal, $vtable:expr) => {
+        $output.insert(
+            ::std::string::String::from($name),
+            $vtable as *const ::bee_plugin_sdk::vtable::OutputAdapterVtable,
+        );
+    };
+    (@branch handler, $input:ident, $output:ident, $handlers:ident, $name:literal, $vtable:expr) => {
+        $handlers.insert(
+            ::std::string::String::from($name),
+            $vtable as *const ::bee_plugin_sdk::vtable::HandlerVtable,
+        );
+    };
+}
