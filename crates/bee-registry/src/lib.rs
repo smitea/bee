@@ -328,9 +328,39 @@ mod tests {
 
     /// Built-in mock plugin used by the S19 tests. Reports a fixed
     /// content slice so its PluginId is deterministic.
+    ///
+    /// S33.6: refactored to use the `#[bee_adapter]` proc-macro for
+    /// the 1 InputAdapter (`MockBinanceInput`) + the
+    /// `register_vtable!` sub-macro for the 3 HashMap inserts in
+    /// `init()`.
     struct MockBinancePlugin;
 
     const MOCK_BINANCE_CONTENT: &[u8] = b"mock-binance-plugin-v1";
+
+    /// S33.6: the InputAdapter impl block for
+    /// "binance.subscribe". Uses the
+    /// `#[bee_adapter]` macro to generate the
+    /// FFI glue + a `pub static
+    /// MOCK_BINANCE_INPUT_VTABLE`.
+    pub struct MockBinanceInput;
+
+    #[bee_plugin_macro::bee_adapter(input, name = "subscribe")]
+    impl MockBinanceInput {
+        #[bee_plugin_macro::bee_method(slot = "open")]
+        pub async fn open(_config: Vec<u8>) -> Result<Self, bee_adapter::AdapterError> {
+            Ok(Self)
+        }
+
+        #[bee_plugin_macro::bee_method(slot = "next")]
+        pub async fn next_one(&mut self) -> Result<Option<bee_adapter::Event>, bee_adapter::AdapterError> {
+            Ok(None)
+        }
+
+        #[bee_plugin_macro::bee_method(slot = "close")]
+        pub async fn close(self) -> Result<(), bee_adapter::AdapterError> {
+            Ok(())
+        }
+    }
 
     impl Plugin for MockBinancePlugin {
         fn plugin_content(&self) -> &'static [u8] {
@@ -349,12 +379,22 @@ mod tests {
             }
         }
         fn init(&self) -> bee_plugin_sdk::PluginResult<PluginHandle> {
+            // S33.6: use the `register_vtable!`
+            // sub-macro to wire the macro-generated
+            // vtable into the PluginHandle.
+            let mut input_adapters = std::collections::HashMap::new();
+            let mut output_adapters = std::collections::HashMap::new();
+            let mut handlers = std::collections::HashMap::new();
+            bee_plugin_sdk::register_vtable! {
+                input_adapters, output_adapters, handlers;
+                input "subscribe" => &MOCK_BINANCE_INPUT_VTABLE,
+            }
             Ok(PluginHandle {
                 manifest: self.manifest(),
                 inner: Arc::new(()),
-                input_adapters: std::collections::HashMap::new(),
-                output_adapters: std::collections::HashMap::new(),
-                handlers: std::collections::HashMap::new(),
+                input_adapters,
+                output_adapters,
+                handlers,
             })
         }
     }

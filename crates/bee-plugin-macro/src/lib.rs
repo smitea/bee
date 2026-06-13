@@ -662,9 +662,21 @@ fn gen_handler(impl_block: ItemImpl) -> TokenStream {
     .into()
 }
 
+fn is_bee_method_attr_path(path: &syn::Path) -> bool {
+    // Match `#[bee_method]` or `#[bee_plugin_macro::bee_method]`
+    // (or any other qualified path ending in `bee_method`).
+    if path.is_ident("bee_method") {
+        return true;
+    }
+    path.segments
+        .last()
+        .map(|s| s.ident == "bee_method")
+        .unwrap_or(false)
+}
+
 fn extract_slot(attrs: &[syn::Attribute]) -> syn::Result<Option<String>> {
     for a in attrs {
-        if a.path().is_ident("bee_method") {
+        if is_bee_method_attr_path(a.path()) {
             let parsed: MethodArgs = a.parse_args()?;
             return Ok(Some(parsed.slot));
         }
@@ -673,5 +685,5 @@ fn extract_slot(attrs: &[syn::Attribute]) -> syn::Result<Option<String>> {
 }
 
 fn is_bee_method_attr(a: &syn::Attribute) -> bool {
-    a.path().is_ident("bee_method")
+    is_bee_method_attr_path(a.path())
 }
