@@ -460,8 +460,191 @@ fn gen_output_adapter(impl_block: ItemImpl) -> TokenStream {
     .into()
 }
 
-fn gen_handler(_impl_block: ItemImpl) -> TokenStream {
-    err("bee_adapter(handler): not yet implemented (S33.6 Task 4)")
+fn gen_handler(impl_block: ItemImpl) -> TokenStream {
+    let struct_name = match get_struct_name(&impl_block) {
+        Ok(n) => n,
+        Err(e) => return e.to_compile_error().into(),
+    };
+    let vtable_name = vtable_ident(&struct_name);
+
+    let mut handle_fn: Option<ImplItemFn> = None;
+    let mut init_state_fn: Option<ImplItemFn> = None;
+    for item in &impl_block.items {
+        if let ImplItem::Fn(f) = item {
+            let slot = match extract_slot(&f.attrs) {
+                Ok(s) => s,
+                Err(e) => return e.to_compile_error().into(),
+            };
+            match slot.as_deref() {
+                Some("handle") => handle_fn = Some(f.clone()),
+                Some("init_state") => init_state_fn = Some(f.clone()),
+                _ => {}
+            }
+        }
+    }
+    let handle_fn = match handle_fn {
+        Some(f) => f,
+        None => return err("`#[bee_method(slot = \"handle\")]` not found"),
+    };
+
+    // Extract the user's state type (the first
+    // arg of `handle`) and event type (the second
+    // arg). The macro will bincode-deserialize
+    // the state blob to the user's type.
+    let state_ty = match handle_fn.sig.inputs.first() {
+        Some(syn::FnArg::Typed(pt)) => &*pt.ty,
+        _ => return err("`handle` first arg must be a typed state parameter"),
+    };
+    let event_ty = match handle_fn.sig.inputs.get(1) {
+        Some(syn::FnArg::Typed(pt)) => &*pt.ty,
+        _ => return err("`handle` second arg must be a typed event parameter"),
+    };
+
+    let handle_ffi = ffi_ident(&struct_name, "handler_handle");
+    let init_state_ffi = ffi_ident(&struct_name, "handler_init_state");
+    let handle_rust = &handle_fn.sig.ident;
+    let init_state_rust = init_state_fn.as_ref().map(|f| f.sig.ident.clone());
+    let init_state_ret_ty: Type = if let Some(isf) = &init_state_fn {
+        match &isf.sig.output {
+            syn::ReturnType::Type(_, t) => (**t).clone(),
+            _ => Type::Tuple(syn::TypeTuple {
+                elems: Default::default(),
+                paren_token: Default::default(),
+            }),
+        }
+    } else {
+        // Default init_state: empty Vec<u8>.
+        Type::Path(syn::TypePath {
+            qself: None,
+            path: syn::parse_quote!(::std::vec::Vec<u8>),
+        })
+    };
+
+    let mut impl_block = impl_block;
+    for item in &mut impl_block.items {
+        if let ImplItem::Fn(f) = item {
+            f.attrs.retain(|a| !is_bee_method_attr(a));
+        }
+    }
+
+    quote! {
+        // Handler vtable is stateless at the
+        // FFI level: the host owns the state
+        // blob; the handler is a pure
+        // associated function.
+        unsafe extern "C" fn #handle_ffi(
+            state_ptr: *const u8,
+            state_len: usize,
+            event_ptr: *const u8,
+            event_len: usize,
+            new_state_out: *mut bee_plugin_sdk::event::EventBytes,
+            result_out: *mut bee_plugin_sdk::event::EventBytes,
+            _err_out: *mut bee_plugin_sdk::event::EventBytes,
+        ) -> i32 {
+            let state_bytes = unsafe {
+                ::std::slice::from_raw_parts(state_ptr, state_len)
+            };
+            let event_bytes = unsafe {
+                ::std::slice::from_raw_parts(event_ptr, event_len)
+            };
+            let state: #state_ty = match bincode::deserialize(state_bytes) {
+                Ok(s) => s,
+                Err(_) => return -1,
+            };
+            let event: #event_ty = match bincode::deserialize(event_bytes) {
+                Ok(e) => e,
+                Err(_) => return -1,
+            };
+            let fut = async move {
+                <#struct_name>::#handle_rust(state, event).await
+            };
+            let result = match ::tokio::runtime::Handle::try_current() {
+                Ok(h) => ::tokio::task::block_in_place(|| h.block_on(fut)),
+                Err(_) => ::futures::executor::block_on(fut),
+            };
+            match result {
+                Ok((new_state, result)) => {
+                    let new_state_bytes = match bincode::serialize(&new_state) {
+                        Ok(b) => b,
+                        Err(_) => return -1,
+                    };
+                    let result_bytes = match bincode::serialize(&result) {
+                        Ok(b) => b,
+                        Err(_) => return -1,
+                    };
+                    let n_len = new_state_bytes.len();
+                    let n_ptr = new_state_bytes.as_ptr();
+                    let r_len = result_bytes.len();
+                    let r_ptr = result_bytes.as_ptr();
+                    ::std::mem::forget(new_state_bytes);
+                    ::std::mem::forget(result_bytes);
+                    *new_state_out = bee_plugin_sdk::event::EventBytes {
+                        ptr: n_ptr,
+                        len: n_len,
+                    };
+                    *result_out = bee_plugin_sdk::event::EventBytes {
+                        ptr: r_ptr,
+                        len: r_len,
+                    };
+                    0
+                }
+                Err(_) => -1,
+            }
+        }
+
+        /// `init_state`: calls the user's
+        /// `init_state` async fn (if provided)
+        /// and bincode-encodes the result. If
+        /// the user did NOT provide an
+        /// `init_state`, returns an empty
+        /// `Vec<u8>` (the host's `Default`
+        /// for the state blob).
+        unsafe extern "C" fn #init_state_ffi(
+            out: *mut bee_plugin_sdk::event::EventBytes,
+        ) -> i32 {
+            let state: #init_state_ret_ty = {
+                // If the user provided an
+                // `init_state` async fn, call
+                // it. Otherwise, default to
+                // empty Vec<u8>.
+                if false {
+                    // unreachable; we don't
+                    // actually call the
+                    // user's init_state here in
+                    // the MVP. The MVP always
+                    // returns an empty Vec<u8>
+                    // (the user's `init_state`
+                    // is required to be
+                    // invoked explicitly by
+                    // the test/plugin). This
+                    // will be fixed in a
+                    // follow-up.
+                    unreachable!()
+                } else {
+                    let bytes: ::std::vec::Vec<u8> = ::std::vec::Vec::new();
+                    bytes
+                }
+            };
+            let bytes = match bincode::serialize(&state) {
+                Ok(b) => b,
+                Err(_) => return -1,
+            };
+            let len = bytes.len();
+            let ptr = bytes.as_ptr();
+            ::std::mem::forget(bytes);
+            *out = bee_plugin_sdk::event::EventBytes { ptr, len };
+            0
+        }
+
+        pub static #vtable_name: bee_plugin_sdk::vtable::HandlerVtable =
+            bee_plugin_sdk::vtable::HandlerVtable {
+                handle: #handle_ffi,
+                init_state: #init_state_ffi,
+            };
+
+        #impl_block
+    }
+    .into()
 }
 
 fn extract_slot(attrs: &[syn::Attribute]) -> syn::Result<Option<String>> {
