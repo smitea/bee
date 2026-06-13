@@ -1,22 +1,337 @@
 //! S33.6: `#[bee_adapter]` proc-macro.
 //!
-//! MVP stub: pass-through. Tasks 2-4 implement
-//! the input / output / handler variants.
+//! Turns a hand-written `impl` block into the
+//! FFI glue: 2-3 `unsafe extern "C" fn` + a
+//! per-instance ctx struct + a `static
+//! FOO_VTABLE: Vtable` constant.
+//!
+//! Wire format (vtable layout, Event bincode
+//! schema) is defined in `bee-plugin-sdk` and
+//! unchanged.
+
+extern crate proc_macro;
 
 use proc_macro::TokenStream;
-use syn::{parse_macro_input, ItemImpl};
+use proc_macro2::Span;
+use quote::{format_ident, quote};
+use syn::{
+    parse::{Parse, ParseStream},
+    parse_macro_input, Error, ImplItem, ImplItemFn, ItemImpl, LitStr, Token,
+    Type,
+};
 
-#[proc_macro_attribute]
-pub fn bee_adapter(_args: TokenStream, input: TokenStream) -> TokenStream {
-    let _impl_block = parse_macro_input!(input as ItemImpl);
-    let _ = _args;
-    let _ = _impl_block;
-    TokenStream::new()
+struct AdapterArgs {
+    kind: AdapterKind,
+    #[allow(dead_code)]
+    name: String,
+}
+
+enum AdapterKind {
+    Input,
+    Output,
+    Handler,
+}
+
+impl Parse for AdapterArgs {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let kind_ident: syn::Ident = input.parse()?;
+        let kind = match kind_ident.to_string().as_str() {
+            "input" => AdapterKind::Input,
+            "output" => AdapterKind::Output,
+            "handler" => AdapterKind::Handler,
+            other => {
+                return Err(Error::new(
+                    kind_ident.span(),
+                    format!(
+                        "bee_adapter: kind must be 'input', 'output', or 'handler', got '{}'",
+                        other
+                    ),
+                ));
+            }
+        };
+        let mut name = String::from("<unnamed>");
+        while !input.is_empty() {
+            let _comma: Token![,] = input.parse()?;
+            if input.is_empty() { break; }
+            let ident: syn::Ident = input.parse()?;
+            let _eq: Token![=] = input.parse()?;
+            let val: LitStr = input.parse()?;
+            if ident == "name" {
+                name = val.value();
+            } else {
+                return Err(Error::new(
+                    ident.span(),
+                    format!("bee_adapter: unknown arg '{}'", ident),
+                ));
+            }
+        }
+        Ok(Self { kind, name })
+    }
+}
+
+struct MethodArgs {
+    slot: String,
+}
+
+impl Parse for MethodArgs {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let ident: syn::Ident = input.parse()?;
+        let _eq: Token![=] = input.parse()?;
+        let val: LitStr = input.parse()?;
+        if ident != "slot" {
+            return Err(Error::new(
+                ident.span(),
+                format!("bee_method: unknown arg '{}'; expected `slot = \"...\"`", ident),
+            ));
+        }
+        Ok(Self { slot: val.value() })
+    }
 }
 
 #[proc_macro_attribute]
-pub fn bee_method(_args: TokenStream, input: TokenStream) -> TokenStream {
-    let _ = _args;
+pub fn bee_adapter(args: TokenStream, input: TokenStream) -> TokenStream {
+    let adapter_args = parse_macro_input!(args as AdapterArgs);
+    let impl_block = parse_macro_input!(input as ItemImpl);
+
+    match adapter_args.kind {
+        AdapterKind::Input => gen_input_adapter(impl_block),
+        AdapterKind::Output => gen_output_adapter(impl_block),
+        AdapterKind::Handler => gen_handler(impl_block),
+    }
+}
+
+#[proc_macro_attribute]
+pub fn bee_method(args: TokenStream, input: TokenStream) -> TokenStream {
+    // Pass-through: the impl block is processed
+    // by `bee_adapter` in one pass; `bee_method`
+    // attributes are stripped there.
+    let _ = args;
     let _ = input;
     TokenStream::new()
+}
+
+fn get_struct_name(impl_block: &ItemImpl) -> syn::Result<proc_macro2::Ident> {
+    if let Type::Path(tp) = &*impl_block.self_ty {
+        Ok(tp
+            .path
+            .segments
+            .last()
+            .expect("impl has no self type")
+            .ident
+            .clone())
+    } else {
+        Err(Error::new(
+            Span::call_site(),
+            "bee_adapter: self_ty must be a path",
+        ))
+    }
+}
+
+fn vtable_ident(struct_name: &proc_macro2::Ident) -> proc_macro2::Ident {
+    // Convert `MockInput` → `MOCK_INPUT_VTABLE`
+    // (snake_case then SCREAMING_SNAKE_CASE).
+    let snake = to_snake_case(&struct_name.to_string());
+    let upper = snake.to_uppercase();
+    format_ident!("{}_VTABLE", upper)
+}
+
+fn ffi_ident(struct_name: &proc_macro2::Ident, slot: &str) -> proc_macro2::Ident {
+    let snake = to_snake_case(&struct_name.to_string());
+    format_ident!("{}_{}", snake, slot)
+}
+
+fn to_snake_case(s: &str) -> String {
+    // Insert `_` before each uppercase letter
+    // (except the first) and lowercase.
+    let mut out = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if c.is_ascii_uppercase() && i > 0 {
+            out.push('_');
+        }
+        out.push(c.to_ascii_lowercase());
+    }
+    out
+}
+
+fn err(msg: &str) -> TokenStream {
+    Error::new(Span::call_site(), msg).to_compile_error().into()
+}
+
+fn gen_input_adapter(impl_block: ItemImpl) -> TokenStream {
+    let struct_name = match get_struct_name(&impl_block) {
+        Ok(n) => n,
+        Err(e) => return e.to_compile_error().into(),
+    };
+    let vtable_name = vtable_ident(&struct_name);
+
+    let mut open_fn: Option<ImplItemFn> = None;
+    let mut next_fn: Option<ImplItemFn> = None;
+    let mut close_fn: Option<ImplItemFn> = None;
+    for item in &impl_block.items {
+        if let ImplItem::Fn(f) = item {
+            let slot = match extract_slot(&f.attrs) {
+                Ok(s) => s,
+                Err(e) => return e.to_compile_error().into(),
+            };
+            match slot.as_deref() {
+                Some("open") => open_fn = Some(f.clone()),
+                Some("next") => next_fn = Some(f.clone()),
+                Some("close") => close_fn = Some(f.clone()),
+                _ => {}
+            }
+        }
+    }
+    let open_fn = match open_fn {
+        Some(f) => f,
+        None => return err("`#[bee_method(slot = \"open\")]` not found"),
+    };
+    let next_fn = match next_fn {
+        Some(f) => f,
+        None => return err("`#[bee_method(slot = \"next\")]` not found"),
+    };
+    let close_fn = match close_fn {
+        Some(f) => f,
+        None => return err("`#[bee_method(slot = \"close\")]` not found"),
+    };
+
+    let ctx_ty = format_ident!("{}InputCtx", struct_name);
+    let open_ffi = ffi_ident(&struct_name, "input_open");
+    let next_ffi = ffi_ident(&struct_name, "input_next");
+    let close_ffi = ffi_ident(&struct_name, "input_close");
+    let open_rust = &open_fn.sig.ident;
+    let next_rust = &next_fn.sig.ident;
+    let close_rust = &close_fn.sig.ident;
+
+    let mut impl_block = impl_block;
+    for item in &mut impl_block.items {
+        if let ImplItem::Fn(f) = item {
+            f.attrs.retain(|a| !is_bee_method_attr(a));
+        }
+    }
+
+    quote! {
+        struct #ctx_ty {
+            inner: ::tokio::sync::Mutex<Option<#struct_name>>,
+        }
+
+        unsafe extern "C" fn #open_ffi(
+            config_ptr: *const u8,
+            config_len: usize,
+            _err_out: *mut bee_plugin_sdk::event::EventBytes,
+        ) -> *mut ::std::ffi::c_void {
+            let config = unsafe {
+                ::std::slice::from_raw_parts(config_ptr, config_len).to_vec()
+            };
+            let fut = async move {
+                <#struct_name>::#open_rust(config).await
+            };
+            let adapter = match ::tokio::runtime::Handle::try_current() {
+                Ok(h) => ::tokio::task::block_in_place(|| h.block_on(fut)),
+                Err(_) => ::futures::executor::block_on(fut),
+            };
+            let adapter = match adapter {
+                Ok(a) => a,
+                Err(_) => return ::std::ptr::null_mut(),
+            };
+            let ctx = #ctx_ty {
+                inner: ::tokio::sync::Mutex::new(Some(adapter)),
+            };
+            ::std::boxed::Box::into_raw(::std::boxed::Box::new(ctx))
+                as *mut ::std::ffi::c_void
+        }
+
+        unsafe extern "C" fn #next_ffi(
+            ctx: *mut ::std::ffi::c_void,
+            out: *mut bee_plugin_sdk::event::EventBytes,
+        ) -> i32 {
+            let ctx = unsafe { &*(ctx as *const #ctx_ty) };
+            let mut guard = match ctx.inner.try_lock() {
+                Ok(g) => g,
+                Err(_) => return -1,
+            };
+            let adapter = match guard.as_mut() {
+                Some(a) => a,
+                None => {
+                    *out = bee_plugin_sdk::event::EventBytes::EMPTY;
+                    return 0;
+                }
+            };
+            let fut = adapter.#next_rust();
+            let result = match ::tokio::runtime::Handle::try_current() {
+                Ok(h) => ::tokio::task::block_in_place(|| h.block_on(fut)),
+                Err(_) => ::futures::executor::block_on(fut),
+            };
+            match result {
+                Ok(Some(event)) => {
+                    let bytes = match bincode::serialize(&event) {
+                        Ok(b) => b,
+                        Err(_) => return -1,
+                    };
+                    let len = bytes.len();
+                    let ptr = bytes.as_ptr();
+                    ::std::mem::forget(bytes);
+                    *out = bee_plugin_sdk::event::EventBytes { ptr, len };
+                    1
+                }
+                Ok(None) => {
+                    *out = bee_plugin_sdk::event::EventBytes::EMPTY;
+                    0
+                }
+                Err(_) => -1,
+            }
+        }
+
+        unsafe extern "C" fn #close_ffi(
+            ctx: *mut ::std::ffi::c_void,
+        ) -> i32 {
+            if ctx.is_null() { return 0; }
+            let ctx = unsafe {
+                ::std::boxed::Box::from_raw(ctx as *mut #ctx_ty)
+            };
+            let adapter = match ctx.inner.try_lock() {
+                Ok(mut g) => g.take(),
+                Err(_) => return -1,
+            };
+            if let Some(adapter) = adapter {
+                let fut = adapter.#close_rust();
+                let _ = match ::tokio::runtime::Handle::try_current() {
+                    Ok(h) => ::tokio::task::block_in_place(|| h.block_on(fut)),
+                    Err(_) => ::futures::executor::block_on(fut),
+                };
+            }
+            0
+        }
+
+        pub static #vtable_name: bee_plugin_sdk::vtable::InputAdapterVtable =
+            bee_plugin_sdk::vtable::InputAdapterVtable {
+                open: #open_ffi,
+                next: #next_ffi,
+                close: #close_ffi,
+            };
+
+        #impl_block
+    }
+    .into()
+}
+
+fn gen_output_adapter(_impl_block: ItemImpl) -> TokenStream {
+    err("bee_adapter(output): not yet implemented (S33.6 Task 3)")
+}
+
+fn gen_handler(_impl_block: ItemImpl) -> TokenStream {
+    err("bee_adapter(handler): not yet implemented (S33.6 Task 4)")
+}
+
+fn extract_slot(attrs: &[syn::Attribute]) -> syn::Result<Option<String>> {
+    for a in attrs {
+        if a.path().is_ident("bee_method") {
+            let parsed: MethodArgs = a.parse_args()?;
+            return Ok(Some(parsed.slot));
+        }
+    }
+    Ok(None)
+}
+
+fn is_bee_method_attr(a: &syn::Attribute) -> bool {
+    a.path().is_ident("bee_method")
 }
