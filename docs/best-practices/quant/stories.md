@@ -1149,4 +1149,60 @@ MONGODB_URI=mongodb://localhost:27017
 
 ---
 
+### S33.6 · Plugin macro ergonomics (the S33.5.2 follow-up)
+
+- **Type**: AFK
+- **Blocked by**: S33.5.2 (Datasource validation)
+- **ADRs**: 0005, 0009
+- **Design**: `docs/superpowers/specs/2026-06-10-s33-6-plugin-macro-ergonomics-design.md`
+- **Plan**: `docs/superpowers/plans/2026-06-10-s33-6-plugin-macro-ergonomics.md`
+
+> **Why this story exists**: A plugin author writing a cdylib plugin for Bee today has to hand-write ~150 lines of FFI glue per adapter (3 `unsafe extern "C" fn` + 1 vtable static + 3 HashMap inserts + 1 AdapterDescriptor per adapter). S33.6 adds a `#[bee_adapter(input|output|handler, name = "...")]` proc-macro that turns the author's `async fn open / next / close` impl into the full vtable + registration glue, dropping the boilerplate to ~30 lines per adapter.
+
+**Implementation (code-level ✓, production-level N)**:
+
+- `crates/bee-plugin-macro/` (new proc-macro crate, workspace dep + member): `#[bee_adapter(input|output|handler, name = "...")]` on the `impl` block + `#[bee_method(slot = "open|next|close|emit|handle|init_state")]` on each body method. The macro:
+  - Generates a per-instance ctx struct (`Mutex<Option<Self>>`).
+  - Generates 2-3 `unsafe extern "C" fn` (open / next / close for input; open / emit / close for output; handle / init_state for handler).
+  - Bridges async → sync via `tokio::task::block_in_place(|| Handle::current().block_on(fut))` with a `futures::executor::block_on` fallback for tests.
+  - Generates a `pub static FOO_VTABLE: Vtable` constant.
+  - Strips the `#[bee_method]` attrs before re-emitting the impl block (so the impl block remains usable in-process).
+  - Compile-time signature checks: `open` / `emit` / `next` / `close` / `handle` must be `async fn`. Errors are emitted via `syn::Error::to_compile_error()` with file:line:col.
+  - Snake-cases the struct name (`MockBinanceInput` → `MOCK_BINANCE_INPUT_VTABLE`).
+  - Matches both `#[bee_method]` and `#[bee_plugin_macro::bee_method]` attribute paths.
+
+- `crates/bee-plugin-sdk/src/macros.rs`: new `register_vtable!` `macro_rules!` with 3 `@branch` arms (input / output / handler). The plugin author uses this in `Factory::init()` to wire the macro-generated vtables into a `PluginHandle`. Each `@branch` casts the `$vtable` expression to the right `*const` type (e.g. `*const bee_plugin_sdk::vtable::InputAdapterVtable`).
+
+- `crates/bee-registry/src/lib.rs::tests::MockBinancePlugin`: refactored to use the macro. The new `MockBinanceInput` struct has `#[bee_adapter(input, name = "subscribe")]` + 3 `#[bee_method(slot = "open" | "next" | "close")]` body methods. The `Plugin::init()` now uses `register_vtable!` to wire the macro-generated `MOCK_BINANCE_INPUT_VTABLE` into the `PluginHandle`. 31 bee-registry tests still pass.
+
+**Tests** (5 new + the refactored MockBinancePlugin):
+
+- `crates/bee-plugin-macro/tests/macro_expands_input_adapter.rs`: defines `MockInput` via the macro; calls open / next / close through the generated `MOCK_INPUT_VTABLE`; asserts 3 events with sequences 1, 2, 3, then end-of-stream, then close rc=0.
+- `crates/bee-plugin-macro/tests/macro_expands_output_adapter.rs`: defines `MockOutput` via the macro; calls open / emit×3 / close; asserts each emit rc=0.
+- `crates/bee-plugin-macro/tests/macro_expands_handler.rs`: defines `CounterHandler` via the macro; calls init_state + handle; asserts state.count=1.
+- `crates/bee-plugin-macro/tests/macro_registration_round_trip.rs`: builds a `PluginHandle` using `register_vtable!` + the macro-generated vtable; registers with `PluginManager`; asserts `pm.resolve("simple", &VersionSpec::Latest)` returns the correct PluginId.
+- `crates/bee-plugin-macro/tests/compile_fail.rs` (trybuild): `non_async_open.rs` uses `#[bee_adapter(input)]` on a non-async `open`. The expected stderr snapshot (`non_async_open.stderr`) is committed to the repo. `trybuild` runs the snapshot comparison.
+
+**Result** (this commit): 482 workspace tests pass, 0 failed, 5 ignored. Net +5 from S33.5.2 baseline of 477 (1 input + 1 output + 1 handler + 1 round-trip + 1 trybuild; the refactored MockBinancePlugin is a net-zero change).
+
+**Status (production-level, N)**:
+
+- Code-level: 482/482 tests pass; the proc-macro generates correct vtable glue for input / output / handler; the in-process test fixture uses the macro; the trybuild compile-fail locks down the signature checks.
+- Production-level: requires a third-party plugin author (e.g., a new binance mock plugin in `examples/`) to migrate to the new macro and provide feedback. 1.x adoption. Deferred to the S33.6 HITL sign-off row.
+
+**Follow-ups** (deferred to S33.6.x / 1.x):
+
+- `#[plugin(name = "...", version = "...")]` proc-macro attribute on the factory struct to auto-generate `PluginManifest` (eliminates the remaining ~10 lines of manifest boilerplate).
+- Custom `init_state` for `Handler` (the MVP always returns the bincode-encoded empty `Vec<u8>`; some handlers need a non-empty initial state like `{ count: 0 }`).
+- Async-over-callback vtable variant: instead of `block_in_place` + `block_on`, the vtable fn spawns a task and returns immediately with a callback. Lower latency but bigger vtable struct (1.x).
+- Cross-crate type checking: macro emits a `static_assert` that the plugin's `Config: DeserializeOwned` matches the host's expected `Config` (1.x).
+- Non-Rust plugins (C/C++/Python/Go): always hand-written vtables (1.x; the FFI is C ABI by design).
+
+**Sign-off honesty**:
+
+- ✓ Code-level: 482/482 tests pass; the macro is locked down for input / output / handler; signature checks are tested.
+- ✗ Production-level: requires a real plugin author to migrate + S33.6 HITL review.
+
+---
+
 
