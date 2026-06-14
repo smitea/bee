@@ -698,32 +698,89 @@ async fn dispatch(
         }
         AdminRequest::Deploy {
             sql_text,
-            owner_node: _,
+            owner_node,
         } => {
-            // The actual `bee-dsl-sql` runner
-            // requires a CSV source path that the
-            // S40 demo already wires via
-            // `run_pipeline_cli`. For S33.3 we
-            // exercise the same code path: write
-            // the SQL to a temp file, run
-            // `run_pipeline_with_config`, parse the
-            // output. The result is the deployed
-            // job + task ids.
-            //
-            // MVP simplification: only the in-memory
-            // 3-Node test path uses this (the
-            // integration test in Task 7). The
-            // 24h soak script's deploy call writes
-            // a marker to the leader's KV instead
-            // (so the soak Phase 4 is meaningful
-            // even when the deploy is a no-op).
+            // S33.5.3: extract the phase DAG,
+            // write the Job + N Tasks
+            // directly to the local control
+            // plane via `apply_op` (this is
+            // the wire-direct path; the leader
+            // path uses `dispatch_with_apply`).
+            let dag = match bee_dsl_sql::dag::extract_phase_dag(
+                &sql_text,
+            ) {
+                Ok(d) => d,
+                Err(e) => {
+                    return AdminResponse::DeployAck {
+                        job_id: 0,
+                        task_ids: Vec::new(),
+                        error_msg: e,
+                    };
+                }
+            };
+            let mut cp_locked = cp.lock().await;
+            let next_job_id = cp_locked
+                .list_jobs()
+                .iter()
+                .map(|j| j.job_id)
+                .max()
+                .unwrap_or(0)
+                + 1;
+            let next_task_id = cp_locked
+                .list_tasks()
+                .iter()
+                .map(|t| t.task_id)
+                .max()
+                .unwrap_or(0)
+                + 1;
+            // Apply the Job op to the local
+            // control plane.
+            let op = crate::kv::Op::RegisterJob {
+                job_id: next_job_id,
+                dag_hash: dag.dag_hash.clone(),
+                owner_node,
+                tenant: 0,
+            };
+            if let Err(e) = cp_locked.apply_op(&op) {
+                return AdminResponse::DeployAck {
+                    job_id: 0,
+                    task_ids: Vec::new(),
+                    error_msg: format!(
+                        "apply_op RegisterJob: {e:?}"
+                    ),
+                };
+            }
+            let mut task_ids: Vec<u32> =
+                Vec::with_capacity(dag.phases.len());
+            for (i, phase) in
+                dag.phases.iter().enumerate()
+            {
+                let task_id =
+                    next_task_id + i as u32;
+                let op = crate::kv::Op::RegisterTask {
+                    task_id,
+                    job_id: next_job_id,
+                    phase_id: phase.phase_id,
+                    owner_node,
+                    status: crate::kv::TaskStatus::Pending,
+                    started_at_ms: 0,
+                };
+                if let Err(e) = cp_locked.apply_op(&op) {
+                    return AdminResponse::DeployAck {
+                        job_id: next_job_id,
+                        task_ids,
+                        error_msg: format!(
+                            "apply_op RegisterTask at phase {}: {e:?}",
+                            phase.phase_id
+                        ),
+                    };
+                }
+                task_ids.push(task_id);
+            }
             AdminResponse::DeployAck {
-                job_id: 0,
-                task_ids: Vec::new(),
-                error_msg: "Deploy requires the bee-dsl-sql runner; \
-                            the S33.3 MVP writes a 'soak/deploy/<sql_hash>' \
-                            KV marker instead. See S33.4 for the real path."
-                    .to_string(),
+                job_id: next_job_id,
+                task_ids,
+                error_msg: String::new(),
             }
         }
         AdminRequest::RegisterDatasource {
