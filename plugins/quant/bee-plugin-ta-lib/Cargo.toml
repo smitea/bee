@@ -11,11 +11,15 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 bee-plugin-sdk = { path = "../../../crates/bee-plugin-sdk" }
+bee-adapter = { path = "../../../crates/bee-adapter" }
+bee-plugin-macro = { path = "../../../crates/bee-plugin-macro" }
 yata = "0.6"
 serde = { version = "1", features = ["derive"] }
 bincode = "1"
 thiserror = "2"
 log = "0.4"
+tokio = { workspace = true }
+futures = "0.3"
 
 [dev-dependencies]
 
