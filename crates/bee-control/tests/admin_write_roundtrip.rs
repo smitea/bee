@@ -117,28 +117,30 @@ async fn admin_register_datasource_no_plugin_manager() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn admin_deploy_roundtrip() {
-    // The S33.3 MVP deploy is a marker (the
-    // full bee-dsl-sql runner is S33.4). The
-    // round-trip should return a DeployAck
-    // with job_id=0 and a non-empty error_msg
-    // (the marker note).
+    // S33.5.3: the Deploy arm extracts the
+    // phase DAG and writes 1 Job + N
+    // Tasks to the control plane. `SELECT
+    // 1` is a single-SELECT SQL → 1 phase
+    // → 1 Task.
     let kv = Arc::new(Mutex::new(KVStateMachine::new()));
     let cp = Arc::new(Mutex::new(ControlPlaneStateMachine::new()));
     let state = Arc::new(Mutex::new(NodeState::default()));
     let mut admin = AdminServer::start(
         "127.0.0.1:0".parse().unwrap(),
-        kv.clone(),
-        cp.clone(),
+        kv,
+        cp,
         state,
         None,
         None,
         None,
-        None,  // plugin_manager (S33.5.2)
+        None, // plugin_manager
     )
     .await
     .expect("AdminServer::start");
     let addr = admin.local_addr();
-    let mut client = AdminClient::connect(addr).await.expect("connect");
+    let mut client = AdminClient::connect(addr)
+        .await
+        .expect("connect");
     let resp = client
         .call(AdminRequest::Deploy {
             sql_text: "SELECT 1".to_string(),
@@ -146,11 +148,18 @@ async fn admin_deploy_roundtrip() {
         })
         .await
         .expect("Deploy call");
-    if let AdminResponse::DeployAck { job_id, error_msg, .. } = resp {
-        assert_eq!(job_id, 0);
-        assert!(!error_msg.is_empty(), "expected non-empty error_msg (marker note)");
-    } else {
-        panic!("expected DeployAck");
-    }
+    let (job_id, task_ids, error_msg) = match resp {
+        AdminResponse::DeployAck { job_id, task_ids, error_msg } => {
+            (job_id, task_ids, error_msg)
+        }
+        other => panic!("expected DeployAck, got: {other:?}"),
+    };
+    assert_eq!(job_id, 1, "expected job_id=1 for first deploy");
+    assert_eq!(task_ids.len(), 1, "expected 1 task for 'SELECT 1'");
+    assert_eq!(task_ids[0], 1);
+    assert!(
+        error_msg.is_empty(),
+        "expected empty error_msg, got: {error_msg}"
+    );
     admin.shutdown();
 }
