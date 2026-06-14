@@ -420,15 +420,25 @@ async fn validate_register_datasource(
             sql_text,
             owner_node,
         } => {
-            // S33.5 MVP: register a single
-            // Job (no Tasks). The full
-            // bee-dsl-sql runner that parses
-            // the DAG into Tasks is a
-            // S33.5.3 follow-up.
-            use sha2::{Digest, Sha256};
-            let mut hasher = Sha256::new();
-            hasher.update(sql_text.as_bytes());
-            let dag_hash = format!("{:x}", hasher.finalize());
+            // S33.5.3: extract the phase DAG
+            // from the SQL, submit 1
+            // RegisterJob + N RegisterTask
+            // ops in order.
+            let dag = match bee_dsl_sql::dag::extract_phase_dag(
+                &sql_text,
+            ) {
+                Ok(d) => d,
+                Err(e) => {
+                    return AdminResponse::DeployAck {
+                        job_id: 0,
+                        task_ids: Vec::new(),
+                        error_msg: e,
+                    };
+                }
+            };
+            // Allocate the next job_id +
+            // task_id_base by scanning the
+            // current control plane.
             let cp_locked = cp.lock().await;
             let next_job_id = cp_locked
                 .list_jobs()
@@ -437,20 +447,74 @@ async fn validate_register_datasource(
                 .max()
                 .unwrap_or(0)
                 + 1;
+            let next_task_id = cp_locked
+                .list_tasks()
+                .iter()
+                .map(|t| t.task_id)
+                .max()
+                .unwrap_or(0)
+                + 1;
             drop(cp_locked);
+            // Submit the Job first.
             let op = crate::kv::Op::RegisterJob {
                 job_id: next_job_id,
-                dag_hash,
+                dag_hash: dag.dag_hash.clone(),
                 owner_node,
                 tenant: 0,
             };
-            let response = submit_and_await(transport, op).await;
-            if matches!(response, AdminResponse::Error(_)) {
-                return response;
+            if let AdminResponse::Error(e) =
+                submit_and_await(transport, op).await
+            {
+                return AdminResponse::DeployAck {
+                    job_id: 0,
+                    task_ids: Vec::new(),
+                    error_msg: format!("job submit: {e}"),
+                };
+            }
+            // Submit N Tasks.
+            let mut task_ids: Vec<u32> =
+                Vec::with_capacity(dag.phases.len());
+            for (i, phase) in
+                dag.phases.iter().enumerate()
+            {
+                let task_id =
+                    next_task_id + i as u32;
+                let op = crate::kv::Op::RegisterTask {
+                    task_id,
+                    job_id: next_job_id,
+                    phase_id: phase.phase_id,
+                    owner_node,
+                    status: crate::kv::TaskStatus::Pending,
+                    started_at_ms: 0,
+                };
+                match submit_and_await(transport, op).await {
+                    AdminResponse::KvPutAck { ok: true } => {
+                        task_ids.push(task_id);
+                    }
+                    AdminResponse::KvPutAck { ok: false } => {
+                        return AdminResponse::DeployAck {
+                            job_id: next_job_id,
+                            task_ids,
+                            error_msg: format!(
+                                "task submit failed at phase {}",
+                                phase.phase_id
+                            ),
+                        };
+                    }
+                    other => {
+                        return AdminResponse::DeployAck {
+                            job_id: next_job_id,
+                            task_ids,
+                            error_msg: format!(
+                                "task submit unexpected reply: {other:?}"
+                            ),
+                        };
+                    }
+                }
             }
             AdminResponse::DeployAck {
                 job_id: next_job_id,
-                task_ids: vec![],
+                task_ids,
                 error_msg: String::new(),
             }
         }
