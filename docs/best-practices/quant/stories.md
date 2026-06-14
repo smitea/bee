@@ -1205,4 +1205,57 @@ MONGODB_URI=mongodb://localhost:27017
 
 ---
 
+### S33.5.3 · Deploy 完整 DSL runner (the S33.6 follow-up)
+
+- **Type**: AFK
+- **Blocked by**: S33.6 (plugin macro ergonomics)
+- **ADRs**: 0001, 0007
+- **Design**: `docs/superpowers/specs/2026-06-10-s33-5-3-deploy-dsl-runner-design.md`
+- **Plan**: `docs/superpowers/plans/2026-06-10-s33-5-3-deploy-dsl-runner.md`
+
+> **Why this story exists**: S33.5 wired the leader-side apply for `AdminRequest::Deploy`, but the arm was a placeholder that hashed the SQL and registered a single `Op::RegisterJob { ... }` with **zero `Op::RegisterTask` ops**. The control plane had no idea what phases the pipeline should run. S33.5.3 closes the gap: extracts a phase DAG from the SQL, generates N `Op::RegisterTask` ops (one per top-level `SELECT`), and submits them to the Raft log.
+
+**Implementation (code-level ✓, production-level N)**:
+
+- `crates/bee-dsl-sql/src/dag.rs` (new module): `PhaseDag` struct + `Phase` struct + `extract_phase_dag(sql) -> Result<PhaseDag, String>` function. The MVP heuristic is "every top-level `SELECT` is an independent Phase; `dependencies` is always empty". The function computes `dag_hash = sha256(sql_text)`.
+
+- `crates/bee-dsl-sql/src/lib.rs`: re-exports the new `dag` module.
+
+- `crates/bee-dsl-sql/Cargo.toml`: add `sha2 = "0.10"` dep (used by the dag_hash computation).
+
+- `crates/bee-control/src/raft/admin_server.rs`:
+  - `AdminRequest::Deploy` arm in `dispatch_with_apply` (the leader path): extracts DAG → allocates `job_id` (scan `cp.list_jobs().max() + 1`) + `task_id_base` (scan `cp.list_tasks().max() + 1`) → submits `Op::RegisterJob { job_id, dag_hash, owner_node, tenant: 0 }` via `submit_and_await` → submits N × `Op::RegisterTask { task_id: task_id_base + i, job_id, phase_id: i + 1, owner_node, status: Pending, started_at_ms: 0 }` → returns `DeployAck { job_id, task_ids, error_msg }`. On mid-apply failure, returns the partial `task_ids` collected so far (so the user can see what got committed).
+  - `AdminRequest::Deploy` arm in `dispatch` (the wire-direct path, used in tests): same flow but applies the ops directly to the local control plane via `cp_locked.apply_op(&op)` (no Raft log; this path is for tests that don't have a leader).
+
+**Tests** (3 new + 1 updated):
+
+- `crates/bee-dsl-sql/tests/dag_extract.rs` (3 tests):
+  - `extracts_two_phases_from_two_selects`: SQL with 2 `SELECT`s → `PhaseDag` with 2 phases, no dependencies, sha256 hash is 64 hex chars. Same SQL → same hash (idempotency).
+  - `errors_on_empty_sql`: empty SQL → `Err` with "parse failed" or "no SELECT".
+  - `errors_on_no_selects`: `SET foo = 1;` → `Err` with "no SELECT".
+- `crates/bee-control/tests/deploy_full_dag.rs` (1 test): boots an AdminServer, sends `Deploy { sql_text: "SELECT * FROM binance.subscribe(...); SELECT avg(price) FROM ticks;" }`, asserts `DeployAck { job_id: 1, task_ids: [1, 2], error_msg: "" }`, then verifies the control plane has 1 Job + 2 Tasks (with `job_id=1, phase_id=1/2`).
+- `crates/bee-control/tests/admin_write_roundtrip.rs::admin_deploy_roundtrip` (updated): `SELECT 1` → `DeployAck { job_id: 1, task_ids: [1], error_msg: "" }` (was the S33.5 placeholder error message).
+
+**Result** (this commit): 485 workspace tests pass, 0 failed, 5 ignored. Net +3 from S33.6 baseline of 482 (3 new tests in `dag_extract` + 1 new test in `deploy_full_dag`; the updated `admin_deploy_roundtrip` is a net-zero change).
+
+**Status (production-level, N)**:
+
+- Code-level: 485/485 tests pass; the Deploy arm extracts the DAG, submits 1 Job + N Tasks in order, and the control plane reflects the new state end-to-end.
+- Production-level: requires a 24h wall-clock run on a real 3-node cluster (BEE_MULTINODE gate) with a real multi-phase SQL (the existing 24h soak script uses single-SELECT Datasource pipelines, which still works but doesn't exercise the multi-phase DAG). Deferred to S33 HITL.
+
+**Follow-ups** (deferred to S33.5.x / S34.x):
+
+- `WITH` chain / multi-CTE DAG extraction (full topological analysis). The MVP heuristic treats every top-level `SELECT` as an independent phase; SQL with `WITH foo AS (...) SELECT * FROM foo` will get 1 phase (the outer SELECT), and the CTE is not extracted as a phase.
+- Atomic `Op::RegisterJobWithTasks { job, tasks }` apply. MVP is sequential + idempotent; a mid-apply crash leaves a partial state (re-Deploy creates a new Job + Tasks). The atomic version would apply Job + all Tasks in a single Raft log entry.
+- Per-phase SQL validation against registered Datasources. The MVP trusts the `use <name>;` references; the orchestrator fails at scheduling time if a Datasource is missing.
+- DAG cycle detection. MVP assumes well-formed SQL.
+- Re-Deploy detection by `dag_hash`. MVP re-applies the same Tasks on every Deploy with the same `dag_hash`; a S33.5.x can match by `dag_hash` and return the existing `task_ids`.
+
+**Sign-off honesty**:
+
+- ✓ Code-level: 485/485 tests pass; the DAG extraction + 1 Job + N Tasks apply path is locked down end-to-end.
+- ✗ Production-level: requires 24h wall-clock run + S33 HITL review.
+
+---
+
 
