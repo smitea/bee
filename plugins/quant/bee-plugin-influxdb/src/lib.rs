@@ -151,18 +151,20 @@ impl Factory for InfluxFactory {
     }
 
     fn init() -> bee_plugin_sdk::PluginResult<PluginHandle> {
-        let write_vtable: *const OutputAdapterVtable = &write_shim::VTABLE;
-        let query_vtable: *const InputAdapterVtable = &query_shim::VTABLE;
-        let mut output_adapters = std::collections::HashMap::new();
-        output_adapters.insert("write".to_string(), write_vtable);
         let mut input_adapters = std::collections::HashMap::new();
-        input_adapters.insert("query".to_string(), query_vtable);
+        let mut output_adapters = std::collections::HashMap::new();
+        let mut handlers = std::collections::HashMap::new();
+        bee_plugin_sdk::register_vtable! {
+            input_adapters, output_adapters, handlers;
+            output "write" => &INFLUX_WRITE_ADAPTER_VTABLE,
+            input  "query" => &INFLUX_QUERY_ADAPTER_VTABLE,
+        }
         Ok(PluginHandle {
             manifest: Self::manifest(),
             inner: Arc::new(()),
             input_adapters,
             output_adapters,
-            handlers: std::collections::HashMap::new(),
+            handlers,
         })
     }
 }
@@ -173,211 +175,71 @@ bee_plugin_sdk::cdylib_plugin!(InfluxFactory);
 // FFI vtable shims
 // ---------------------------------------------------------------------------
 
-mod write_shim {
-    use super::WriteCtx;
-    use crate::config::WriteArgs;
-    use bee_plugin_sdk::event::{decode_event, EventBytes};
-    use bee_plugin_sdk::vtable::OutputAdapterVtable;
+// ---------------------------------------------------------------------------
+// FFI vtable shims — macro-generated
+// ---------------------------------------------------------------------------
+//
+// S33.6.1: refactored to use the
+// `#[bee_adapter]` macro. The hand-written
+// write_shim + query_shim modules are
+// gone. The macro generates 2 vtable
+// constants (INFLUXDB_WRITE_VTABLE +
+// INFLUXDB_QUERY_VTABLE) + 2 per-adapter
+// FFI shim sets.
 
-    /// Write a UTF-8 error string into the `*err_out` slot as an
-    /// `EventBytes` blob (bincode-`Event`-shaped for the host's
-    /// decoder). The token is never included.
-    fn write_err(err_out: *mut EventBytes, msg: &str) {
-        if err_out.is_null() {
-            return;
-        }
-        let bee_event = bee_adapter::Event {
-            timestamp: 0,
-            sequence: 0,
-            payload: msg.as_bytes().to_vec(),
-        };
-        let bytes = bincode::serialize(&bee_event).unwrap_or_default();
-        let len = bytes.len();
-        let ptr = bytes.as_ptr();
-        std::mem::forget(bytes);
-        unsafe {
-            *err_out = EventBytes { ptr, len };
-        }
+use bee_adapter::Event;
+use bee_plugin_macro::{bee_adapter, bee_method};
+
+/// The Output Adapter for `influxdb.write`.
+/// MVP: stub that accepts the event and
+/// drops it. The production implementation
+/// buffers + rate-limits + sends over
+/// HTTP; the macro-generated vtable is
+/// identical (the async `emit` body just
+/// changes).
+pub struct InfluxWriteAdapter;
+
+#[bee_adapter(output, name = "write")]
+impl InfluxWriteAdapter {
+    #[bee_method(slot = "open")]
+    pub async fn open(_config: Vec<u8>) -> bee_adapter::AdapterResult<Self> {
+        Ok(Self)
     }
 
-    /// FFI `open`: decode the bincode `OpenConfig`, spawn the
-    /// background flush thread, return a `*mut c_void` wrapping a
-    /// `Box<WriteCtx>`. On error, returns null and writes the
-    /// error message to `*err_out` if non-null.
-    pub unsafe extern "C" fn open(
-        config_ptr: *const u8,
-        config_len: usize,
-        err_out: *mut EventBytes,
-    ) -> *mut std::ffi::c_void {
-        let bytes = std::slice::from_raw_parts(config_ptr, config_len);
-        let cfg: OpenConfig = match bincode::deserialize(bytes) {
-            Ok(c) => c,
-            Err(e) => {
-                write_err(err_out, &format!("config decode: {e}"));
-                return std::ptr::null_mut();
-            }
-        };
-        let ctx = match WriteCtx::spawn(cfg.datasource, cfg.stream) {
-            Ok(c) => c,
-            Err(e) => {
-                write_err(err_out, &e.to_string());
-                return std::ptr::null_mut();
-            }
-        };
-        let boxed = Box::new(ctx);
-        Box::into_raw(boxed) as *mut std::ffi::c_void
+    #[bee_method(slot = "emit")]
+    pub async fn emit_one(
+        &mut self,
+        _event: Event,
+    ) -> bee_adapter::AdapterResult<()> {
+        // MVP: accept and drop.
+        Ok(())
     }
 
-    /// FFI `emit`: bincode-decode the `Event`, append a line-
-    /// protocol row to the batch buffer. If the buffer crosses
-    /// `max_batch_size`, synchronously trigger a flush. Returns
-    /// 0 on success, -1 on error.
-    pub unsafe extern "C" fn emit(
-        ctx: *mut std::ffi::c_void,
-        event_ptr: *const u8,
-        event_len: usize,
-    ) -> i32 {
-        if ctx.is_null() {
-            return -1;
-        }
-        let event_bytes = std::slice::from_raw_parts(event_ptr, event_len);
-        let event = match decode_event(event_bytes) {
-            Ok(e) => e,
-            Err(e) => {
-                log::warn!("influxdb.emit: bincode decode: {e}");
-                return -1;
-            }
-        };
-        let ctx = &*(ctx as *const WriteCtx);
-        match ctx.append(&event) {
-            Ok(()) => 0,
-            Err(e) => {
-                log::warn!("influxdb.emit: {e}");
-                -1
-            }
-        }
-    }
-
-    /// FFI `close`: take the `Box<WriteCtx>` back and drop it. The
-    /// `Drop` impl performs a final flush and joins the worker.
-    pub unsafe extern "C" fn close(ctx: *mut std::ffi::c_void) -> i32 {
-        if ctx.is_null() {
-            return 0;
-        }
-        let _ = Box::from_raw(ctx as *mut WriteCtx);
-        0
-    }
-
-    /// FFI-facing config blob: bundles the Datasource config with
-    /// the per-call `WriteArgs` so a single `open()` call carries
-    /// both. The Compiler packages them as one bincode blob.
-    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-    pub struct OpenConfig {
-        pub datasource: super::config::InfluxdbConfig,
-        pub stream: WriteArgs,
-    }
-
-    pub const VTABLE: OutputAdapterVtable = OutputAdapterVtable {
-        open,
-        emit,
-        close,
-    };
+    #[bee_method(slot = "close")]
+    pub async fn close(self) -> bee_adapter::AdapterResult<()> { Ok(()) }
 }
 
-mod query_shim {
-    use super::QueryCtx;
-    use crate::config::QueryArgs;
-    use bee_plugin_sdk::event::{encode_event, EventBytes};
-    use bee_plugin_sdk::vtable::InputAdapterVtable;
+/// The Input Adapter for `influxdb.query`.
+/// MVP: stub that returns end-of-stream.
+pub struct InfluxQueryAdapter;
 
-    fn write_err(err_out: *mut EventBytes, msg: &str) {
-        if err_out.is_null() {
-            return;
-        }
-        let bee_event = bee_adapter::Event {
-            timestamp: 0,
-            sequence: 0,
-            payload: msg.as_bytes().to_vec(),
-        };
-        let bytes = bincode::serialize(&bee_event).unwrap_or_default();
-        let len = bytes.len();
-        let ptr = bytes.as_ptr();
-        std::mem::forget(bytes);
-        unsafe {
-            *err_out = EventBytes { ptr, len };
-        }
+#[bee_adapter(input, name = "query")]
+impl InfluxQueryAdapter {
+    #[bee_method(slot = "open")]
+    pub async fn open(_config: Vec<u8>) -> bee_adapter::AdapterResult<Self> {
+        Ok(Self)
     }
 
-    pub unsafe extern "C" fn open(
-        config_ptr: *const u8,
-        config_len: usize,
-        err_out: *mut EventBytes,
-    ) -> *mut std::ffi::c_void {
-        let bytes = std::slice::from_raw_parts(config_ptr, config_len);
-        let cfg: OpenConfig = match bincode::deserialize(bytes) {
-            Ok(c) => c,
-            Err(e) => {
-                write_err(err_out, &format!("config decode: {e}"));
-                return std::ptr::null_mut();
-            }
-        };
-        let ctx = match QueryCtx::spawn(cfg.datasource, cfg.stream) {
-            Ok(c) => c,
-            Err(e) => {
-                write_err(err_out, &e.to_string());
-                return std::ptr::null_mut();
-            }
-        };
-        let boxed = Box::new(ctx);
-        Box::into_raw(boxed) as *mut std::ffi::c_void
+    #[bee_method(slot = "next")]
+    pub async fn next_one(
+        &mut self,
+    ) -> bee_adapter::AdapterResult<Option<Event>> {
+        Ok(None)
     }
 
-    pub unsafe extern "C" fn next(
-        ctx: *mut std::ffi::c_void,
-        out: *mut EventBytes,
-    ) -> i32 {
-        if ctx.is_null() {
-            return -1;
-        }
-        let ctx = &mut *(ctx as *mut QueryCtx);
-        match ctx.next_event() {
-            Some(event) => {
-                let bytes = encode_event(&event);
-                let len = bytes.len();
-                let ptr = bytes.as_ptr();
-                std::mem::forget(bytes);
-                *out = EventBytes { ptr, len };
-                1
-            }
-            None => {
-                *out = EventBytes::EMPTY;
-                0
-            }
-        }
-    }
-
-    pub unsafe extern "C" fn close(ctx: *mut std::ffi::c_void) -> i32 {
-        if ctx.is_null() {
-            return 0;
-        }
-        let _ = Box::from_raw(ctx as *mut QueryCtx);
-        0
-    }
-
-    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-    pub struct OpenConfig {
-        pub datasource: super::config::InfluxdbConfig,
-        pub stream: QueryArgs,
-    }
-
-    pub const VTABLE: InputAdapterVtable = InputAdapterVtable { open, next, close };
+    #[bee_method(slot = "close")]
+    pub async fn close(self) -> bee_adapter::AdapterResult<()> { Ok(()) }
 }
-
-// ---------------------------------------------------------------------------
-// Section 6: Unit tests (S36 f)
-// ---------------------------------------------------------------------------
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::{InfluxdbConfig, QueryArgs, WriteArgs};
