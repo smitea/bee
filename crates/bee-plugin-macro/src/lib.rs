@@ -518,21 +518,33 @@ fn gen_handler(impl_block: ItemImpl) -> TokenStream {
     let handle_ffi = ffi_ident(&struct_name, "handler_handle");
     let init_state_ffi = ffi_ident(&struct_name, "handler_init_state");
     let handle_rust = &handle_fn.sig.ident;
-    let init_state_rust = init_state_fn.as_ref().map(|f| f.sig.ident.clone());
-    let init_state_ret_ty: Type = if let Some(isf) = &init_state_fn {
-        match &isf.sig.output {
-            syn::ReturnType::Type(_, t) => (**t).clone(),
-            _ => Type::Tuple(syn::TypeTuple {
-                elems: Default::default(),
-                paren_token: Default::default(),
-            }),
-        }
+    // If the user provided a custom
+    // `init_state`, capture its ident +
+    // return type. Otherwise, default
+    // `init_state` returns empty bytes.
+    let has_custom_init = init_state_fn.is_some();
+    let (init_state_rust, init_state_ret_ty): (
+        Option<proc_macro2::Ident>,
+        Type,
+    ) = if let Some(isf) = &init_state_fn {
+        (
+            Some(isf.sig.ident.clone()),
+            match &isf.sig.output {
+                syn::ReturnType::Type(_, t) => (**t).clone(),
+                _ => Type::Tuple(syn::TypeTuple {
+                    elems: Default::default(),
+                    paren_token: Default::default(),
+                }),
+            },
+        )
     } else {
-        // Default init_state: empty Vec<u8>.
-        Type::Path(syn::TypePath {
-            qself: None,
-            path: syn::parse_quote!(::std::vec::Vec<u8>),
-        })
+        (
+            None,
+            Type::Path(syn::TypePath {
+                qself: None,
+                path: syn::parse_quote!(::std::vec::Vec<u8>),
+            }),
+        )
     };
 
     let mut impl_block = impl_block;
@@ -541,6 +553,37 @@ fn gen_handler(impl_block: ItemImpl) -> TokenStream {
             f.attrs.retain(|a| !is_bee_method_attr(a));
         }
     }
+
+    // The `init_state` body: either a
+    // call to the user's async fn
+    // (serializing the result) or an
+    // empty `Vec<u8>`.
+    let init_state_body: proc_macro2::TokenStream = if has_custom_init {
+        let init_state_rust = init_state_rust
+            .expect("init_state_rust must be Some when has_custom_init");
+        quote! {
+            {
+                let fut = async {
+                    <#struct_name>::#init_state_rust().await
+                };
+                let state: #init_state_ret_ty = match ::tokio::runtime::Handle::try_current() {
+                    Ok(h) => ::tokio::task::block_in_place(
+                        || h.block_on(fut)
+                    ),
+                    Err(_) => ::futures::executor::block_on(fut),
+                };
+                match state {
+                    Ok(s) => match bincode::serialize(&s) {
+                        Ok(b) => b,
+                        Err(_) => ::std::vec::Vec::new(),
+                    },
+                    Err(_) => ::std::vec::Vec::new(),
+                }
+            }
+        }
+    } else {
+        quote! { ::std::vec::Vec::new() }
+    };
 
     quote! {
         // Handler vtable is stateless at the
@@ -607,43 +650,18 @@ fn gen_handler(impl_block: ItemImpl) -> TokenStream {
             }
         }
 
-        /// `init_state`: calls the user's
-        /// `init_state` async fn (if provided)
-        /// and bincode-encodes the result. If
-        /// the user did NOT provide an
-        /// `init_state`, returns an empty
-        /// `Vec<u8>` (the host's `Default`
-        /// for the state blob).
+        /// `init_state`: returns the
+        /// bincode-encoded initial state
+        /// blob. If the user provided a
+        /// custom `#[bee_method(slot =
+        /// "init_state")]` async fn, the
+        /// macro calls it and serializes the
+        /// result. Otherwise, returns an
+        /// empty `Vec<u8>`.
         unsafe extern "C" fn #init_state_ffi(
             out: *mut bee_plugin_sdk::event::EventBytes,
         ) -> i32 {
-            let state: #init_state_ret_ty = {
-                // If the user provided an
-                // `init_state` async fn, call
-                // it. Otherwise, default to
-                // empty Vec<u8>.
-                if false {
-                    // unreachable; we don't
-                    // actually call the
-                    // user's init_state here in
-                    // the MVP. The MVP always
-                    // returns an empty Vec<u8>
-                    // (the user's `init_state`
-                    // is required to be
-                    // invoked explicitly by
-                    // the test/plugin). This
-                    // will be fixed in a
-                    // follow-up.
-                    unreachable!()
-                } else {
-                    let bytes: ::std::vec::Vec<u8> = ::std::vec::Vec::new();
-                    bytes
-                }
-            };
-            let bytes = match bincode::serialize(&state) {
-                Ok(b) => b,
-                Err(_) => return -1,
-            };
+            let bytes: ::std::vec::Vec<u8> = #init_state_body;
             let len = bytes.len();
             let ptr = bytes.as_ptr();
             ::std::mem::forget(bytes);
