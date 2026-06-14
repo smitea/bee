@@ -12,6 +12,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 bee-adapter = { path = "../../../crates/bee-adapter" }
 bee-plugin-sdk = { path = "../../../crates/bee-plugin-sdk" }
+bee-plugin-macro = { path = "../../../crates/bee-plugin-macro" }
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = { version = "0.24", features = ["connect", "rustls-tls-webpki-roots"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
