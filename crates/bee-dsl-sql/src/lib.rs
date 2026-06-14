@@ -9,6 +9,8 @@
 
 pub mod asof;
 mod compile;
+/// S33.5.3: extract a phase DAG from a SQL text.
+pub mod dag;
 mod handlers;
 mod physical;
 pub mod plugin_loader;
