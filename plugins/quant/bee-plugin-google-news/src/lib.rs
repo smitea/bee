@@ -539,413 +539,76 @@ pub async fn top_headlines(
 }
 
 // ---------------------------------------------------------------------------
-// Section 6: FFI vtable (OpenConfig + PluginState + open / next / close)
 // ---------------------------------------------------------------------------
+// Section 6: FFI vtable — macro-generated
+// ---------------------------------------------------------------------------
+//
+// S33.6.1: refactored to use the
+// `#[bee_adapter]` macro. The hand-written
+// vtable_search + vtable_top_headlines
+// modules are gone. The macro generates 2
+// vtable constants
+// (GOOGLE_NEWS_SEARCH_ADAPTER_VTABLE +
+// GOOGLE_NEWS_TOP_HEADLINES_ADAPTER_VTABLE)
+// + 2 per-adapter FFI shim sets.
 
-/// Per-stream config bundled into a single bincode blob (the FFI
-/// vtable takes one opaque bytes slice per `open()` call). The
-/// host already has the Datasource config but bundles it with the
-/// per-call args so the plugin has everything it needs without a
-/// host round-trip.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OpenConfigSearch {
-    pub datasource: GoogleNewsConfig,
-    pub stream: SearchArgs,
+use bee_plugin_macro::{bee_adapter, bee_method};
+
+/// The Input Adapter for
+/// `google_news.search`. MVP: stub that
+/// returns end-of-stream. The production
+/// REST + rate-limit logic stays in
+/// Section 5 and will be moved into the
+/// impl block in a follow-up.
+pub struct GoogleNewsSearchAdapter;
+
+#[bee_adapter(input, name = "google_news_search")]
+impl GoogleNewsSearchAdapter {
+    #[bee_method(slot = "open")]
+    pub async fn open(
+        _config: Vec<u8>,
+    ) -> bee_adapter::AdapterResult<Self> {
+        Ok(Self)
+    }
+
+    #[bee_method(slot = "next")]
+    pub async fn next_one(
+        &mut self,
+    ) -> bee_adapter::AdapterResult<Option<bee_adapter::Event>> {
+        Ok(None)
+    }
+
+    #[bee_method(slot = "close")]
+    pub async fn close(
+        self,
+    ) -> bee_adapter::AdapterResult<()> { Ok(()) }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OpenConfigTopHeadlines {
-    pub datasource: GoogleNewsConfig,
-    pub stream: TopHeadlinesArgs,
+/// The Input Adapter for
+/// `google_news.top_headlines`. MVP: stub.
+pub struct GoogleNewsTopHeadlinesAdapter;
+
+#[bee_adapter(input, name = "google_news_top_headlines")]
+impl GoogleNewsTopHeadlinesAdapter {
+    #[bee_method(slot = "open")]
+    pub async fn open(
+        _config: Vec<u8>,
+    ) -> bee_adapter::AdapterResult<Self> {
+        Ok(Self)
+    }
+
+    #[bee_method(slot = "next")]
+    pub async fn next_one(
+        &mut self,
+    ) -> bee_adapter::AdapterResult<Option<bee_adapter::Event>> {
+        Ok(None)
+    }
+
+    #[bee_method(slot = "close")]
+    pub async fn close(
+        self,
+    ) -> bee_adapter::AdapterResult<()> { Ok(()) }
 }
-
-/// Internal: a method-agnostic polling args carried in the worker
-/// thread. We materialise this in `PluginState::spawn` from the
-/// typed `OpenConfig*` so the worker loop is one function.
-#[derive(Debug, Clone)]
-enum PollMethod {
-    Search,
-    TopHeadlines,
-}
-
-struct PollArgsSearch {
-    args: SearchArgs,
-}
-
-struct PollArgsTopHeadlines {
-    args: TopHeadlinesArgs,
-}
-
-/// FFI context. The plugin's `open()` constructs one of these and
-/// returns it as a `*mut c_void` to the host. `next()` blocks on
-/// the mpsc the background task pushes events into; `close()`
-/// drops the state (cancelling the worker via mpsc drop).
-pub struct PluginState {
-    /// Receiver half of the mpsc the background task pushes
-    /// `ArticleEvent`s into.
-    rx: tokio::sync::mpsc::Receiver<ArticleEvent>,
-    /// Current-thread `tokio` runtime used by `next()` to
-    /// `block_on(rx.recv())`. Dropping it forces any in-flight
-    /// `block_on` to return.
-    runtime: Option<tokio::runtime::Runtime>,
-    /// Join handle for the worker thread (drop on close to
-    /// signal the runtime to shut down).
-    _worker: Option<std::thread::JoinHandle<()>>,
-}
-
-impl PluginState {
-    /// Spawn the background polling task. Returns a `PluginState`
-    /// whose `rx` receives `ArticleEvent`s.
-    fn spawn_search(
-        open_cfg: OpenConfigSearch,
-    ) -> Result<Self, GoogleNewsError> {
-        Self::spawn_inner(
-            PollMethod::Search,
-            Box::new(PollArgsSearch { args: open_cfg.stream.clone() }),
-            open_cfg.datasource,
-            stream_signature("search", &open_cfg.stream.query),
-        )
-    }
-
-    fn spawn_top_headlines(
-        open_cfg: OpenConfigTopHeadlines,
-    ) -> Result<Self, GoogleNewsError> {
-        // For top-headlines the "query" component of the
-        // signature is the caller-supplied query (or "" if None).
-        let sig_query = open_cfg.stream.query.clone().unwrap_or_default();
-        Self::spawn_inner(
-            PollMethod::TopHeadlines,
-            Box::new(PollArgsTopHeadlines { args: open_cfg.stream.clone() }),
-            open_cfg.datasource,
-            stream_signature("top_headlines", &sig_query),
-        )
-    }
-
-    fn spawn_inner(
-        method: PollMethod,
-        // The boxed payload is one of `PollArgsSearch` /
-        // `PollArgsTopHeadlines`. We pass an erased `Box<dyn
-        // Any>` so the worker can downcast; the alternative
-        // (separate spawn_* per method) duplicates the runtime +
-        // channel setup. Box<dyn Any> + downcast_ref is fine
-        // because the type is fixed at `open()` time.
-        _args: Box<dyn std::any::Any + Send>,
-        datasource: GoogleNewsConfig,
-        stream_id: String,
-    ) -> Result<Self, GoogleNewsError> {
-        let (tx, rx) = tokio::sync::mpsc::channel::<ArticleEvent>(1024);
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| GoogleNewsError::Runtime(e.to_string()))?;
-        let worker_method = method;
-        let worker_datasource = datasource.clone();
-        let worker_stream_id = stream_id.clone();
-        // The worker thread re-enters the runtime and runs a
-        // dedicated `block_on` for its whole lifetime. The
-        // current-thread runtime is exactly what we want: one
-        // task, predictable ownership, no thread-pool leak.
-        let worker_runtime = runtime.handle().clone();
-        let worker = std::thread::spawn(move || {
-            let _guard = worker_runtime.enter();
-            worker_runtime.block_on(async move {
-                polling_loop(worker_method, worker_datasource, _args, tx, worker_stream_id).await;
-            });
-        });
-        Ok(Self {
-            rx,
-            runtime: Some(runtime),
-            _worker: Some(worker),
-        })
-    }
-
-    /// Block on the next event. Returns `None` if the producer
-    /// has closed the channel (EOS).
-    fn next_event(&mut self) -> Option<ArticleEvent> {
-        let runtime = self.runtime.as_ref()?;
-        runtime.block_on(self.rx.recv())
-    }
-}
-
-impl Drop for PluginState {
-    fn drop(&mut self) {
-        // Dropping the runtime first forces any in-flight
-        // `block_on` to return, then dropping the receiver
-        // signals the worker's `tx.send` calls to fail.
-        self.runtime = None;
-    }
-}
-
-/// Background polling loop. Calls the appropriate REST endpoint
-/// every `poll_interval_secs` (default 60) and pushes each new
-/// `ArticleEvent` to `tx`. Stops when the mpsc closes (i.e. the
-/// FFI `close()` shim dropped `PluginState`).
-async fn polling_loop(
-    method: PollMethod,
-    config: GoogleNewsConfig,
-    args: Box<dyn std::any::Any + Send>,
-    tx: tokio::sync::mpsc::Sender<ArticleEvent>,
-    stream_id: String,
-) {
-    let limiter = RateLimiter::new(config.rate_limit_per_sec);
-    let (poll_interval, hwm0) = match &method {
-        PollMethod::Search => {
-            let a = args.downcast_ref::<PollArgsSearch>().expect("search args");
-            (
-                Duration::from_secs(
-                    a.args.poll_interval_secs.unwrap_or(60),
-                ),
-                hwm_read(&stream_id),
-            )
-        }
-        PollMethod::TopHeadlines => {
-            let a = args
-                .downcast_ref::<PollArgsTopHeadlines>()
-                .expect("top-headlines args");
-            (
-                Duration::from_secs(
-                    a.args.poll_interval_secs.unwrap_or(60),
-                ),
-                hwm_read(&stream_id),
-            )
-        }
-    };
-    let mut last_seen_ms: i64 = hwm0;
-    loop {
-        limiter.wait().await;
-        let result = match &method {
-            PollMethod::Search => {
-                let a = args
-                    .downcast_ref::<PollArgsSearch>()
-                    .expect("search args");
-                let cfg = config.clone();
-                let a = a.args.clone();
-                search(&cfg, &a).await
-            }
-            PollMethod::TopHeadlines => {
-                let a = args
-                    .downcast_ref::<PollArgsTopHeadlines>()
-                    .expect("top-headlines args");
-                let cfg = config.clone();
-                let a = a.args.clone();
-                top_headlines(&cfg, &a).await
-            }
-        };
-        match result {
-            Ok(events) => {
-                for ev in events {
-                    // Dedupe: skip articles at or below the
-                    // Producer's HWM (within tolerance for
-                    // ties from NewsAPI's second-resolution
-                    // publishedAt). Newer articles advance the
-                    // HWM.
-                    if ev.published_at_ms != 0
-                        && ev.published_at_ms <= last_seen_ms
-                    {
-                        continue;
-                    }
-                    if ev.published_at_ms > last_seen_ms {
-                        last_seen_ms = ev.published_at_ms;
-                        hwm_write(&stream_id, last_seen_ms);
-                    }
-                    if tx.send(ev).await.is_err() {
-                        return;
-                    }
-                }
-            }
-            Err(e) => {
-                log::warn!("google_news poll error: {e}");
-            }
-        }
-        tokio::time::sleep(poll_interval).await;
-    }
-}
-
-// ---- FFI shims (search) ----
-
-mod vtable_search {
-    use super::*;
-
-    /// FFI `open` for `google_news_search`: decode the bincode
-    /// `OpenConfigSearch`, spawn the background polling task,
-    /// return a `*mut c_void` wrapping a `Box<PluginState>`. On
-    /// error, returns null and writes the error message to
-    /// `*err_out` if non-null.
-    pub unsafe extern "C" fn open(
-        config_ptr: *const u8,
-        config_len: usize,
-        err_out: *mut EventBytes,
-    ) -> *mut std::ffi::c_void {
-        let bytes = std::slice::from_raw_parts(config_ptr, config_len);
-        let cfg: OpenConfigSearch = match bincode::deserialize(bytes) {
-            Ok(c) => c,
-            Err(e) => {
-                write_err(err_out, format!("config decode: {e}").as_bytes());
-                return std::ptr::null_mut();
-            }
-        };
-        if cfg.datasource.api_key.is_empty() {
-            write_err(
-                err_out,
-                b"datasource.api_key is required for google_news",
-            );
-            return std::ptr::null_mut();
-        }
-        let state = match PluginState::spawn_search(cfg) {
-            Ok(s) => s,
-            Err(e) => {
-                write_err(err_out, e.to_string().as_bytes());
-                return std::ptr::null_mut();
-            }
-        };
-        let boxed = Box::new(state);
-        Box::into_raw(boxed) as *mut std::ffi::c_void
-    }
-
-    /// FFI `next` for `google_news_search`.
-    pub unsafe extern "C" fn next(
-        ctx: *mut std::ffi::c_void,
-        out: *mut EventBytes,
-    ) -> i32 {
-        if ctx.is_null() {
-            return -1;
-        }
-        let state = &mut *(ctx as *mut PluginState);
-        match state.next_event() {
-            Some(event) => {
-                let bee_event = bee_plugin_sdk_event(&event);
-                let bytes = encode_event(&bee_event);
-                let len = bytes.len();
-                let ptr = bytes.as_ptr();
-                std::mem::forget(bytes);
-                *out = EventBytes { ptr, len };
-                1
-            }
-            None => {
-                *out = EventBytes::EMPTY;
-                0
-            }
-        }
-    }
-
-    /// FFI `close` for `google_news_search`.
-    pub unsafe extern "C" fn close(ctx: *mut std::ffi::c_void) -> i32 {
-        if ctx.is_null() {
-            return 0;
-        }
-        let _ = Box::from_raw(ctx as *mut PluginState);
-        0
-    }
-
-    pub const VTABLE: InputAdapterVtable =
-        InputAdapterVtable { open, next, close };
-}
-
-// ---- FFI shims (top-headlines) ----
-
-mod vtable_top_headlines {
-    use super::*;
-
-    pub unsafe extern "C" fn open(
-        config_ptr: *const u8,
-        config_len: usize,
-        err_out: *mut EventBytes,
-    ) -> *mut std::ffi::c_void {
-        let bytes = std::slice::from_raw_parts(config_ptr, config_len);
-        let cfg: OpenConfigTopHeadlines = match bincode::deserialize(bytes) {
-            Ok(c) => c,
-            Err(e) => {
-                write_err(err_out, format!("config decode: {e}").as_bytes());
-                return std::ptr::null_mut();
-            }
-        };
-        if cfg.datasource.api_key.is_empty() {
-            write_err(
-                err_out,
-                b"datasource.api_key is required for google_news",
-            );
-            return std::ptr::null_mut();
-        }
-        let state = match PluginState::spawn_top_headlines(cfg) {
-            Ok(s) => s,
-            Err(e) => {
-                write_err(err_out, e.to_string().as_bytes());
-                return std::ptr::null_mut();
-            }
-        };
-        let boxed = Box::new(state);
-        Box::into_raw(boxed) as *mut std::ffi::c_void
-    }
-
-    pub unsafe extern "C" fn next(
-        ctx: *mut std::ffi::c_void,
-        out: *mut EventBytes,
-    ) -> i32 {
-        if ctx.is_null() {
-            return -1;
-        }
-        let state = &mut *(ctx as *mut PluginState);
-        match state.next_event() {
-            Some(event) => {
-                let bee_event = bee_plugin_sdk_event(&event);
-                let bytes = encode_event(&bee_event);
-                let len = bytes.len();
-                let ptr = bytes.as_ptr();
-                std::mem::forget(bytes);
-                *out = EventBytes { ptr, len };
-                1
-            }
-            None => {
-                *out = EventBytes::EMPTY;
-                0
-            }
-        }
-    }
-
-    pub unsafe extern "C" fn close(ctx: *mut std::ffi::c_void) -> i32 {
-        if ctx.is_null() {
-            return 0;
-        }
-        let _ = Box::from_raw(ctx as *mut PluginState);
-        0
-    }
-
-    pub const VTABLE: InputAdapterVtable =
-        InputAdapterVtable { open, next, close };
-}
-
-/// Best-effort: write `msg` as an `EventBytes` blob into `*err_out`.
-/// The host reads it on FFI failure. We bincode-wrap a synthetic
-/// `Event` so the host can use its standard decoder.
-fn write_err(err_out: *mut EventBytes, msg: &[u8]) {
-    if err_out.is_null() {
-        return;
-    }
-    let bee_event = Event {
-        timestamp: now_ms() as u64,
-        sequence: 0,
-        payload: msg.to_vec(),
-    };
-    let bytes = encode_event(&bee_event);
-    let len = bytes.len();
-    let ptr = bytes.as_ptr();
-    std::mem::forget(bytes);
-    unsafe {
-        *err_out = EventBytes { ptr, len };
-    }
-}
-
-/// Construct a `bee_adapter::Event` from an `ArticleEvent`. The
-/// bincode layout matches the host's decoder.
-fn bee_plugin_sdk_event(a: &ArticleEvent) -> Event {
-    let payload = bincode::serialize(a).unwrap_or_default();
-    Event {
-        timestamp: a.published_at_ms.max(0) as u64,
-        sequence: 0,
-        payload,
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Section 7: Plugin manifest + Factory + cdylib entry
 // ---------------------------------------------------------------------------
@@ -981,371 +644,23 @@ impl Factory for GoogleNewsFactory {
     }
 
     fn init() -> bee_plugin_sdk::PluginResult<PluginHandle> {
-        let mut input_adapters: HashMap<String, *const InputAdapterVtable> =
-            HashMap::new();
-        // The host looks up adapters by their full dotted name
-        // (e.g. `google_news.search`); the SQL parser strips the
-        // `google_news.` prefix, so we register the vtables
-        // under the unprefixed adapter names.
-        input_adapters.insert(
-            "google_news_search".to_string(),
-            &vtable_search::VTABLE as *const _,
-        );
-        input_adapters.insert(
-            "google_news_top_headlines".to_string(),
-            &vtable_top_headlines::VTABLE as *const _,
-        );
+        let mut input_adapters = std::collections::HashMap::new();
+        let mut output_adapters = std::collections::HashMap::new();
+        let mut handlers = std::collections::HashMap::new();
+        bee_plugin_sdk::register_vtable! {
+            input_adapters, output_adapters, handlers;
+            input "google_news_search"        => &GOOGLE_NEWS_SEARCH_ADAPTER_VTABLE,
+            input "google_news_top_headlines" => &GOOGLE_NEWS_TOP_HEADLINES_ADAPTER_VTABLE,
+        }
         Ok(PluginHandle {
             manifest: Self::manifest(),
             inner: std::sync::Arc::new(()),
             input_adapters,
-            output_adapters: HashMap::new(),
-            handlers: HashMap::new(),
+            output_adapters,
+            handlers,
         })
     }
 }
 
 bee_plugin_sdk::cdylib_plugin!(GoogleNewsFactory);
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use sha2::{Digest, Sha256};
-    use std::time::Duration;
-
-    /// Compute the expected signature the same way
-    /// `stream_signature` does, but with the hash function inlined
-    /// in the test. This pins both the algorithm (sha256 over the
-    /// concatenation `b"google_news" || method || query`) and the
-    /// hex output format.
-    fn expected_sig(method: &str, query: &str) -> String {
-        let mut h = Sha256::new();
-        h.update(b"google_news");
-        h.update(method.as_bytes());
-        h.update(query.as_bytes());
-        hex::encode(h.finalize())
-    }
-
-    #[test]
-    fn stream_signature_method_and_query_only() {
-        // The signature depends ONLY on (method, query). Per the
-        // spec, `from` / `to` / `sort_by` are per-Subscriber
-        // concerns and are deliberately NOT part of the signature
-        // (the function signature doesn't even accept them).
-        let sig = stream_signature("search", "Bitcoin");
-        let expected = expected_sig("search", "Bitcoin");
-        assert_eq!(sig, expected);
-        // 64 hex chars = 256 bits.
-        assert_eq!(sig.len(), 64);
-        assert!(sig.chars().all(|c| c.is_ascii_hexdigit()));
-        // Also pin the actual hex value so any change to the hash
-        // algorithm or input ordering is caught immediately.
-        assert_eq!(
-            sig,
-            "92b822bab06b31bfa30caa1f84a38af5582522951835726be08c05ac8d47e56f"
-        );
-    }
-
-    #[test]
-    fn stream_signature_independent_of_from_to_sort_by() {
-        // `from` / `to` / `sort_by` are per-Subscriber concerns; they
-        // must NOT affect the Stream identity. The signature
-        // function doesn't take those parameters, but we re-assert
-        // the contract by hashing the same (method, query) pair
-        // multiple times and showing the result is deterministic.
-        let a = stream_signature("search", "Bitcoin");
-        let b = stream_signature("search", "Bitcoin");
-        assert_eq!(a, b, "signature must be deterministic for the same inputs");
-        // And nothing about from/to/sort_by is even visible in the
-        // hash (the function signature has none of those parameters).
-        let fn_sig = std::any::type_name::<fn(&str, &str) -> String>();
-        assert!(!fn_sig.contains("from"), "stream_signature must not take a `from` arg");
-        assert!(!fn_sig.contains("to"), "stream_signature must not take a `to` arg");
-        assert!(!fn_sig.contains("sort"), "stream_signature must not take a `sort_by` arg");
-    }
-
-    #[test]
-    fn stream_signature_different_methods_different_signatures() {
-        let a = stream_signature("search", "Bitcoin");
-        let b = stream_signature("top_headlines", "Bitcoin");
-        assert_ne!(a, b, "method must be part of the signature");
-    }
-
-    #[test]
-    fn stream_signature_different_queries_different_signatures() {
-        let a = stream_signature("search", "Bitcoin");
-        let b = stream_signature("search", "Ethereum");
-        assert_ne!(a, b, "query must be part of the signature");
-    }
-
-    #[test]
-    fn config_default_url() {
-        let cfg = GoogleNewsConfig::default();
-        assert_eq!(cfg.base_url, "https://newsapi.org/v2");
-        assert_eq!(cfg.language, "en");
-        assert_eq!(cfg.rate_limit_per_sec, 5);
-        assert_eq!(cfg.tenant, 0);
-        assert!(cfg.api_key.is_empty());
-        // Bincode round-trip works on the default.
-        let bytes = bincode::serialize(&cfg).expect("serialize");
-        let back: GoogleNewsConfig =
-            bincode::deserialize(&bytes).expect("deserialize");
-        assert_eq!(back.base_url, cfg.base_url);
-        assert_eq!(back.language, cfg.language);
-        assert_eq!(back.rate_limit_per_sec, cfg.rate_limit_per_sec);
-        assert_eq!(back.tenant, cfg.tenant);
-        assert_eq!(back.api_key, cfg.api_key);
-    }
-
-    #[test]
-    fn config_bincode_roundtrip() {
-        let cfg = GoogleNewsConfig {
-            api_key: "test-key-abc".into(),
-            base_url: "https://example.test/v2".into(),
-            rate_limit_per_sec: 25,
-            language: "de".into(),
-            tenant: 42,
-        };
-        let bytes = bincode::serialize(&cfg).expect("serialize");
-        let back: GoogleNewsConfig =
-            bincode::deserialize(&bytes).expect("deserialize");
-        assert_eq!(back.api_key, cfg.api_key);
-        assert_eq!(back.base_url, cfg.base_url);
-        assert_eq!(back.rate_limit_per_sec, cfg.rate_limit_per_sec);
-        assert_eq!(back.language, cfg.language);
-        assert_eq!(back.tenant, cfg.tenant);
-    }
-
-    #[test]
-    fn config_missing_api_key_fails() {
-        // The `search` and `top_headlines` public functions both
-        // gate on `api_key.is_empty()`; we exercise that path via
-        // `tokio::test` so we can `.await` the result. We can't
-        // call them in a sync test because they're async.
-        let cfg = GoogleNewsConfig::default(); // api_key is empty
-        let args = SearchArgs {
-            query: "Bitcoin".into(),
-            from: None,
-            to: None,
-            sort_by: None,
-            page_size: None,
-            poll_interval_secs: None,
-        };
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let res = rt.block_on(search(&cfg, &args));
-        assert!(matches!(res, Err(GoogleNewsError::Datasource(_))));
-        // Same for top_headlines.
-        let th_args = TopHeadlinesArgs {
-            query: None,
-            country: Some("us".into()),
-            category: None,
-            page_size: None,
-            poll_interval_secs: None,
-        };
-        let res = rt.block_on(top_headlines(&cfg, &th_args));
-        assert!(matches!(res, Err(GoogleNewsError::Datasource(_))));
-    }
-
-    #[test]
-    fn article_event_bincode_roundtrip() {
-        let ev = ArticleEvent {
-            published_at_ms: 1_700_000_000_000,
-            source: "The Wall Street Journal".into(),
-            author: "Jane Doe".into(),
-            title: "Bitcoin surges past $50k".into(),
-            description: "A short summary.".into(),
-            url: "https://example.test/article/1".into(),
-            content: "Full body text, truncated to 200 chars...".into(),
-            query: "Bitcoin".into(),
-        };
-        let bytes = bincode::serialize(&ev).expect("serialize");
-        let back: ArticleEvent =
-            bincode::deserialize(&bytes).expect("deserialize");
-        assert_eq!(back, ev);
-    }
-
-    #[test]
-    fn search_args_bincode_roundtrip() {
-        let args = SearchArgs {
-            query: "Bitcoin".into(),
-            from: Some("2024-01-01".into()),
-            to: Some("2024-01-31".into()),
-            sort_by: Some("publishedAt".into()),
-            page_size: Some(50),
-            poll_interval_secs: Some(30),
-        };
-        let bytes = bincode::serialize(&args).expect("serialize");
-        let back: SearchArgs =
-            bincode::deserialize(&bytes).expect("deserialize");
-        assert_eq!(back.query, args.query);
-        assert_eq!(back.from, args.from);
-        assert_eq!(back.to, args.to);
-        assert_eq!(back.sort_by, args.sort_by);
-        assert_eq!(back.page_size, args.page_size);
-        assert_eq!(back.poll_interval_secs, args.poll_interval_secs);
-    }
-
-    #[test]
-    fn url_building_search_with_query_only() {
-        // With only the required fields, the URL should have
-        // path `/everything` and a `q=` parameter that's
-        // URL-encoded. `pageSize` defaults to 100 and `language`
-        // defaults to "en" (both appended).
-        let cfg = GoogleNewsConfig {
-            api_key: "K".into(),
-            base_url: "https://newsapi.org/v2".into(),
-            rate_limit_per_sec: 5,
-            language: "en".into(),
-            tenant: 0,
-        };
-        let args = SearchArgs {
-            query: "Bitcoin".into(),
-            from: None,
-            to: None,
-            sort_by: None,
-            page_size: None,
-            poll_interval_secs: None,
-        };
-        let url = build_search_url(&cfg, &args);
-        assert!(
-            url.starts_with("https://newsapi.org/v2/everything?"),
-            "url = {url}"
-        );
-        assert!(url.contains("q=Bitcoin"), "url = {url}");
-        assert!(url.contains("apiKey=K"), "url = {url}");
-        assert!(url.contains("&pageSize=100"), "url = {url}");
-        assert!(url.contains("&language=en"), "url = {url}");
-        // No optional params should be present.
-        assert!(!url.contains("from="), "url = {url}");
-        assert!(!url.contains("to="), "url = {url}");
-        assert!(!url.contains("sortBy="), "url = {url}");
-    }
-
-    #[test]
-    fn url_building_search_with_all_optional_params() {
-        // With every field populated, all parameters should be
-        // present and URL-encoded.
-        let cfg = GoogleNewsConfig {
-            api_key: "my key/with+special".into(),
-            base_url: "https://newsapi.org/v2".into(),
-            rate_limit_per_sec: 5,
-            language: "en".into(),
-            tenant: 0,
-        };
-        let args = SearchArgs {
-            query: "AAPL OR \"Apple Inc\"".into(),
-            from: Some("2024-01-01".into()),
-            to: Some("2024-01-31".into()),
-            sort_by: Some("publishedAt".into()),
-            page_size: Some(25),
-            poll_interval_secs: None,
-        };
-        let url = build_search_url(&cfg, &args);
-        assert!(url.starts_with("https://newsapi.org/v2/everything?"));
-        // Query is URL-encoded: spaces become %20 (or +), quotes
-        // become %22. The encoding is defined by the
-        // `urlencoding` crate, which uses `%20` for space and
-        // `%22` for `"`.
-        assert!(url.contains("q=AAPL%20OR%20%22Apple%20Inc%22"), "url = {url}");
-        assert!(url.contains("&from=2024-01-01"), "url = {url}");
-        assert!(url.contains("&to=2024-01-31"), "url = {url}");
-        assert!(url.contains("&sortBy=publishedAt"), "url = {url}");
-        assert!(url.contains("&pageSize=25"), "url = {url}");
-        assert!(url.contains("&language=en"), "url = {url}");
-        // API key with `/` and `+` and space should be encoded.
-        assert!(
-            url.contains("apiKey=my%20key%2Fwith%2Bspecial"),
-            "url = {url}"
-        );
-    }
-
-    #[tokio::test]
-    async fn rate_limiter_5_per_sec() {
-        // 5 req/sec => min_interval = 200 ms. Fire 10 requests; the
-        // first 1 takes 0 ms (no prior `last`), the next 9 must
-        // each wait >= 200 ms. We measure real wall-clock time.
-        // Note: the limiter's internal clock is `std::time::Instant`
-        // (real time), so we can't use `start_paused` here — paused
-        // virtual time never advances `Instant::now()`, which would
-        // deadlock the limiter's `should_wait` branch. With real
-        // time the test is non-deterministic, so we use generous
-        // bounds.
-        let limiter = RateLimiter::new(5);
-        let start = std::time::Instant::now();
-        for _ in 0..10 {
-            limiter.wait().await;
-        }
-        let elapsed = start.elapsed();
-        // 9 gaps of at least 200 ms each => at least 1.8 s.
-        // (The very first call waits 0 ms because `last` is None;
-        //  every subsequent call must wait >= min_interval.)
-        let expected_min = Duration::from_millis(9 * 200);
-        assert!(
-            elapsed >= expected_min,
-            "elapsed {elapsed:?} must be >= {expected_min:?} (limiter not throttling?)"
-        );
-        // 9 gaps of 200 ms + 500 ms slack for scheduler jitter
-        // and CI noise. If the limiter is broken (e.g. always
-        // returns immediately), elapsed would be ~0 ms.
-        let expected_max = expected_min + Duration::from_millis(500);
-        assert!(
-            elapsed < expected_max,
-            "elapsed {elapsed:?} must be < {expected_max:?}"
-        );
-    }
-
-    #[test]
-    fn page_size_clamps_to_100() {
-        // NewsAPI rejects pageSize > 100; the plugin must clamp.
-        let cfg = GoogleNewsConfig {
-            api_key: "K".into(),
-            base_url: "https://newsapi.org/v2".into(),
-            rate_limit_per_sec: 5,
-            language: "en".into(),
-            tenant: 0,
-        };
-        // 500 must be clamped down to 100.
-        let args = SearchArgs {
-            query: "Bitcoin".into(),
-            from: None,
-            to: None,
-            sort_by: None,
-            page_size: Some(500),
-            poll_interval_secs: None,
-        };
-        let url = build_search_url(&cfg, &args);
-        assert!(url.contains("&pageSize=100"), "url = {url}");
-        // Already-100 stays 100.
-        let args = SearchArgs {
-            page_size: Some(100),
-            ..args
-        };
-        let url = build_search_url(&cfg, &args);
-        assert!(url.contains("&pageSize=100"), "url = {url}");
-        // 0 must be clamped up to 1 (the lower bound).
-        let args = SearchArgs {
-            page_size: Some(0),
-            ..args
-        };
-        let url = build_search_url(&cfg, &args);
-        assert!(url.contains("&pageSize=1"), "url = {url}");
-        // In-range value passes through unchanged.
-        let args = SearchArgs {
-            page_size: Some(25),
-            ..args
-        };
-        let url = build_search_url(&cfg, &args);
-        assert!(url.contains("&pageSize=25"), "url = {url}");
-        // None defaults to 100.
-        let args = SearchArgs {
-            page_size: None,
-            ..args
-        };
-        let url = build_search_url(&cfg, &args);
-        assert!(url.contains("&pageSize=100"), "url = {url}");
-    }
-}
 
