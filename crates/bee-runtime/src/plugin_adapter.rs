@@ -122,56 +122,37 @@ impl InputAdapter for PluginInputAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bee_plugin_sdk::vtable::InputAdapterVtable;
-    use std::sync::Mutex;
+    use bee_adapter::{AdapterError, AdapterResult, Event};
+    use bee_plugin_macro::{bee_adapter, bee_method};
 
-    struct Ctx {
-        event_bytes: Mutex<Vec<u8>>,
-    }
+    /// S33.6.1: test fixture using the
+    /// `#[bee_adapter]` macro. Replaces the
+    /// hand-written `FAKE_VTABLE`.
+    pub struct FakeAdapter;
 
-    unsafe extern "C" fn fake_open(
-        _config_ptr: *const u8,
-        _config_len: usize,
-        _err_out: *mut EventBytes,
-    ) -> *mut std::ffi::c_void {
-        let ctx = Box::new(Ctx { event_bytes: Mutex::new(vec![]) });
-        Box::into_raw(ctx) as *mut std::ffi::c_void
-    }
-
-    unsafe extern "C" fn fake_next(
-        ctx: *mut std::ffi::c_void,
-        out: *mut EventBytes,
-    ) -> i32 {
-        let ctx = &*(ctx as *const Ctx);
-        let bytes = ctx.event_bytes.lock().unwrap().clone();
-        if bytes.is_empty() {
-            *out = EventBytes::EMPTY;
-            return 0;
+    #[bee_adapter(input, name = "fake")]
+    impl FakeAdapter {
+        #[bee_method(slot = "open")]
+        pub async fn open(_config: Vec<u8>) -> AdapterResult<Self> {
+            Ok(Self)
         }
-        let len = bytes.len();
-        let ptr = bytes.as_ptr();
-        std::mem::forget(bytes);
-        *out = EventBytes { ptr, len };
-        1
-    }
 
-    unsafe extern "C" fn fake_close(ctx: *mut std::ffi::c_void) -> i32 {
-        if !ctx.is_null() {
-            drop(Box::from_raw(ctx as *mut Ctx));
+        #[bee_method(slot = "next")]
+        pub async fn next_one(&mut self) -> AdapterResult<Option<Event>> {
+            // Empty stream by default (the
+            // test only exercises the vtable
+            // registration path).
+            Ok(None)
         }
-        0
-    }
 
-    static FAKE_VTABLE: InputAdapterVtable = InputAdapterVtable {
-        open: fake_open,
-        next: fake_next,
-        close: fake_close,
-    };
+        #[bee_method(slot = "close")]
+        pub async fn close(self) -> AdapterResult<()> { Ok(()) }
+    }
 
     #[test]
     fn registry_lookup_returns_registered_vtable() {
         let reg = PluginAdapterRegistry::global();
-        reg.register_input("s33-test-registered", &FAKE_VTABLE);
+        reg.register_input("s33-test-registered", &FAKE_ADAPTER_VTABLE);
         let v = reg.lookup_input("s33-test-registered");
         assert!(v.is_some());
         reg.input.write().unwrap().remove("s33-test-registered");
