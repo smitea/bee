@@ -634,24 +634,39 @@ pub enum CreateKind {
     Sink,
 }
 
-/// Strip `CREATE SINK <name> AS <body>` and return `(Some(name), body)`.
-/// If no `CREATE SINK` is found, return `(None, sql)`.
+/// Strip `CREATE SINK <name> AS <body>` and rewrite to
+/// `<body>` followed by `EMIT INTO <name>`. Returns
+/// `(Some(name), rewritten_sql)`. If no `CREATE SINK` is
+/// found, returns `(None, original_sql)`.
+///
+/// MVP constraint: exactly one `CREATE SINK` per SQL. If
+/// more than one is found, returns `(None, original_sql)`
+/// so the downstream DataFusion parser will surface a
+/// clean error.
 pub fn strip_create_sink(sql: &str) -> (Option<String>, String) {
     let mut out = String::with_capacity(sql.len());
     let mut rest = sql;
-    let mut hit_name = None;
+    let mut hit_name: Option<String> = None;
 
     while let Some(hit) = find_create_statement(rest) {
         if hit.kind == CreateKind::Sink {
+            // MVP: only one SINK allowed.
+            if hit_name.is_some() {
+                return (None, sql.to_string());
+            }
+            // Output everything before the CREATE statement,
+            // then the body (so DataFusion compiles the body),
+            // then `EMIT INTO <name>` so the existing
+            // strip_emit_into arm picks it up.
             out.push_str(&rest[..hit.start]);
-            hit_name = Some(hit.name);
-            // We substitute the rest with the body so DataFusion can compile the body.
-            // Wait, what if there are multiple statements? The MVP assumes 1 sink.
-            // Let's just output the body instead of the CREATE statement.
             out.push_str(&hit.body);
+            out.push_str("\nEMIT INTO ");
+            out.push_str(&hit.name);
+            out.push('\n');
+            hit_name = Some(hit.name);
             rest = &rest[hit.end..];
-            break; // only handle one sink
         } else {
+            // Non-SINK CREATE statement: keep verbatim.
             out.push_str(&rest[..hit.end]);
             rest = &rest[hit.end..];
         }
@@ -1715,6 +1730,36 @@ mod tests {
         // subquery, which still contains `naturals` (a different
         // name; not substituted here).
         assert!(cleaned.contains("FROM (SELECT n, fib_step(n) AS fib_value FROM naturals)"), "cleaned: {cleaned}");
+    }
+
+    #[test]
+    fn strip_create_sink_appends_emit_into_target() {
+        let sql = "CREATE SINK foo AS SELECT * FROM bar;";
+        let (name, rewritten) = strip_create_sink(sql);
+        assert_eq!(name, Some("foo".to_string()));
+        // The body must still be present.
+        assert!(
+            rewritten.contains("SELECT * FROM bar"),
+            "rewritten must contain the body; got: {rewritten}"
+        );
+        // The SINK must have been appended as `EMIT INTO foo`.
+        assert!(
+            rewritten.contains("EMIT INTO foo"),
+            "rewritten must contain `EMIT INTO foo`; got: {rewritten}"
+        );
+        // The `CREATE SINK foo AS` prefix must have been stripped.
+        assert!(
+            !rewritten.contains("CREATE SINK"),
+            "rewritten must NOT contain `CREATE SINK`; got: {rewritten}"
+        );
+    }
+
+    #[test]
+    fn strip_create_sink_returns_none_when_no_sink() {
+        let sql = "SELECT 1;";
+        let (name, rewritten) = strip_create_sink(sql);
+        assert_eq!(name, None);
+        assert_eq!(rewritten, sql);
     }
 
     #[test]
