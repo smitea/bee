@@ -64,6 +64,8 @@
 
 use std::sync::{Arc, Mutex, OnceLock};
 
+use bee_adapter::{AdapterError, AdapterResult, Event};
+use bee_plugin_macro::{bee_adapter, bee_method};
 use bee_plugin_sdk::{
     vtable::{InputAdapterVtable, OutputAdapterVtable},
     AdapterDescriptor, Factory, PluginHandle, PluginManifest, PluginName,
@@ -595,7 +597,7 @@ impl Factory for MongodbFactory {
     }
 
     fn init() -> bee_plugin_sdk::PluginResult<PluginHandle> {
-        let insert_vtable: *const OutputAdapterVtable = &insert_shim::VTABLE;
+        let insert_vtable: *const OutputAdapterVtable = &INSERT_ADAPTER_VTABLE;
         let insert_many_vtable: *const OutputAdapterVtable = &insert_many_shim::VTABLE;
         let update_vtable: *const OutputAdapterVtable = &update_shim::VTABLE;
         let find_vtable: *const InputAdapterVtable = &find_shim::VTABLE;
@@ -655,134 +657,90 @@ fn block_on<F: std::future::Future>(f: F) -> F::Output {
 }
 
 // ---------------------------------------------------------------------------
-// 10.1: `mongodb_insert` Output vtable
+// 10.1: `mongodb_insert` Output vtable — macro-generated (S33.6.1)
 // ---------------------------------------------------------------------------
 
-mod insert_shim {
-    use super::{
-        block_on, do_insert, acquire_client, MongodbConfig, InsertArgs,
-        MongodbError,
-    };
-    use bee_plugin_sdk::event::{decode_event, EventBytes};
-    use bee_plugin_sdk::vtable::OutputAdapterVtable;
-    use std::sync::Arc;
+/// FFI-facing config blob: bundles the Datasource config
+/// with the per-call `InsertArgs` so a single `open()` call
+/// carries both. The Compiler packages them as one bincode
+/// blob.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct InsertOpenConfig {
+    pub datasource: MongodbConfig,
+    pub stream: InsertArgs,
+}
 
-    /// FFI ctx. Holds the shared `Client`, the database name,
-    /// and the per-call `InsertArgs`. Re-built on every `open`.
-    pub struct Ctx {
-        pub client: Arc<mongodb::Client>,
-        pub database: String,
-        pub args: InsertArgs,
-    }
+/// The `mongodb_insert` OutputAdapter. Holds a shared
+/// `Arc<mongodb::Client>` (from the process-global
+/// `OnceLock`), the database name from the config, and the
+/// per-call `InsertArgs` (which include the collection —
+/// ADR-0010 per-call collection).
+pub struct InsertAdapter {
+    pub client: Arc<mongodb::Client>,
+    pub database: String,
+    pub args: InsertArgs,
+}
 
-    /// FFI-facing config blob: bundles the Datasource config
-    /// with the per-call `InsertArgs` so a single `open()` call
-    /// carries both. The Compiler packages them as one bincode
-    /// blob.
-    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-    pub struct OpenConfig {
-        pub datasource: MongodbConfig,
-        pub stream: InsertArgs,
-    }
-
-    pub unsafe extern "C" fn open(
-        config_ptr: *const u8,
-        config_len: usize,
-        err_out: *mut EventBytes,
-    ) -> *mut std::ffi::c_void {
-        let bytes = std::slice::from_raw_parts(config_ptr, config_len);
-        let cfg: OpenConfig = match bincode::deserialize(bytes) {
-            Ok(c) => c,
-            Err(e) => {
-                let err = MongodbError::Bincode(format!("config: {e}"));
-                err.write_into(err_out);
-                return std::ptr::null_mut();
-            }
-        };
+#[bee_adapter(output, name = "insert")]
+impl InsertAdapter {
+    /// Decode `InsertOpenConfig` (Datasource +
+    /// `InsertArgs`) from the bincode-encoded config blob,
+    /// acquire the shared `Client`, and build the adapter.
+    #[bee_method(slot = "open")]
+    pub async fn open(config: Vec<u8>) -> AdapterResult<Self> {
+        let cfg: InsertOpenConfig = bincode::deserialize(&config)
+            .map_err(|e| AdapterError::Open(
+                format!("insert open: bincode: {e}")
+            ))?;
         if cfg.datasource.uri.is_empty() {
-            let err = MongodbError::Config("uri is required".into());
-            err.write_into(err_out);
-            return std::ptr::null_mut();
+            return Err(AdapterError::Open("insert open: uri is required".into()));
         }
         if cfg.datasource.database.is_empty() {
-            let err = MongodbError::Config("database is required".into());
-            err.write_into(err_out);
-            return std::ptr::null_mut();
+            return Err(AdapterError::Open("insert open: database is required".into()));
         }
         if cfg.stream.collection.is_empty() {
-            let err = MongodbError::Config("collection is required".into());
-            err.write_into(err_out);
-            return std::ptr::null_mut();
+            return Err(AdapterError::Open("insert open: collection is required".into()));
         }
-        let client = match block_on(acquire_client(&cfg.datasource)) {
-            Ok(c) => c,
-            Err(e) => {
-                e.write_into(err_out);
-                return std::ptr::null_mut();
-            }
-        };
-        let ctx = Ctx {
+        let client = acquire_client(&cfg.datasource).await
+            .map_err(|e| AdapterError::Open(
+                format!("insert open: acquire_client: {e}")
+            ))?;
+        Ok(Self {
             client,
             database: cfg.datasource.database,
             args: cfg.stream,
-        };
-        let boxed = Box::new(ctx);
-        Box::into_raw(boxed) as *mut std::ffi::c_void
+        })
     }
 
-    pub unsafe extern "C" fn emit(
-        ctx: *mut std::ffi::c_void,
-        event_ptr: *const u8,
-        event_len: usize,
-        _err_out: *mut bee_plugin_sdk::event::EventBytes,
-    ) -> i32 {
-        if ctx.is_null() {
-            return -1;
-        }
-        // We still bincode-decode the `Event` so the host-side
-        // envelope (`timestamp` / `sequence`) is honoured, but
-        // we ignore its payload (the actual document is in
-        // `args.document` from the `open` call). The host
-        // pushes one `Event` per row regardless; the row data
-        // itself was already bundled into `OpenConfig`.
-        let event_bytes = std::slice::from_raw_parts(event_ptr, event_len);
-        let _event = match decode_event(event_bytes) {
-            Ok(e) => e,
-            Err(e) => {
-                log::warn!("mongodb.insert: bincode decode: {e}");
-                return -1;
-            }
-        };
-        let ctx = &*(ctx as *const Ctx);
-        match block_on(do_insert(&ctx.client, &ctx.database, &ctx.args)) {
+    /// The host pushes one `Event` per row; the row data was
+    /// already bundled into `InsertOpenConfig::stream`. We
+    /// decode the `Event` envelope (so the host-side
+    /// `timestamp` / `sequence` are honoured) and call the
+    /// existing `do_insert` helper.
+    #[bee_method(slot = "emit")]
+    pub async fn emit_one(&mut self, _event: Event) -> AdapterResult<()> {
+        match do_insert(&self.client, &self.database, &self.args).await {
             Ok(inserted_id) => {
                 log::info!(
                     "mongodb.insert: collection={} inserted_id={}",
-                    ctx.args.collection,
+                    self.args.collection,
                     inserted_id
                 );
-                0
+                Ok(())
             }
             Err(e) => {
                 log::warn!("mongodb.insert: {e}");
-                -1
+                Err(AdapterError::Emit(format!("insert: {e}")))
             }
         }
     }
 
-    pub unsafe extern "C" fn close(ctx: *mut std::ffi::c_void) -> i32 {
-        if ctx.is_null() {
-            return 0;
-        }
-        let _ = Box::from_raw(ctx as *mut Ctx);
-        0
+    #[bee_method(slot = "close")]
+    pub async fn close(self) -> AdapterResult<()> {
+        // Drop the Arc<Client>; the driver's pool shuts
+        // down when the last reference drops.
+        Ok(())
     }
-
-    pub const VTABLE: OutputAdapterVtable = OutputAdapterVtable {
-        open,
-        emit,
-        close,
-    };
 }
 
 // ---------------------------------------------------------------------------

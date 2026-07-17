@@ -11,6 +11,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 bee-plugin-sdk = { path = "../../../crates/bee-plugin-sdk" }
+bee-plugin-macro = { path = "../../../crates/bee-plugin-macro" }
 bee-adapter = { path = "../../../crates/bee-adapter" }
 tokio = { version = "1", features = ["full"] }
 mongodb = { version = "3", default-features = false, features = ["compat-3-3-0", "bson-2", "rustls-tls", "dns-resolver"] }
