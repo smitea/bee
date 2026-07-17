@@ -17,6 +17,19 @@
 //! - `PluginHandle` opaque type (plugin-side state)
 //! - `Plugin` trait (the Rust trait a `cdylib` plugin implements)
 //!
+//! ## Port vs Adapter (the `kv` module, S43)
+//!
+//! Per the project's LANGUAGE.md: *one adapter = hypothetical seam;
+//! two adapters = real one*. The `kv` module introduces a [`Kv`] port
+//! trait with two concrete adapters — [`InProcessKv`] (a process-global
+//! `HashMap` for tests + plugin MVP) and [`HostKv`] (wraps the
+//! `BeeHostV1::kv_get` / `kv_put` FFI function pointers for production).
+//! Plugin authors hold an `Arc<dyn Kv>` and call `.get(key)` / `.put(key,
+//! value)` regardless of which adapter is in use. The host-allocated
+//! bytes returned by `HostKv::get` are leaked in the MVP (the plugin
+//! process exits shortly); threading the host's free fn pointer is a
+//! follow-up.
+//!
 //! Out of S19 scope (follow-ups):
 //! - `libloading` glue in `bee-registry` (S19+ follow-up)
 //! - A test `cdylib` plugin that exercises real FFI (S19+ follow-up)
