@@ -598,7 +598,7 @@ impl Factory for MongodbFactory {
 
     fn init() -> bee_plugin_sdk::PluginResult<PluginHandle> {
         let insert_vtable: *const OutputAdapterVtable = &INSERT_ADAPTER_VTABLE;
-        let insert_many_vtable: *const OutputAdapterVtable = &insert_many_shim::VTABLE;
+        let insert_many_vtable: *const OutputAdapterVtable = &INSERT_MANY_ADAPTER_VTABLE;
         let update_vtable: *const OutputAdapterVtable = &update_shim::VTABLE;
         let find_vtable: *const InputAdapterVtable = &find_shim::VTABLE;
         let aggregate_vtable: *const InputAdapterVtable = &aggregate_shim::VTABLE;
@@ -744,123 +744,73 @@ impl InsertAdapter {
 }
 
 // ---------------------------------------------------------------------------
-// 10.2: `mongodb_insert_many` Output vtable
+// 10.2: `mongodb_insert_many` Output vtable — macro-generated (S33.6.1)
 // ---------------------------------------------------------------------------
 
-mod insert_many_shim {
-    use super::{
-        block_on, do_insert_many, acquire_client, MongodbConfig,
-        InsertManyArgs, MongodbError,
-    };
-    use bee_plugin_sdk::event::{decode_event, EventBytes};
-    use bee_plugin_sdk::vtable::OutputAdapterVtable;
-    use std::sync::Arc;
+/// FFI-facing config blob for `mongodb_insert_many`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct InsertManyOpenConfig {
+    pub datasource: MongodbConfig,
+    pub stream: InsertManyArgs,
+}
 
-    pub struct Ctx {
-        pub client: Arc<mongodb::Client>,
-        pub database: String,
-        pub args: InsertManyArgs,
-    }
+/// The `mongodb_insert_many` OutputAdapter.
+pub struct InsertManyAdapter {
+    pub client: Arc<mongodb::Client>,
+    pub database: String,
+    pub args: InsertManyArgs,
+}
 
-    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-    pub struct OpenConfig {
-        pub datasource: MongodbConfig,
-        pub stream: InsertManyArgs,
-    }
-
-    pub unsafe extern "C" fn open(
-        config_ptr: *const u8,
-        config_len: usize,
-        err_out: *mut EventBytes,
-    ) -> *mut std::ffi::c_void {
-        let bytes = std::slice::from_raw_parts(config_ptr, config_len);
-        let cfg: OpenConfig = match bincode::deserialize(bytes) {
-            Ok(c) => c,
-            Err(e) => {
-                let err = MongodbError::Bincode(format!("config: {e}"));
-                err.write_into(err_out);
-                return std::ptr::null_mut();
-            }
-        };
+#[bee_adapter(output, name = "insert_many")]
+impl InsertManyAdapter {
+    #[bee_method(slot = "open")]
+    pub async fn open(config: Vec<u8>) -> AdapterResult<Self> {
+        let cfg: InsertManyOpenConfig = bincode::deserialize(&config)
+            .map_err(|e| AdapterError::Open(
+                format!("insert_many open: bincode: {e}")
+            ))?;
         if cfg.datasource.uri.is_empty() {
-            let err = MongodbError::Config("uri is required".into());
-            err.write_into(err_out);
-            return std::ptr::null_mut();
+            return Err(AdapterError::Open("insert_many open: uri is required".into()));
         }
         if cfg.datasource.database.is_empty() {
-            let err = MongodbError::Config("database is required".into());
-            err.write_into(err_out);
-            return std::ptr::null_mut();
+            return Err(AdapterError::Open("insert_many open: database is required".into()));
         }
         if cfg.stream.collection.is_empty() {
-            let err = MongodbError::Config("collection is required".into());
-            err.write_into(err_out);
-            return std::ptr::null_mut();
+            return Err(AdapterError::Open("insert_many open: collection is required".into()));
         }
-        let client = match block_on(acquire_client(&cfg.datasource)) {
-            Ok(c) => c,
-            Err(e) => {
-                e.write_into(err_out);
-                return std::ptr::null_mut();
-            }
-        };
-        let ctx = Ctx {
+        let client = acquire_client(&cfg.datasource).await
+            .map_err(|e| AdapterError::Open(
+                format!("insert_many open: acquire_client: {e}")
+            ))?;
+        Ok(Self {
             client,
             database: cfg.datasource.database,
             args: cfg.stream,
-        };
-        let boxed = Box::new(ctx);
-        Box::into_raw(boxed) as *mut std::ffi::c_void
+        })
     }
 
-    pub unsafe extern "C" fn emit(
-        ctx: *mut std::ffi::c_void,
-        event_ptr: *const u8,
-        event_len: usize,
-        _err_out: *mut bee_plugin_sdk::event::EventBytes,
-    ) -> i32 {
-        if ctx.is_null() {
-            return -1;
-        }
-        let event_bytes = std::slice::from_raw_parts(event_ptr, event_len);
-        let _event = match decode_event(event_bytes) {
-            Ok(e) => e,
-            Err(e) => {
-                log::warn!("mongodb.insert_many: bincode decode: {e}");
-                return -1;
-            }
-        };
-        let ctx = &*(ctx as *const Ctx);
-        match block_on(do_insert_many(&ctx.client, &ctx.database, &ctx.args)) {
+    #[bee_method(slot = "emit")]
+    pub async fn emit_one(&mut self, _event: Event) -> AdapterResult<()> {
+        match do_insert_many(&self.client, &self.database, &self.args).await {
             Ok(ids) => {
                 log::info!(
-                    "mongodb.insert_many: collection={} count={} ids={:?}",
-                    ctx.args.collection,
-                    ids.len(),
-                    ids
+                    "mongodb.insert_many: collection={} count={}",
+                    self.args.collection,
+                    ids.len()
                 );
-                0
+                Ok(())
             }
             Err(e) => {
                 log::warn!("mongodb.insert_many: {e}");
-                -1
+                Err(AdapterError::Emit(format!("insert_many: {e}")))
             }
         }
     }
 
-    pub unsafe extern "C" fn close(ctx: *mut std::ffi::c_void) -> i32 {
-        if ctx.is_null() {
-            return 0;
-        }
-        let _ = Box::from_raw(ctx as *mut Ctx);
-        0
+    #[bee_method(slot = "close")]
+    pub async fn close(self) -> AdapterResult<()> {
+        Ok(())
     }
-
-    pub const VTABLE: OutputAdapterVtable = OutputAdapterVtable {
-        open,
-        emit,
-        close,
-    };
 }
 
 // ---------------------------------------------------------------------------
