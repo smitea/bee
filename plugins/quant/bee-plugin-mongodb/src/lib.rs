@@ -599,7 +599,7 @@ impl Factory for MongodbFactory {
     fn init() -> bee_plugin_sdk::PluginResult<PluginHandle> {
         let insert_vtable: *const OutputAdapterVtable = &INSERT_ADAPTER_VTABLE;
         let insert_many_vtable: *const OutputAdapterVtable = &INSERT_MANY_ADAPTER_VTABLE;
-        let update_vtable: *const OutputAdapterVtable = &update_shim::VTABLE;
+        let update_vtable: *const OutputAdapterVtable = &UPDATE_ADAPTER_VTABLE;
         let find_vtable: *const InputAdapterVtable = &find_shim::VTABLE;
         let aggregate_vtable: *const InputAdapterVtable = &aggregate_shim::VTABLE;
 
@@ -817,118 +817,73 @@ impl InsertManyAdapter {
 // 10.3: `mongodb_update` Output vtable
 // ---------------------------------------------------------------------------
 
-mod update_shim {
-    use super::{
-        block_on, do_update, acquire_client, MongodbConfig, UpdateArgs,
-        MongodbError,
-    };
-    use bee_plugin_sdk::event::{decode_event, EventBytes};
-    use bee_plugin_sdk::vtable::OutputAdapterVtable;
-    use std::sync::Arc;
+// ---------------------------------------------------------------------------
+// 10.3: `mongodb_update` Output vtable — macro-generated (S33.6.1)
+// ---------------------------------------------------------------------------
 
-    pub struct Ctx {
-        pub client: Arc<mongodb::Client>,
-        pub database: String,
-        pub args: UpdateArgs,
-    }
+/// FFI-facing config blob for `mongodb_update`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct UpdateOpenConfig {
+    pub datasource: MongodbConfig,
+    pub stream: UpdateArgs,
+}
 
-    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-    pub struct OpenConfig {
-        pub datasource: MongodbConfig,
-        pub stream: UpdateArgs,
-    }
+/// The `mongodb_update` OutputAdapter.
+pub struct UpdateAdapter {
+    pub client: Arc<mongodb::Client>,
+    pub database: String,
+    pub args: UpdateArgs,
+}
 
-    pub unsafe extern "C" fn open(
-        config_ptr: *const u8,
-        config_len: usize,
-        err_out: *mut EventBytes,
-    ) -> *mut std::ffi::c_void {
-        let bytes = std::slice::from_raw_parts(config_ptr, config_len);
-        let cfg: OpenConfig = match bincode::deserialize(bytes) {
-            Ok(c) => c,
-            Err(e) => {
-                let err = MongodbError::Bincode(format!("config: {e}"));
-                err.write_into(err_out);
-                return std::ptr::null_mut();
-            }
-        };
+#[bee_adapter(output, name = "update")]
+impl UpdateAdapter {
+    #[bee_method(slot = "open")]
+    pub async fn open(config: Vec<u8>) -> AdapterResult<Self> {
+        let cfg: UpdateOpenConfig = bincode::deserialize(&config)
+            .map_err(|e| AdapterError::Open(
+                format!("update open: bincode: {e}")
+            ))?;
         if cfg.datasource.uri.is_empty() {
-            let err = MongodbError::Config("uri is required".into());
-            err.write_into(err_out);
-            return std::ptr::null_mut();
+            return Err(AdapterError::Open("update open: uri is required".into()));
         }
         if cfg.datasource.database.is_empty() {
-            let err = MongodbError::Config("database is required".into());
-            err.write_into(err_out);
-            return std::ptr::null_mut();
+            return Err(AdapterError::Open("update open: database is required".into()));
         }
         if cfg.stream.collection.is_empty() {
-            let err = MongodbError::Config("collection is required".into());
-            err.write_into(err_out);
-            return std::ptr::null_mut();
+            return Err(AdapterError::Open("update open: collection is required".into()));
         }
-        let client = match block_on(acquire_client(&cfg.datasource)) {
-            Ok(c) => c,
-            Err(e) => {
-                e.write_into(err_out);
-                return std::ptr::null_mut();
-            }
-        };
-        let ctx = Ctx {
+        let client = acquire_client(&cfg.datasource).await
+            .map_err(|e| AdapterError::Open(
+                format!("update open: acquire_client: {e}")
+            ))?;
+        Ok(Self {
             client,
             database: cfg.datasource.database,
             args: cfg.stream,
-        };
-        let boxed = Box::new(ctx);
-        Box::into_raw(boxed) as *mut std::ffi::c_void
+        })
     }
 
-    pub unsafe extern "C" fn emit(
-        ctx: *mut std::ffi::c_void,
-        event_ptr: *const u8,
-        event_len: usize,
-        _err_out: *mut bee_plugin_sdk::event::EventBytes,
-    ) -> i32 {
-        if ctx.is_null() {
-            return -1;
-        }
-        let event_bytes = std::slice::from_raw_parts(event_ptr, event_len);
-        let _event = match decode_event(event_bytes) {
-            Ok(e) => e,
-            Err(e) => {
-                log::warn!("mongodb.update: bincode decode: {e}");
-                return -1;
-            }
-        };
-        let ctx = &*(ctx as *const Ctx);
-        match block_on(do_update(&ctx.client, &ctx.database, &ctx.args)) {
+    #[bee_method(slot = "emit")]
+    pub async fn emit_one(&mut self, _event: Event) -> AdapterResult<()> {
+        match do_update(&self.client, &self.database, &self.args).await {
             Ok((matched, modified)) => {
                 log::info!(
                     "mongodb.update: collection={} matched={matched} modified={modified}",
-                    ctx.args.collection
+                    self.args.collection
                 );
-                0
+                Ok(())
             }
             Err(e) => {
                 log::warn!("mongodb.update: {e}");
-                -1
+                Err(AdapterError::Emit(format!("update: {e}")))
             }
         }
     }
 
-    pub unsafe extern "C" fn close(ctx: *mut std::ffi::c_void) -> i32 {
-        if ctx.is_null() {
-            return 0;
-        }
-        let _ = Box::from_raw(ctx as *mut Ctx);
-        0
+    #[bee_method(slot = "close")]
+    pub async fn close(self) -> AdapterResult<()> {
+        Ok(())
     }
-
-    pub const VTABLE: OutputAdapterVtable = OutputAdapterVtable {
-        open,
-        emit,
-        close,
-    };
 }
 
 // ---------------------------------------------------------------------------
