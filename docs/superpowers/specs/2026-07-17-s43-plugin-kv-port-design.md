@@ -65,18 +65,18 @@ The two adapters justify the seam — per the project's LANGUAGE.md: *one adapte
 
 ## Acceptance criteria
 
-- [ ] `cargo build --workspace` green
-- [ ] `cargo test --workspace` ≥ 420 passed, 0 failed
-- [ ] `cargo test -p bee-plugin-sdk` — new + refreshed tests pass:
+- [x] `cargo build --workspace` green
+- [x] `cargo test --workspace` ≥ 420 passed, 0 failed (achieved 425)
+- [x] `cargo test -p bee-plugin-sdk` — new + refreshed tests pass:
   - `kv::tests::in_process_kv_roundtrip`
   - `kv::tests::in_process_kv_is_shared_across_adapters`
   - `kv::tests::in_process_kv_default_is_isolated`
   - `kv::tests::host_kv_round_trip_through_mock_ffi`
   - `kv::tests::host_kv_returns_none_on_not_found`
-- [ ] `kv_get` / `kv_put` exposed in `BeeHostV1` (already true; verified by `bee_host_v1_has_kv_function_pointers` test)
-- [ ] `HostKv` adapter round-trips through the FFI without panicking
-- [ ] Stash's `kv.rs` applied on top of HEAD; existing plugin code paths unaffected (no plugin imports the new module yet)
-- [ ] Doc note at top of `crates/bee-plugin-sdk/src/lib.rs` mentions the port-vs-adapter pattern with a 1-line reference to the new `kv` module
+- [x] `kv_get` / `kv_put` exposed in `BeeHostV1` (already true; verified by `bee_host_v1_has_kv_function_pointers` test)
+- [x] `HostKv` adapter round-trips through the FFI without panicking
+- [x] Stash's `kv.rs` applied on top of HEAD; existing plugin code paths unaffected (no plugin imports the new module yet)
+- [x] Doc note at top of `crates/bee-plugin-sdk/src/lib.rs` mentions the port-vs-adapter pattern with a 1-line reference to the new `kv` module
 
 ## Sign-off matrix
 
