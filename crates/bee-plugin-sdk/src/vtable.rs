@@ -64,11 +64,13 @@ pub struct OutputAdapterVtable {
     /// Emit one event. The host has already bincode-encoded the
     /// `Event` (see `event::encode_event`); the plugin
     /// bincode-decodes + processes. Returns 0 on success, -1 on
-    /// error.
+    /// error. If non-null, `err_out` receives a bincode-encoded
+    /// `Event` whose `payload` is the error message (S33.6.1).
     pub emit: unsafe extern "C" fn(
         ctx: *mut std::ffi::c_void,
         event_ptr: *const u8,
         event_len: usize,
+        err_out: *mut EventBytes,
     ) -> i32,
 
     pub close: unsafe extern "C" fn(

@@ -734,6 +734,7 @@ mod insert_shim {
         ctx: *mut std::ffi::c_void,
         event_ptr: *const u8,
         event_len: usize,
+        _err_out: *mut bee_plugin_sdk::event::EventBytes,
     ) -> i32 {
         if ctx.is_null() {
             return -1;
@@ -858,6 +859,7 @@ mod insert_many_shim {
         ctx: *mut std::ffi::c_void,
         event_ptr: *const u8,
         event_len: usize,
+        _err_out: *mut bee_plugin_sdk::event::EventBytes,
     ) -> i32 {
         if ctx.is_null() {
             return -1;
@@ -977,6 +979,7 @@ mod update_shim {
         ctx: *mut std::ffi::c_void,
         event_ptr: *const u8,
         event_len: usize,
+        _err_out: *mut bee_plugin_sdk::event::EventBytes,
     ) -> i32 {
         if ctx.is_null() {
             return -1;

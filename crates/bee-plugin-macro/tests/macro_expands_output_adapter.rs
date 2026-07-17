@@ -49,7 +49,7 @@ async fn mock_output_vtable_round_trip() {
         };
         let bytes = bincode::serialize(&event).unwrap();
         let rc = unsafe {
-            ((*vtable).emit)(ctx, bytes.as_ptr(), bytes.len())
+            ((*vtable).emit)(ctx, bytes.as_ptr(), bytes.len(), std::ptr::null_mut())
         };
         assert_eq!(rc, 0, "emit failed on seq {seq}");
     }

@@ -439,6 +439,7 @@ fn gen_output_adapter(impl_block: ItemImpl) -> TokenStream {
             ctx: *mut ::std::ffi::c_void,
             event_ptr: *const u8,
             event_len: usize,
+            err_out: *mut bee_plugin_sdk::event::EventBytes,
         ) -> i32 {
             let ctx = unsafe { &*(ctx as *const #ctx_ty) };
             let bytes = unsafe {
@@ -457,12 +458,36 @@ fn gen_output_adapter(impl_block: ItemImpl) -> TokenStream {
                 None => return -1,
             };
             let fut = adapter.#emit_rust(event);
-            match ::tokio::runtime::Handle::try_current() {
+            let result = match ::tokio::runtime::Handle::try_current() {
                 Ok(h) => ::tokio::task::block_in_place(|| h.block_on(fut)),
                 Err(_) => ::futures::executor::block_on(fut),
+            };
+            match result {
+                Ok(()) => 0,
+                Err(e) => {
+                    // Write the error message to err_out
+                    // as an Event-shaped blob so the host
+                    // can pick it up via the same decoder.
+                    if !err_out.is_null() {
+                        let err_event = bee_adapter::Event {
+                            timestamp: 0,
+                            sequence: 0,
+                            payload: format!("{e}").into_bytes(),
+                        };
+                        let bytes = match bincode::serialize(&err_event) {
+                            Ok(b) => b,
+                            Err(_) => return -1,
+                        };
+                        let len = bytes.len();
+                        let ptr = bytes.as_ptr();
+                        ::std::mem::forget(bytes);
+                        unsafe {
+                            *err_out = bee_plugin_sdk::event::EventBytes { ptr, len };
+                        }
+                    }
+                    -1
+                }
             }
-            .map(|_| 0)
-            .unwrap_or(-1)
         }
 
         unsafe extern "C" fn #close_ffi(
