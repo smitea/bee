@@ -4,20 +4,15 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "Bee performance showcase plugin: Fibonacci Handler UDFs (fib_seed + fib_step with KV-backed state)."
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-bee-plugin-sdk = { path = "../../crates/bee-plugin-sdk" }
-bee-plugin-macro = { path = "../../crates/bee-plugin-macro" }
-bee-adapter = { path = "../../crates/bee-adapter" }
+bee-adapter = { workspace = true }
+bee-plugin-sdk = { workspace = true }
+bee-plugin-macro = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 bincode = "1"
-hex = "0.4"
 tokio = { workspace = true }
 futures = "0.3"
-
-[lints]
-workspace = true
