@@ -758,6 +758,15 @@ pub fn strip_create_source_and_view(sql: &str) -> (Vec<CreateDefinition>, String
     while let Some(hit) = find_create_statement(rest) {
         // Append everything before the CREATE statement.
         cleaned.push_str(&rest[..hit.start]);
+        // S42: leave `CREATE SINK` in `cleaned` (don't record it
+        // as a definition; the SINK name has no references to
+        // substitute). `strip_create_sink` will find and rewrite
+        // it later in the pipeline.
+        if hit.kind == CreateKind::Sink {
+            cleaned.push_str(&rest[hit.start..hit.end]);
+            rest = &rest[hit.end..];
+            continue;
+        }
         // Record the definition.
         defs.push(CreateDefinition {
             kind: hit.kind,

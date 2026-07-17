@@ -48,9 +48,15 @@ pub use preprocess::{
 ///
 /// Call this before handing the SQL to DataFusion. Each
 /// transformation is a no-op if the SQL does not contain the
-/// relevant syntax. Returns the translated SQL, ready for
-/// DataFusion's parser.
-pub fn preprocess_sql_v2(sql: &str) -> std::result::Result<String, datafusion::error::DataFusionError> {
+/// relevant syntax. Returns `(emit_target, translated_sql)`:
+/// - `emit_target` is `Some(...)` if the SQL had an `EMIT INTO`
+///   (either explicit or via `CREATE SINK`'s desugaring).
+/// - `translated_sql` is the SQL ready for DataFusion's parser
+///   (with `EMIT INTO` stripped, `CREATE SINK` replaced by its body,
+///   and `ASOF JOIN` rewritten to `LEFT JOIN LATERAL`).
+pub fn preprocess_sql_v2(
+    sql: &str,
+) -> std::result::Result<(Option<EmitTarget>, String), datafusion::error::DataFusionError> {
     // 1. Strip leading `use` lines. The S29 preprocessor does this
     //    (and also runs strict mode + inline-credential checks),
     //    but we re-implement the strip here to keep the v2 path
@@ -68,20 +74,18 @@ pub fn preprocess_sql_v2(sql: &str) -> std::result::Result<String, datafusion::e
     // The body itself is left intact for DataFusion to parse.
     let (_sink_name, after_sink) = strip_create_sink(&after_create);
 
-    // 3. Strip `EMIT INTO <target>` prefix. The `run_pipeline`
-    //    entry point also calls `strip_emit_into`, but that call
-    //    happens BEFORE `compile_to_physical_plan` and therefore
-    //    before this preprocessor. To make the v2 preprocessor
-    //    self-contained (callers that skip `run_pipeline` still
-    //    get a valid DataFusion SQL), we strip it here too.
-    let (_target, after_emit) = strip_emit_into(&after_sink);
+    // 3. Strip `EMIT INTO <target>` (now present if the SQL had
+    // either `EMIT INTO` directly or a `CREATE SINK`). The
+    // returned `target` lets callers route the result.
+    let (target, after_emit) = strip_emit_into(&after_sink);
 
     // 4. Translate `ASOF JOIN` → `LEFT JOIN LATERAL`.
-    if after_emit.to_uppercase().contains("ASOF JOIN") {
-        translate_asof(&after_emit)
+    let translated = if after_emit.to_uppercase().contains("ASOF JOIN") {
+        translate_asof(&after_emit)?
     } else {
-        Ok(after_emit)
-    }
+        after_emit
+    };
+    Ok((target, translated))
 }
 
 /// S41 (9c): strip the leading `use ...;` lines from a SQL string.
@@ -135,10 +139,6 @@ pub fn parse_sql(source: &str) -> DfResult<Vec<datafusion::sql::parser::Statemen
             .with_recursion_limit(2000)
             .build()?
             .parse_statements()?;
-    eprintln!("=== DEBUG: parse_sql found {} statements ===", stmts.len());
-    for (i, stmt) in stmts.iter().enumerate() {
-        eprintln!("  stmt[{i}]: {stmt:?}");
-    }
     Ok(stmts.into())
 }
 
@@ -537,14 +537,14 @@ mod tests {
     #[test]
     fn preprocess_v2_passthrough_for_non_asof() {
         let sql = "SELECT a + 1 AS b FROM stream";
-        let out = preprocess_sql_v2(sql).unwrap();
+        let (_target, out) = preprocess_sql_v2(sql).unwrap();
         assert_eq!(out, sql, "non-ASOF SQL must be returned verbatim");
     }
 
     #[test]
     fn preprocess_v2_translates_asof_join() {
         let sql = "SELECT * FROM a ASOF JOIN b ON a.id = b.id AND a.ts >= b.ts";
-        let out = preprocess_sql_v2(sql).unwrap();
+        let (_target, out) = preprocess_sql_v2(sql).unwrap();
         // The translator must produce the LATERAL form (per S41 design §6).
         assert!(
             out.contains("LEFT JOIN LATERAL"),
@@ -567,8 +567,7 @@ mod tests {
     #[test]
     fn debug_preprocess_fibonacci_sql() {
         let sql = std::fs::read_to_string("../../examples/performance/fibonacci.sql").unwrap();
-        let out = preprocess_sql_v2(&sql).unwrap();
-        eprintln!("=== preprocess_sql_v2 output ===\n{out}\n=== END ===");
+        let (_target, out) = preprocess_sql_v2(&sql).unwrap();
         // Just a smoke test — we want to see the output.
         assert!(out.contains("SELECT"), "expected SELECT in: {out}");
     }

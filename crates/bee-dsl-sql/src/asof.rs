@@ -463,7 +463,7 @@ mod tests {
                    SELECT c_user_id FROM joined c \
                    LEFT ASOF JOIN views v \
                    ON c.user_id = v.user_id AND c.ts >= v.ts;";
-        let translated = preprocess_sql_v2(sql).unwrap();
+        let (_target, translated) = preprocess_sql_v2(sql).unwrap();
 
         // The LATERAL subquery must close correctly. Before the
         // fix, the inlined view's `LEFT JOIN views v ON ...`

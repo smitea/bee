@@ -131,7 +131,7 @@ pub async fn compile_to_physical_plan(
         .await?;
     }
 
-    let preprocessed = super::preprocess_sql_v2(sql)?;
+    let (_emit_target, preprocessed) = super::preprocess_sql_v2(sql)?;
     let logical = super::analyze_with_ctx(&ctx, &preprocessed).await?;
     ctx.state().create_physical_plan(&logical).await
 }
@@ -227,11 +227,12 @@ pub async fn run_pipeline_with_config(
     csv_path: &Path,
     config: &RunConfig,
 ) -> Result<String, String> {
-    // S41 (9a): detect `EMIT INTO <target>` prefix and strip it
-    // before the SQL reaches DataFusion (DataFusion's parser
-    // doesn't recognize the keyword). The remaining SQL is a plain
-    // SELECT that DataFusion can plan + execute.
-    let (emit_target, stripped_sql) = crate::preprocess::strip_emit_into(sql);
+    // S42: use the full preprocessor so CREATE SINK is desugared
+    // to `<body>` + `EMIT INTO <name>` BEFORE we extract the
+    // emit target. (Previously, `strip_emit_into` was called on
+    // the raw SQL, which missed the SINK-injected `EMIT INTO`.)
+    let (emit_target, stripped_sql) = super::preprocess_sql_v2(sql)
+        .map_err(|e| format!("preprocess: {e}"))?;
 
     let plan = compile_to_physical_plan(&stripped_sql, csv_path)
         .await
