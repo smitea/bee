@@ -601,7 +601,7 @@ impl Factory for MongodbFactory {
         let insert_many_vtable: *const OutputAdapterVtable = &INSERT_MANY_ADAPTER_VTABLE;
         let update_vtable: *const OutputAdapterVtable = &UPDATE_ADAPTER_VTABLE;
         let find_vtable: *const InputAdapterVtable = &FIND_ADAPTER_VTABLE;
-        let aggregate_vtable: *const InputAdapterVtable = &aggregate_shim::VTABLE;
+        let aggregate_vtable: *const InputAdapterVtable = &AGGREGATE_ADAPTER_VTABLE;
 
         let mut output_adapters = std::collections::HashMap::new();
         output_adapters.insert("insert".to_string(), insert_vtable);
@@ -1030,224 +1030,140 @@ async fn find_poll_loop(
 }
 
 // ---------------------------------------------------------------------------
-// 10.5: `mongodb_aggregate` Input vtable
+// 10.5: `mongodb_aggregate` Input vtable — macro-generated (S33.6.1)
 // ---------------------------------------------------------------------------
 
-mod aggregate_shim {
-    use super::{
-        acquire_client, block_on, do_aggregate_all, MongodbConfig,
-        AggregateArgs, DocumentEvent, MongodbError,
-    };
-    use bee_plugin_sdk::event::{encode_event, EventBytes};
-    use bee_plugin_sdk::vtable::InputAdapterVtable;
-    use std::sync::Arc;
-    use std::time::Duration;
+/// FFI-facing config blob for `mongodb_aggregate`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AggregateOpenConfig {
+    pub datasource: MongodbConfig,
+    pub stream: AggregateArgs,
+}
 
-    pub struct Ctx {
-        pub rx: tokio::sync::mpsc::Receiver<DocumentEvent>,
-        pub ffi_runtime: Arc<tokio::runtime::Runtime>,
-        pub worker: Option<std::thread::JoinHandle<()>>,
-        pub worker_runtime: Option<Arc<tokio::runtime::Runtime>>,
+/// The `mongodb_aggregate` InputAdapter. Same shape as
+/// FindAdapter but calls `do_aggregate_all` per poll.
+pub struct AggregateAdapter {
+    pub _client: Arc<mongodb::Client>,
+    pub rx: tokio::sync::mpsc::Receiver<DocumentEvent>,
+    pub worker: Option<std::thread::JoinHandle<()>>,
+    pub worker_runtime: Option<Arc<tokio::runtime::Runtime>>,
+}
+
+impl Drop for AggregateAdapter {
+    fn drop(&mut self) {
+        self.rx.close();
+        if let Some(h) = self.worker.take() {
+            let _ = h.join();
+        }
+        self.worker_runtime = None;
     }
+}
 
-    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-    pub struct OpenConfig {
-        pub datasource: MongodbConfig,
-        pub stream: AggregateArgs,
-    }
-
-    pub unsafe extern "C" fn open(
-        config_ptr: *const u8,
-        config_len: usize,
-        err_out: *mut EventBytes,
-    ) -> *mut std::ffi::c_void {
-        let bytes = std::slice::from_raw_parts(config_ptr, config_len);
-        let cfg: OpenConfig = match bincode::deserialize(bytes) {
-            Ok(c) => c,
-            Err(e) => {
-                let err = MongodbError::Bincode(format!("config: {e}"));
-                err.write_into(err_out);
-                return std::ptr::null_mut();
-            }
-        };
+#[bee_adapter(input, name = "aggregate")]
+impl AggregateAdapter {
+    #[bee_method(slot = "open")]
+    pub async fn open(config: Vec<u8>) -> AdapterResult<Self> {
+        let cfg: AggregateOpenConfig = bincode::deserialize(&config)
+            .map_err(|e| AdapterError::Open(
+                format!("aggregate open: bincode: {e}")
+            ))?;
         if cfg.datasource.uri.is_empty() {
-            let err = MongodbError::Config("uri is required".into());
-            err.write_into(err_out);
-            return std::ptr::null_mut();
+            return Err(AdapterError::Open("aggregate open: uri is required".into()));
         }
         if cfg.datasource.database.is_empty() {
-            let err = MongodbError::Config("database is required".into());
-            err.write_into(err_out);
-            return std::ptr::null_mut();
+            return Err(AdapterError::Open("aggregate open: database is required".into()));
         }
         if cfg.stream.collection.is_empty() {
-            let err = MongodbError::Config("collection is required".into());
-            err.write_into(err_out);
-            return std::ptr::null_mut();
+            return Err(AdapterError::Open("aggregate open: collection is required".into()));
         }
         if cfg.stream.pipeline.is_empty() {
-            let err = MongodbError::Config("pipeline is required".into());
-            err.write_into(err_out);
-            return std::ptr::null_mut();
+            return Err(AdapterError::Open("aggregate open: pipeline is required".into()));
         }
-        let client = match block_on(acquire_client(&cfg.datasource)) {
-            Ok(c) => c,
-            Err(e) => {
-                e.write_into(err_out);
-                return std::ptr::null_mut();
-            }
-        };
+        let client = acquire_client(&cfg.datasource).await
+            .map_err(|e| AdapterError::Open(
+                format!("aggregate open: acquire_client: {e}")
+            ))?;
 
-        let worker_runtime = match tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-        {
-            Ok(r) => Arc::new(r),
-            Err(e) => {
-                let err = MongodbError::Runtime(e.to_string());
-                err.write_into(err_out);
-                return std::ptr::null_mut();
-            }
-        };
-        let ffi_runtime = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(r) => Arc::new(r),
-            Err(e) => {
-                let err = MongodbError::Runtime(e.to_string());
-                err.write_into(err_out);
-                return std::ptr::null_mut();
-            }
-        };
+        let worker_runtime = Arc::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .map_err(|e| AdapterError::Open(
+                    format!("aggregate open: worker_runtime: {e}")
+                ))?
+        );
 
         let (tx, rx) = tokio::sync::mpsc::channel::<DocumentEvent>(256);
 
         let worker_config = cfg.datasource.clone();
         let worker_args = cfg.stream.clone();
         let worker_client = Arc::clone(&client);
-        let worker_runtime_clone: Arc<tokio::runtime::Runtime> =
-            Arc::clone(&worker_runtime);
-        let worker_handle = match std::thread::Builder::new()
+        let worker_runtime_clone = Arc::clone(&worker_runtime);
+        let worker_handle = std::thread::Builder::new()
             .name("mongodb-aggregate".into())
             .spawn(move || {
                 let _guard = worker_runtime_clone.enter();
-                worker_runtime_clone.block_on(poll_loop(
+                worker_runtime_clone.block_on(aggregate_poll_loop(
                     worker_client,
                     worker_config,
                     worker_args,
                     tx,
                 ));
-            }) {
-            Ok(h) => h,
-            Err(e) => {
-                let err = MongodbError::Runtime(format!("spawn worker: {e}"));
-                err.write_into(err_out);
-                return std::ptr::null_mut();
-            }
-        };
+            })
+            .map_err(|e| AdapterError::Open(
+                format!("aggregate open: spawn worker: {e}")
+            ))?;
 
-        let ctx = Ctx {
+        Ok(Self {
+            _client: client,
             rx,
-            ffi_runtime,
             worker: Some(worker_handle),
             worker_runtime: Some(worker_runtime),
-        };
-        let boxed = Box::new(ctx);
-        Box::into_raw(boxed) as *mut std::ffi::c_void
+        })
     }
 
-    pub unsafe extern "C" fn next(
-        ctx: *mut std::ffi::c_void,
-        out: *mut EventBytes,
-    ) -> i32 {
-        if ctx.is_null() {
-            return -1;
-        }
-        let ctx = &mut *(ctx as *mut Ctx);
-        let event = match ctx.next_event() {
-            Some(e) => e,
-            None => {
-                *out = EventBytes::EMPTY;
-                return 0;
-            }
-        };
-        let bytes = encode_event(&event);
-        let len = bytes.len();
-        let ptr = bytes.as_ptr();
-        std::mem::forget(bytes);
-        *out = EventBytes { ptr, len };
-        1
-    }
-
-    pub unsafe extern "C" fn close(ctx: *mut std::ffi::c_void) -> i32 {
-        if ctx.is_null() {
-            return 0;
-        }
-        let _ = Box::from_raw(ctx as *mut Ctx);
-        0
-    }
-
-    impl Ctx {
-        pub fn next_event(&mut self) -> Option<bee_adapter::Event> {
-            let rx = &mut self.rx;
-            let doc = self.ffi_runtime.block_on(async move { rx.recv().await })?;
-            Some(doc.to_event())
+    #[bee_method(slot = "next")]
+    pub async fn next_one(&mut self) -> AdapterResult<Option<Event>> {
+        match self.rx.recv().await {
+            Some(doc) => Ok(Some(doc.to_event())),
+            None => Ok(None),
         }
     }
 
-    impl Drop for Ctx {
-        fn drop(&mut self) {
-            self.rx.close();
-            if let Some(h) = self.worker.take() {
-                let _ = h.join();
-            }
-            self.worker_runtime = None;
-        }
+    #[bee_method(slot = "close")]
+    pub async fn close(self) -> AdapterResult<()> {
+        Ok(())
     }
+}
 
-    async fn poll_loop(
-        client: Arc<mongodb::Client>,
-        config: MongodbConfig,
-        args: AggregateArgs,
-        tx: tokio::sync::mpsc::Sender<DocumentEvent>,
-    ) {
-        let poll_interval = Duration::from_millis(args.effective_poll_ms());
-        let mut ticker = tokio::time::interval(poll_interval);
-        loop {
-            ticker.tick().await;
-            match do_aggregate_all(
-                &client,
-                &config.database,
-                &args.collection,
-                &args.pipeline,
-            )
-            .await
-            {
-                Ok(rows) => {
-                    for row in rows {
-                        let event = DocumentEvent {
-                            collection: args.collection.clone(),
-                            document: bson::to_vec(&row).unwrap_or_default(),
-                        };
-                        if tx.send(event).await.is_err() {
-                            return;
-                        }
+async fn aggregate_poll_loop(
+    client: Arc<mongodb::Client>,
+    config: MongodbConfig,
+    args: AggregateArgs,
+    tx: tokio::sync::mpsc::Sender<DocumentEvent>,
+) {
+    let poll_interval = std::time::Duration::from_millis(args.effective_poll_ms());
+    let mut ticker = tokio::time::interval(poll_interval);
+    loop {
+        ticker.tick().await;
+        match do_aggregate_all(&client, &config.database, &args.collection, &args.pipeline).await {
+            Ok(rows) => {
+                for row in rows {
+                    let event = DocumentEvent {
+                        collection: args.collection.clone(),
+                        document: bson::to_vec(&row).unwrap_or_default(),
+                    };
+                    if tx.send(event).await.is_err() {
+                        return;
                     }
                 }
-                Err(e) => {
-                    log::warn!("mongodb.aggregate: {e}");
-                }
+            }
+            Err(e) => {
+                log::warn!("mongodb.aggregate: {e}");
             }
         }
     }
-
-    pub const VTABLE: InputAdapterVtable = InputAdapterVtable {
-        open,
-        next,
-        close,
-    };
 }
 
 // ---------------------------------------------------------------------------
