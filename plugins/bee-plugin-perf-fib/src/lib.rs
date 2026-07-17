@@ -57,7 +57,7 @@ impl FibSeedHandler {
 
 pub fn plugin_manifest() -> PluginManifest {
     PluginManifest {
-        name: PluginName("perf_fib".into()),
+        name: PluginName("bee-plugin-perf-fib".into()),
         feature_version: "1.0.0".into(),
         abi_version: "v1".into(),
         adapters: vec![],

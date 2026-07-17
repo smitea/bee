@@ -597,27 +597,25 @@ impl Factory for MongodbFactory {
     }
 
     fn init() -> bee_plugin_sdk::PluginResult<PluginHandle> {
-        let insert_vtable: *const OutputAdapterVtable = &INSERT_ADAPTER_VTABLE;
-        let insert_many_vtable: *const OutputAdapterVtable = &INSERT_MANY_ADAPTER_VTABLE;
-        let update_vtable: *const OutputAdapterVtable = &UPDATE_ADAPTER_VTABLE;
-        let find_vtable: *const InputAdapterVtable = &FIND_ADAPTER_VTABLE;
-        let aggregate_vtable: *const InputAdapterVtable = &AGGREGATE_ADAPTER_VTABLE;
-
-        let mut output_adapters = std::collections::HashMap::new();
-        output_adapters.insert("insert".to_string(), insert_vtable);
-        output_adapters.insert("insert_many".to_string(), insert_many_vtable);
-        output_adapters.insert("update".to_string(), update_vtable);
-
         let mut input_adapters = std::collections::HashMap::new();
-        input_adapters.insert("find".to_string(), find_vtable);
-        input_adapters.insert("aggregate".to_string(), aggregate_vtable);
+        let mut output_adapters = std::collections::HashMap::new();
+        let mut handlers = std::collections::HashMap::new();
+
+        bee_plugin_sdk::register_vtable! {
+            input_adapters, output_adapters, handlers;
+            output "insert"      => &INSERT_ADAPTER_VTABLE,
+            output "insert_many" => &INSERT_MANY_ADAPTER_VTABLE,
+            output "update"      => &UPDATE_ADAPTER_VTABLE,
+            input  "find"        => &FIND_ADAPTER_VTABLE,
+            input  "aggregate"   => &AGGREGATE_ADAPTER_VTABLE,
+        }
 
         Ok(PluginHandle {
             manifest: Self::manifest(),
             inner: Arc::new(()),
             input_adapters,
             output_adapters,
-            handlers: std::collections::HashMap::new(),
+            handlers,
         })
     }
 }
