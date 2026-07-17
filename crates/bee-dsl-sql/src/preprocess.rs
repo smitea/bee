@@ -1817,6 +1817,17 @@ mod tests {
     }
 
     #[test]
+    fn strip_create_sink_rejects_multiple_sinks() {
+        let sql = "CREATE SINK foo AS SELECT 1;\nCREATE SINK bar AS SELECT 2;";
+        let (name, rewritten) = strip_create_sink(sql);
+        // MVP: only one SINK allowed; the second SINK causes
+        // `strip_create_sink` to abort and return the original
+        // SQL. DataFusion will then surface a clean parse error.
+        assert_eq!(name, None);
+        assert_eq!(rewritten, sql);
+    }
+
+    #[test]
     fn strip_create_chains_substitutions() {
         // The S41 demo: CREATE SOURCE naturals → CREATE VIEW
         // fib_stream (referencing naturals) → final SELECT
