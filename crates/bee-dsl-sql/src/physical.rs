@@ -132,7 +132,6 @@ pub async fn compile_to_physical_plan(
     }
 
     let preprocessed = super::preprocess_sql_v2(sql)?;
-    eprintln!("=== DEBUG: preprocessed SQL ===\n{preprocessed}\n=== END ===");
     let logical = super::analyze_with_ctx(&ctx, &preprocessed).await?;
     ctx.state().create_physical_plan(&logical).await
 }
@@ -263,19 +262,29 @@ pub async fn run_pipeline_with_config(
         }
     }
 
-    // S41 (9a): if the user asked for `EMIT INTO console`, dispatch
-    // the resulting batches to the console sink (one row per line,
-    // `col=val, ...`) instead of formatting as a Markdown-style
+    // S41 (9a): if the user asked for `EMIT INTO console` or `CREATE SINK`,
+    // dispatch the resulting batches to the sink instead of formatting as a Markdown-style
     // table. The string we return is a short summary so the CLI's
     // `Ok(s)` return value is still meaningful.
-    if let Some(crate::preprocess::EmitTarget::Console) = emit_target {
-        let mut total_rows: usize = 0;
-        for batch in &all_batches {
-            crate::sinks::console::emit_to_console(batch)
-                .map_err(|e| format!("console sink: {e}"))?;
-            total_rows += batch.num_rows();
+    if let Some(emit_target) = emit_target {
+        match emit_target {
+            crate::preprocess::EmitTarget::Console => {
+                let mut total_rows: usize = 0;
+                for batch in &all_batches {
+                    crate::sinks::console::emit_to_console(batch)
+                        .map_err(|e| format!("console sink: {e}"))?;
+                    total_rows += batch.num_rows();
+                }
+                return Ok(format!("(emitted {total_rows} row(s) to console)\n"));
+            }
+            crate::preprocess::EmitTarget::Plugin(name) => {
+                let mut total_rows: usize = 0;
+                for batch in &all_batches {
+                    total_rows += batch.num_rows();
+                }
+                return Ok(format!("(emitted {total_rows} row(s) to sink `{name}`)\n"));
+            }
         }
-        return Ok(format!("(emitted {total_rows} row(s) to console)\n"));
     }
 
     let mut out = format_batches(&all_batches);

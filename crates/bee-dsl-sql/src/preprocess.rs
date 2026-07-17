@@ -518,11 +518,13 @@ pub fn check_emit_into(
 /// `Console` (built-in, writes rows to stdout). Future sinks
 /// (InfluxDB, MongoDB, …) will be added as enum variants and a
 /// corresponding arm in [`strip_emit_into`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EmitTarget {
     /// `EMIT INTO console` — write rows to stdout, one per line,
     /// formatted as `col1=val1, col2=val2, ...`.
     Console,
+    /// `CREATE SINK <name> AS <body>` — write rows to the named plugin.
+    Plugin(String),
 }
 
 /// S41 (9a / 9c): recognize and strip an `EMIT INTO <target>` prefix
@@ -566,34 +568,42 @@ pub fn strip_emit_into(sql: &str) -> (Option<EmitTarget>, String) {
                 .unwrap_or(after_ws.len());
             let target = &after_ws[..target_end];
             if target.eq_ignore_ascii_case("console") {
-                // Build the output: everything before the `EMIT INTO`
-                // line, then the rest of the `EMIT INTO` line after
-                // the target, then everything after the line.
+                // ... same logic for console ...
                 let before = &sql[..line_start];
                 let after_target = &after_ws[target_end..];
                 let after_line = line_start + line_len;
                 let after = &sql[after_line..];
-                // The "rest of the line" is `after_target` with
-                // leading whitespace trimmed. If it's empty, skip
-                // to `after`.
                 let rest_of_line = after_target.trim_start();
                 if rest_of_line.is_empty() {
-                    // The `EMIT INTO console` is the only content
-                    // on this line. Output is `before + after`.
                     let mut out = String::with_capacity(before.len() + after.len());
                     out.push_str(before);
                     out.push_str(after);
                     return (Some(EmitTarget::Console), out);
                 } else {
-                    // There's more on the same line (the SELECT).
-                    // Output is `before + rest_of_line + after`.
-                    let mut out = String::with_capacity(
-                        before.len() + rest_of_line.len() + after.len(),
-                    );
+                    let mut out = String::with_capacity(before.len() + rest_of_line.len() + after.len());
                     out.push_str(before);
                     out.push_str(rest_of_line);
                     out.push_str(after);
                     return (Some(EmitTarget::Console), out);
+                }
+            } else {
+                // S33.5.3: other targets are treated as plugins.
+                let before = &sql[..line_start];
+                let after_target = &after_ws[target_end..];
+                let after_line = line_start + line_len;
+                let after = &sql[after_line..];
+                let rest_of_line = after_target.trim_start();
+                if rest_of_line.is_empty() {
+                    let mut out = String::with_capacity(before.len() + after.len());
+                    out.push_str(before);
+                    out.push_str(after);
+                    return (Some(EmitTarget::Plugin(target.to_string())), out);
+                } else {
+                    let mut out = String::with_capacity(before.len() + rest_of_line.len() + after.len());
+                    out.push_str(before);
+                    out.push_str(rest_of_line);
+                    out.push_str(after);
+                    return (Some(EmitTarget::Plugin(target.to_string())), out);
                 }
             }
         }
@@ -621,6 +631,33 @@ pub struct CreateDefinition {
 pub enum CreateKind {
     Source,
     View,
+    Sink,
+}
+
+/// Strip `CREATE SINK <name> AS <body>` and return `(Some(name), body)`.
+/// If no `CREATE SINK` is found, return `(None, sql)`.
+pub fn strip_create_sink(sql: &str) -> (Option<String>, String) {
+    let mut out = String::with_capacity(sql.len());
+    let mut rest = sql;
+    let mut hit_name = None;
+
+    while let Some(hit) = find_create_statement(rest) {
+        if hit.kind == CreateKind::Sink {
+            out.push_str(&rest[..hit.start]);
+            hit_name = Some(hit.name);
+            // We substitute the rest with the body so DataFusion can compile the body.
+            // Wait, what if there are multiple statements? The MVP assumes 1 sink.
+            // Let's just output the body instead of the CREATE statement.
+            out.push_str(&hit.body);
+            rest = &rest[hit.end..];
+            break; // only handle one sink
+        } else {
+            out.push_str(&rest[..hit.end]);
+            rest = &rest[hit.end..];
+        }
+    }
+    out.push_str(rest);
+    (hit_name, out)
 }
 
 /// S41 (9c): recognize and strip `CREATE SOURCE` / `CREATE VIEW`
@@ -778,25 +815,34 @@ fn find_as_keyword(upper: &str, original: &str) -> Option<usize> {
 /// and body; `None` if no more CREATE statements are present.
 fn find_create_statement(sql: &str) -> Option<CreateHit> {
     let upper = sql.to_ascii_uppercase();
-    // Try CREATE SOURCE first, then CREATE VIEW. We use the first
-    // match in the string.
-    let (pos, kind) = match (upper.find("CREATE SOURCE"), upper.find("CREATE VIEW")) {
-        (Some(s), Some(v)) => {
-            if s <= v {
-                (s, CreateKind::Source)
-            } else {
-                (v, CreateKind::View)
-            }
+    // Try CREATE SOURCE, CREATE VIEW, CREATE SINK.
+    let s_pos = upper.find("CREATE SOURCE");
+    let v_pos = upper.find("CREATE VIEW");
+    let k_pos = upper.find("CREATE SINK");
+    
+    let mut earliest = None;
+    if let Some(s) = s_pos { earliest = Some((s, CreateKind::Source)); }
+    if let Some(v) = v_pos {
+        if earliest.map_or(true, |(pos, _)| v < pos) {
+            earliest = Some((v, CreateKind::View));
         }
-        (Some(s), None) => (s, CreateKind::Source),
-        (None, Some(v)) => (v, CreateKind::View),
-        (None, None) => return None,
+    }
+    if let Some(k) = k_pos {
+        if earliest.map_or(true, |(pos, _)| k < pos) {
+            earliest = Some((k, CreateKind::Sink));
+        }
+    }
+
+    let (pos, kind) = match earliest {
+        Some(x) => x,
+        None => return None,
     };
 
-    // Skip "CREATE SOURCE" or "CREATE VIEW" (13 chars).
+    // Skip "CREATE SOURCE" or "CREATE VIEW" or "CREATE SINK" (13 or 11 chars).
     let kw_len = match kind {
         CreateKind::Source => "CREATE SOURCE".len(),
         CreateKind::View => "CREATE VIEW".len(),
+        CreateKind::Sink => "CREATE SINK".len(),
     };
     let after_kw = &sql[pos + kw_len..];
     let trimmed = after_kw.trim_start();
@@ -1628,8 +1674,8 @@ mod tests {
     #[test]
     fn strip_emit_into_unknown_target_passes_through() {
         let (target, remaining) = strip_emit_into("EMIT INTO something_else SELECT 1");
-        assert_eq!(target, None);
-        assert_eq!(remaining, "EMIT INTO something_else SELECT 1");
+        assert_eq!(target, Some(EmitTarget::Plugin("something_else".to_string())));
+        assert_eq!(remaining, "SELECT 1");
     }
 
     // ---- S41 (9c): CREATE SOURCE / CREATE VIEW preprocessor ----

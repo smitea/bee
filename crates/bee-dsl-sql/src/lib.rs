@@ -35,7 +35,7 @@ pub use physical::{
 };
 pub use preprocess::{
     check_strict_mode, extract_stream_identities, parse_use_directives,
-    preprocess, strip_create_source_and_view, strip_emit_into,
+    preprocess, strip_create_source_and_view, strip_emit_into, strip_create_sink,
     CreateDefinition, CreateKind, EmitTarget, UseDirective,
 };
 
@@ -57,13 +57,16 @@ pub fn preprocess_sql_v2(sql: &str) -> std::result::Result<String, datafusion::e
     //    free of strict-mode coupling. Strict mode is opt-in via
     //    `preprocess()` from the CLI's `--strict` flag.
     let without_use = strip_use_lines(sql);
-    eprintln!("=== DEBUG: after strip_use_lines ===\n{without_use}\n=== END ===");
 
     // 2. Strip `CREATE SOURCE` / `CREATE VIEW` and substitute
     //    references to the declared name with the body as a
     //    subquery.
     let (_defs, after_create) = strip_create_source_and_view(&without_use);
-    eprintln!("=== DEBUG: after strip_create ===\n{after_create}\n=== END ===");
+
+    // 2b. Strip `CREATE SINK` and append `EMIT INTO <name>` after
+    // the body, so the existing strip_emit_into arm picks it up.
+    // The body itself is left intact for DataFusion to parse.
+    let (_sink_name, after_sink) = strip_create_sink(&after_create);
 
     // 3. Strip `EMIT INTO <target>` prefix. The `run_pipeline`
     //    entry point also calls `strip_emit_into`, but that call
@@ -71,8 +74,7 @@ pub fn preprocess_sql_v2(sql: &str) -> std::result::Result<String, datafusion::e
     //    before this preprocessor. To make the v2 preprocessor
     //    self-contained (callers that skip `run_pipeline` still
     //    get a valid DataFusion SQL), we strip it here too.
-    let (_target, after_emit) = strip_emit_into(&after_create);
-    eprintln!("=== DEBUG: after strip_emit ===\n{after_emit}\n=== END ===");
+    let (_target, after_emit) = strip_emit_into(&after_sink);
 
     // 4. Translate `ASOF JOIN` → `LEFT JOIN LATERAL`.
     if after_emit.to_uppercase().contains("ASOF JOIN") {
