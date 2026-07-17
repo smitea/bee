@@ -1172,12 +1172,12 @@ Plugins need per-stream state (e.g. Producer HWM). The stash introduces a `Kv` p
 
 **Acceptance criteria**
 
-- [ ] `cargo build --workspace` green
-- [ ] `cargo test --workspace` ≥ 415 passed, 0 failed
-- [ ] `kv_get` / `kv_put` exposed in `BeeHostV1` (additive, non-breaking)
-- [ ] `HostKv` adapter round-trips through the FFI without panicking
-- [ ] Stash's `kv.rs` applied on top of HEAD; existing plugin code paths unaffected
-- [ ] Documentation: a short note in `crates/bee-plugin-sdk/src/lib.rs` explains the port-vs-adapter pattern (1 adapter = hypothetical seam; 2 adapters = real one)
+- [x] `cargo build --workspace` green
+- [x] `cargo test --workspace` ≥ 415 passed, 0 failed (achieved 425)
+- [x] `kv_get` / `kv_put` exposed in `BeeHostV1` (additive, non-breaking)
+- [x] `HostKv` adapter round-trips through the FFI without panicking
+- [x] Stash's `kv.rs` applied on top of HEAD; existing plugin code paths unaffected
+- [x] Documentation: a short note in `crates/bee-plugin-sdk/src/lib.rs` explains the port-vs-adapter pattern (1 adapter = hypothetical seam; 2 adapters = real one)
 
 ---
 
