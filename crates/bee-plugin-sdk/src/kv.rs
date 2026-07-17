@@ -225,4 +225,132 @@ mod tests {
         let other = InProcessKv::default();
         assert!(other.get("k").is_none());
     }
+
+    #[test]
+    fn host_kv_round_trip_through_mock_ffi() {
+        // Mock KV store. The mock `kv_get` / `kv_put` functions
+        // read/write this `Mutex<HashMap>` to simulate the host's
+        // cluster KV.
+        use std::collections::HashMap;
+        use std::sync::Mutex;
+        static STORE: std::sync::OnceLock<Mutex<HashMap<String, Vec<u8>>>> =
+            std::sync::OnceLock::new();
+        let store = STORE.get_or_init(|| Mutex::new(HashMap::new()));
+        store.lock().unwrap().clear();
+
+        // Mock FFI: kv_get reads from the store, kv_put writes to
+        // the store. The closure must be `unsafe extern "C" fn` with
+        // a C-compatible signature; it accesses the static STORE
+        // directly (no captures).
+        unsafe extern "C" fn mock_kv_get(
+            _ctx: *mut std::ffi::c_void,
+            key: *const std::ffi::c_char,
+            out_value: *mut *mut u8,
+            out_len: *mut usize,
+        ) -> i32 {
+            let c_key = std::ffi::CStr::from_ptr(key);
+            let key = c_key.to_str().unwrap();
+            let store = STORE.get().unwrap();
+            let store = store.lock().unwrap();
+            match store.get(key) {
+                Some(v) => {
+                    let len = v.len();
+                    let ptr = v.as_ptr();
+                    *out_value = ptr as *mut u8;
+                    *out_len = len;
+                    0
+                }
+                None => 1,
+            }
+        }
+
+        unsafe extern "C" fn mock_kv_put(
+            _ctx: *mut std::ffi::c_void,
+            key: *const std::ffi::c_char,
+            value: *const u8,
+            len: usize,
+        ) -> i32 {
+            let c_key = std::ffi::CStr::from_ptr(key);
+            let key = c_key.to_str().unwrap().to_string();
+            let bytes = std::slice::from_raw_parts(value, len).to_vec();
+            let store = STORE.get().unwrap();
+            store.lock().unwrap().insert(key, bytes);
+            0
+        }
+
+        // Mock host with the FFI slots populated.
+        let host = crate::BeeHostV1 {
+            ctx: std::ptr::null_mut(),
+            register_adapter: None,
+            register_input_adapter_vtable: None,
+            register_output_adapter_vtable: None,
+            register_handler_vtable: None,
+            kv_get: Some(mock_kv_get),
+            kv_put: Some(mock_kv_put),
+            kv_cas: None,
+            current_stream_id: None,
+        };
+
+        let host_ptr = &host as *const crate::BeeHostV1;
+        let kv = unsafe { HostKv::new(host_ptr, std::ptr::null_mut()) };
+
+        // Round-trip: put then get.
+        kv.put("hello", b"world".to_vec());
+        assert_eq!(kv.get("hello"), Some(b"world".to_vec()));
+
+        // Overwrite: put replaces.
+        kv.put("hello", b"rust".to_vec());
+        assert_eq!(kv.get("hello"), Some(b"rust".to_vec()));
+    }
+
+    #[test]
+    fn host_kv_returns_none_on_not_found() {
+        // Same mock FFI pattern as above; the test focuses on
+        // the not-found return path.
+        use std::collections::HashMap;
+        use std::sync::Mutex;
+        static STORE: std::sync::OnceLock<Mutex<HashMap<String, Vec<u8>>>> =
+            std::sync::OnceLock::new();
+        let store = STORE.get_or_init(|| Mutex::new(HashMap::new()));
+        store.lock().unwrap().clear();
+
+        unsafe extern "C" fn mock_kv_get(
+            _ctx: *mut std::ffi::c_void,
+            key: *const std::ffi::c_char,
+            out_value: *mut *mut u8,
+            out_len: *mut usize,
+        ) -> i32 {
+            let c_key = std::ffi::CStr::from_ptr(key);
+            let key = c_key.to_str().unwrap();
+            let store = STORE.get().unwrap();
+            let store = store.lock().unwrap();
+            match store.get(key) {
+                Some(v) => {
+                    let len = v.len();
+                    let ptr = v.as_ptr();
+                    *out_value = ptr as *mut u8;
+                    *out_len = len;
+                    0
+                }
+                None => 1,
+            }
+        }
+
+        let host = crate::BeeHostV1 {
+            ctx: std::ptr::null_mut(),
+            register_adapter: None,
+            register_input_adapter_vtable: None,
+            register_output_adapter_vtable: None,
+            register_handler_vtable: None,
+            kv_get: Some(mock_kv_get),
+            kv_put: None,
+            kv_cas: None,
+            current_stream_id: None,
+        };
+        let host_ptr = &host as *const crate::BeeHostV1;
+        let kv = unsafe { HostKv::new(host_ptr, std::ptr::null_mut()) };
+
+        // No `put` ever called — get returns None.
+        assert_eq!(kv.get("missing"), None);
+    }
 }
