@@ -142,6 +142,37 @@ pub fn check_strict_mode(sql: &str, use_directives: &[UseDirective]) -> Result<(
             ));
         }
     }
+
+    // S42 strict-mode: every `CREATE SINK <name>` target must have
+    // a matching `use <name>;` directive. Mirror the source-side
+    // check above: the sink name must be in `used`.
+    for line in body.lines() {
+        let trimmed = line.trim_start();
+        if !trimmed.to_ascii_uppercase().starts_with("CREATE SINK") {
+            continue;
+        }
+        // Extract the target name (the first ASCII word after
+        // `CREATE SINK`).
+        let after_kw = trimmed["CREATE SINK".len()..].trim_start();
+        let name_end = after_kw
+            .find(|c: char| c.is_whitespace() || c == ';')
+            .unwrap_or(after_kw.len());
+        let sink_name = &after_kw[..name_end];
+        if sink_name.is_empty() {
+            return Err(
+                "strict-mode: CREATE SINK requires a target name \
+                 (e.g. `CREATE SINK foo AS ...`)"
+                    .into(),
+            );
+        }
+        if !used.contains(sink_name) {
+            return Err(format!(
+                "strict-mode: `CREATE SINK {sink_name}` without prior `use {sink_name};`; \
+                 every sink target must be declared via `use`"
+            ));
+        }
+    }
+
     Ok(())
 }
 
@@ -1379,6 +1410,29 @@ mod tests {
         let d = parse_use_directives(sql);
         let err = check_strict_mode(sql, &d).unwrap_err();
         assert!(err.contains("coingecko"));
+    }
+
+    #[test]
+    fn check_strict_mode_rejects_create_sink_without_use() {
+        // No `use binance;` precedes the SINK → reject.
+        let sql = "CREATE SINK binance AS SELECT 1;";
+        let d = parse_use_directives(sql);
+        let result = check_strict_mode(sql, &d);
+        assert!(result.is_err(), "expected strict-mode error for SINK without `use`");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("binance") && err.to_lowercase().contains("use"),
+            "expected error to mention `binance` and `use`; got: {err}"
+        );
+    }
+
+    #[test]
+    fn check_strict_mode_accepts_create_sink_with_use() {
+        // `use binance;` precedes the SINK → accept.
+        let sql = "use binance;\nCREATE SINK binance AS SELECT 1;";
+        let d = parse_use_directives(sql);
+        let result = check_strict_mode(sql, &d);
+        assert!(result.is_ok(), "expected strict-mode OK with `use`; got: {result:?}");
     }
 
     // ---- S29 redo: PluginManager resolution ----
