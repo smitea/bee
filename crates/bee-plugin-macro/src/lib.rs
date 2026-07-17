@@ -181,31 +181,27 @@ fn gen_input_adapter(impl_block: ItemImpl) -> TokenStream {
             }
         }
     }
-    let open_fn = match open_fn {
-        Some(f) => f,
-        None => return err("`#[bee_method(slot = \"open\")]` not found"),
-    };
-    if open_fn.sig.asyncness.is_none() {
-        return err(
-            "bee_adapter(input): `open` must be `async fn` (S33.6 signature check)",
-        );
+    let has_custom_open = open_fn.is_some();
+    let has_custom_close = close_fn.is_some();
+    if let Some(f) = &open_fn {
+        if f.sig.asyncness.is_none() {
+            return err(
+                "bee_adapter(input): `open` must be `async fn` (S33.6 signature check)",
+            );
+        }
     }
+    let open_rust = open_fn.as_ref().map(|f| f.sig.ident.clone());
     let next_fn = match next_fn {
         Some(f) => f,
         None => return err("`#[bee_method(slot = \"next\")]` not found"),
     };
-    let close_fn = match close_fn {
-        Some(f) => f,
-        None => return err("`#[bee_method(slot = \"close\")]` not found"),
-    };
+    let close_rust = close_fn.as_ref().map(|f| f.sig.ident.clone());
 
     let ctx_ty = format_ident!("{}InputCtx", struct_name);
     let open_ffi = ffi_ident(&struct_name, "input_open");
     let next_ffi = ffi_ident(&struct_name, "input_next");
     let close_ffi = ffi_ident(&struct_name, "input_close");
-    let open_rust = &open_fn.sig.ident;
     let next_rust = &next_fn.sig.ident;
-    let close_rust = &close_fn.sig.ident;
 
     let mut impl_block = impl_block;
     for item in &mut impl_block.items {
@@ -213,6 +209,53 @@ fn gen_input_adapter(impl_block: ItemImpl) -> TokenStream {
             f.attrs.retain(|a| !is_bee_method_attr(a));
         }
     }
+
+    // Generate the open FFI body — either custom
+    // (calls the user's open method) or default
+    // (uses Default::default()).
+    let open_body = if has_custom_open {
+        let open_rust = open_rust.expect("has_custom_open");
+        quote! {
+            let adapter = {
+                let config = unsafe {
+                    ::std::slice::from_raw_parts(config_ptr, config_len).to_vec()
+                };
+                let fut = async move {
+                    <#struct_name>::#open_rust(config).await
+                };
+                match ::tokio::runtime::Handle::try_current() {
+                    Ok(h) => ::tokio::task::block_in_place(|| h.block_on(fut)),
+                    Err(_) => ::futures::executor::block_on(fut),
+                }
+            };
+        }
+    } else {
+        quote! {
+            let adapter: ::std::result::Result<#struct_name, bee_adapter::AdapterError> =
+                Ok(<#struct_name as ::std::default::Default>::default());
+        }
+    };
+
+    // Generate the close FFI body — either custom
+    // (calls the user's close method) or default
+    // (just drops the adapter).
+    let close_body = if has_custom_close {
+        let close_rust = close_rust.expect("has_custom_close");
+        quote! {
+            if let Some(adapter) = adapter {
+                let fut = adapter.#close_rust();
+                let _ = match ::tokio::runtime::Handle::try_current() {
+                    Ok(h) => ::tokio::task::block_in_place(|| h.block_on(fut)),
+                    Err(_) => ::futures::executor::block_on(fut),
+                };
+            }
+        }
+    } else {
+        quote! {
+            // No custom close — just drop the adapter.
+            drop(adapter);
+        }
+    };
 
     quote! {
         struct #ctx_ty {
@@ -224,16 +267,7 @@ fn gen_input_adapter(impl_block: ItemImpl) -> TokenStream {
             config_len: usize,
             _err_out: *mut bee_plugin_sdk::event::EventBytes,
         ) -> *mut ::std::ffi::c_void {
-            let config = unsafe {
-                ::std::slice::from_raw_parts(config_ptr, config_len).to_vec()
-            };
-            let fut = async move {
-                <#struct_name>::#open_rust(config).await
-            };
-            let adapter = match ::tokio::runtime::Handle::try_current() {
-                Ok(h) => ::tokio::task::block_in_place(|| h.block_on(fut)),
-                Err(_) => ::futures::executor::block_on(fut),
-            };
+            #open_body
             let adapter = match adapter {
                 Ok(a) => a,
                 Err(_) => return ::std::ptr::null_mut(),
@@ -297,13 +331,7 @@ fn gen_input_adapter(impl_block: ItemImpl) -> TokenStream {
                 Ok(mut g) => g.take(),
                 Err(_) => return -1,
             };
-            if let Some(adapter) = adapter {
-                let fut = adapter.#close_rust();
-                let _ = match ::tokio::runtime::Handle::try_current() {
-                    Ok(h) => ::tokio::task::block_in_place(|| h.block_on(fut)),
-                    Err(_) => ::futures::executor::block_on(fut),
-                };
-            }
+            #close_body
             0
         }
 
