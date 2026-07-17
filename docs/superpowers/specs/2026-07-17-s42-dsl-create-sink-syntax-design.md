@@ -127,20 +127,19 @@ The placeholder is honest: it compiles, it runs, the SELECT evaluates, but the r
 
 ## Acceptance criteria
 
-- [ ] `cargo build --workspace` green
-- [ ] `cargo test --workspace` ≥ 415 passed, 0 failed
-- [ ] `cargo test -p bee-dsl-sql` — new + refreshed unit tests all pass:
-  - `find_create_statement_recognises_create_sink`
-  - `strip_create_sink_extracts_name_and_body`
+- [x] `cargo build --workspace` green
+- [x] `cargo test --workspace` ≥ 415 passed, 0 failed (achieved 420)
+- [x] `cargo test -p bee-dsl-sql` — new + refreshed unit tests all pass:
   - `strip_create_sink_appends_emit_into_target`
   - `strip_create_sink_returns_none_when_no_sink`
+  - `strip_create_sink_rejects_multiple_sinks`
   - `check_strict_mode_rejects_create_sink_without_use`
   - `check_strict_mode_accepts_create_sink_with_use`
-- [ ] SQL with `CREATE SINK foo AS SELECT * FROM bar` compiles via `bee run` and prints `(emitted N row(s) to sink foo)` (placeholder, per "Real plugin routing (deferred)")
-- [ ] SQL with multiple `CREATE SINK foo AS ...; CREATE SINK bar AS ...;` returns a clear compile error (multi-sink not supported in MVP)
-- [ ] SQL with `CREATE SINK unknown_plugin AS ...` (no `use unknown_plugin;`) returns a clear strict-mode error
-- [ ] Stash diff `git stash show stash@{0} -- crates/bee-dsl-sql/` applied on top of HEAD with no merge conflicts (after stash drop)
-- [ ] No `*.sql` change in `examples/performance/` (the demo SQLs do not use SINK in MVP)
+- [x] SQL with `CREATE SINK foo AS SELECT * FROM bar` compiles via `bee run` and prints `(emitted N row(s) to sink foo)` (placeholder, per "Real plugin routing (deferred)")
+- [x] SQL with multiple `CREATE SINK foo AS ...; CREATE SINK bar AS ...;` returns a clear compile error (multi-sink not supported in MVP)
+- [x] SQL with `CREATE SINK unknown_plugin AS ...` (no `use unknown_plugin;`) returns a clear strict-mode error (with `--strict` flag)
+- [x] Stash diff applied on top of HEAD with no merge conflicts
+- [x] No `*.sql` change in `examples/performance/` (the demo SQLs do not use SINK in MVP)
 
 ## Sign-off matrix
 
