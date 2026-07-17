@@ -600,7 +600,7 @@ impl Factory for MongodbFactory {
         let insert_vtable: *const OutputAdapterVtable = &INSERT_ADAPTER_VTABLE;
         let insert_many_vtable: *const OutputAdapterVtable = &INSERT_MANY_ADAPTER_VTABLE;
         let update_vtable: *const OutputAdapterVtable = &UPDATE_ADAPTER_VTABLE;
-        let find_vtable: *const InputAdapterVtable = &find_shim::VTABLE;
+        let find_vtable: *const InputAdapterVtable = &FIND_ADAPTER_VTABLE;
         let aggregate_vtable: *const InputAdapterVtable = &aggregate_shim::VTABLE;
 
         let mut output_adapters = std::collections::HashMap::new();
@@ -887,104 +887,70 @@ impl UpdateAdapter {
 }
 
 // ---------------------------------------------------------------------------
-// 10.4: `mongodb_find` Input vtable
+// 10.4: `mongodb_find` Input vtable — macro-generated (S33.6.1)
 // ---------------------------------------------------------------------------
 
-mod find_shim {
-    use super::{
-        acquire_client, block_on, do_find_all, MongodbConfig,
-        DocumentEvent, FindArgs, MongodbError,
-    };
-    use bee_plugin_sdk::event::{encode_event, EventBytes};
-    use bee_plugin_sdk::vtable::InputAdapterVtable;
-    use std::sync::Arc;
-    use std::time::Duration;
+/// FFI-facing config blob for `mongodb_find`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FindOpenConfig {
+    pub datasource: MongodbConfig,
+    pub stream: FindArgs,
+}
 
-    /// FFI ctx for the `find` adapter. The worker thread drives
-    /// the polling loop and pushes `DocumentEvent`s into the
-    /// mpsc. The FFI `next` calls `block_on(rx.recv())` to pull
-    /// the next event.
-    pub struct Ctx {
-        pub rx: tokio::sync::mpsc::Receiver<DocumentEvent>,
-        /// FFI-thread current-thread runtime. Used to
-        /// `block_on(rx.recv())` from the synchronous FFI call.
-        pub ffi_runtime: Arc<tokio::runtime::Runtime>,
-        /// Worker thread handle. Joined on drop.
-        pub worker: Option<std::thread::JoinHandle<()>>,
-        /// Worker-side multi-thread runtime. Held so we can
-        /// drop it on close, which terminates the polling loop.
-        pub worker_runtime: Option<Arc<tokio::runtime::Runtime>>,
+/// The `mongodb_find` InputAdapter. A dedicated worker thread
+/// (driven by a multi-thread tokio runtime) polls the
+/// collection on a cadence and pushes `DocumentEvent`s into
+/// the mpsc channel. The FFI `next` reads from the channel.
+pub struct FindAdapter {
+    pub _client: Arc<mongodb::Client>,
+    pub rx: tokio::sync::mpsc::Receiver<DocumentEvent>,
+    pub worker: Option<std::thread::JoinHandle<()>>,
+    pub worker_runtime: Option<Arc<tokio::runtime::Runtime>>,
+}
+
+impl Drop for FindAdapter {
+    fn drop(&mut self) {
+        // Close the receiver so the worker's `tx.send`
+        // calls fail, then join the worker.
+        self.rx.close();
+        if let Some(h) = self.worker.take() {
+            let _ = h.join();
+        }
+        self.worker_runtime = None;
     }
+}
 
-    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-    pub struct OpenConfig {
-        pub datasource: MongodbConfig,
-        pub stream: FindArgs,
-    }
-
-    pub unsafe extern "C" fn open(
-        config_ptr: *const u8,
-        config_len: usize,
-        err_out: *mut EventBytes,
-    ) -> *mut std::ffi::c_void {
-        let bytes = std::slice::from_raw_parts(config_ptr, config_len);
-        let cfg: OpenConfig = match bincode::deserialize(bytes) {
-            Ok(c) => c,
-            Err(e) => {
-                let err = MongodbError::Bincode(format!("config: {e}"));
-                err.write_into(err_out);
-                return std::ptr::null_mut();
-            }
-        };
+#[bee_adapter(input, name = "find")]
+impl FindAdapter {
+    #[bee_method(slot = "open")]
+    pub async fn open(config: Vec<u8>) -> AdapterResult<Self> {
+        let cfg: FindOpenConfig = bincode::deserialize(&config)
+            .map_err(|e| AdapterError::Open(
+                format!("find open: bincode: {e}")
+            ))?;
         if cfg.datasource.uri.is_empty() {
-            let err = MongodbError::Config("uri is required".into());
-            err.write_into(err_out);
-            return std::ptr::null_mut();
+            return Err(AdapterError::Open("find open: uri is required".into()));
         }
         if cfg.datasource.database.is_empty() {
-            let err = MongodbError::Config("database is required".into());
-            err.write_into(err_out);
-            return std::ptr::null_mut();
+            return Err(AdapterError::Open("find open: database is required".into()));
         }
         if cfg.stream.collection.is_empty() {
-            let err = MongodbError::Config("collection is required".into());
-            err.write_into(err_out);
-            return std::ptr::null_mut();
+            return Err(AdapterError::Open("find open: collection is required".into()));
         }
-        let client = match block_on(acquire_client(&cfg.datasource)) {
-            Ok(c) => c,
-            Err(e) => {
-                e.write_into(err_out);
-                return std::ptr::null_mut();
-            }
-        };
+        let client = acquire_client(&cfg.datasource).await
+            .map_err(|e| AdapterError::Open(
+                format!("find open: acquire_client: {e}")
+            ))?;
 
-        let worker_runtime = match tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-        {
-            Ok(r) => Arc::new(r),
-            Err(e) => {
-                let err = MongodbError::Runtime(e.to_string());
-                err.write_into(err_out);
-                return std::ptr::null_mut();
-            }
-        };
-        // The FFI-side runtime is a current-thread one: the
-        // FFI thread calls `block_on(rx.recv())` once per
-        // event, so a multi-thread runtime would be overkill.
-        let ffi_runtime = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(r) => Arc::new(r),
-            Err(e) => {
-                let err = MongodbError::Runtime(e.to_string());
-                err.write_into(err_out);
-                return std::ptr::null_mut();
-            }
-        };
+        let worker_runtime = Arc::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .map_err(|e| AdapterError::Open(
+                    format!("find open: worker_runtime: {e}")
+                ))?
+        );
 
         // Bounded channel: 256 events capacity. If the FFI
         // thread is slow, the worker applies backpressure.
@@ -993,138 +959,74 @@ mod find_shim {
         let worker_config = cfg.datasource.clone();
         let worker_args = cfg.stream.clone();
         let worker_client = Arc::clone(&client);
-        let worker_runtime_clone: Arc<tokio::runtime::Runtime> =
-            Arc::clone(&worker_runtime);
-        let worker_handle = match std::thread::Builder::new()
+        let worker_runtime_clone = Arc::clone(&worker_runtime);
+        let worker_handle = std::thread::Builder::new()
             .name("mongodb-find".into())
             .spawn(move || {
                 let _guard = worker_runtime_clone.enter();
-                worker_runtime_clone.block_on(poll_loop(
+                worker_runtime_clone.block_on(find_poll_loop(
                     worker_client,
                     worker_config,
                     worker_args,
                     tx,
                 ));
-            }) {
-            Ok(h) => h,
-            Err(e) => {
-                let err = MongodbError::Runtime(format!("spawn worker: {e}"));
-                err.write_into(err_out);
-                return std::ptr::null_mut();
-            }
-        };
+            })
+            .map_err(|e| AdapterError::Open(
+                format!("find open: spawn worker: {e}")
+            ))?;
 
-        let ctx = Ctx {
+        Ok(Self {
+            _client: client,
             rx,
-            ffi_runtime,
             worker: Some(worker_handle),
             worker_runtime: Some(worker_runtime),
-        };
-        let boxed = Box::new(ctx);
-        Box::into_raw(boxed) as *mut std::ffi::c_void
+        })
     }
 
-    pub unsafe extern "C" fn next(
-        ctx: *mut std::ffi::c_void,
-        out: *mut EventBytes,
-    ) -> i32 {
-        if ctx.is_null() {
-            return -1;
-        }
-        let ctx = &mut *(ctx as *mut Ctx);
-        let event = match ctx.next_event() {
-            Some(e) => e,
-            None => {
-                *out = EventBytes::EMPTY;
-                return 0;
-            }
-        };
-        let bytes = encode_event(&event);
-        let len = bytes.len();
-        let ptr = bytes.as_ptr();
-        std::mem::forget(bytes);
-        *out = EventBytes { ptr, len };
-        1
-    }
-
-    pub unsafe extern "C" fn close(ctx: *mut std::ffi::c_void) -> i32 {
-        if ctx.is_null() {
-            return 0;
-        }
-        let _ = Box::from_raw(ctx as *mut Ctx);
-        0
-    }
-
-    impl Ctx {
-        /// Block on the next document event. Returns `None` if
-        /// the producer has closed the channel (worker dropped
-        /// or runtime dropped).
-        pub fn next_event(&mut self) -> Option<bee_adapter::Event> {
-            let rx = &mut self.rx;
-            let doc = self.ffi_runtime.block_on(async move { rx.recv().await })?;
-            Some(doc.to_event())
+    #[bee_method(slot = "next")]
+    pub async fn next_one(&mut self) -> AdapterResult<Option<Event>> {
+        match self.rx.recv().await {
+            Some(doc) => Ok(Some(doc.to_event())),
+            None => Ok(None),
         }
     }
 
-    impl Drop for Ctx {
-        fn drop(&mut self) {
-            // Close the receiver so the worker's `tx.send`
-            // calls fail, then join the worker.
-            self.rx.close();
-            if let Some(h) = self.worker.take() {
-                let _ = h.join();
-            }
-            self.worker_runtime = None;
-        }
+    #[bee_method(slot = "close")]
+    pub async fn close(self) -> AdapterResult<()> {
+        // Drop worker + join on Drop impl.
+        Ok(())
     }
+}
 
-    /// Polling loop. Runs forever (until the runtime is
-    /// dropped) and pushes documents into the channel. The
-    /// first poll happens immediately, then every
-    /// `args.effective_poll_ms()`.
-    async fn poll_loop(
-        client: Arc<mongodb::Client>,
-        config: MongodbConfig,
-        args: FindArgs,
-        tx: tokio::sync::mpsc::Sender<DocumentEvent>,
-    ) {
-        let poll_interval = Duration::from_millis(args.effective_poll_ms());
-        let mut ticker = tokio::time::interval(poll_interval);
-        // The first tick fires immediately; that's the spec'd
-        // behaviour (first poll on subscribe).
-        loop {
-            ticker.tick().await;
-            match do_find_all(
-                &client,
-                &config.database,
-                &args.collection,
-                &args.filter,
-            )
-            .await
-            {
-                Ok(docs) => {
-                    for doc in docs {
-                        let event = DocumentEvent {
-                            collection: args.collection.clone(),
-                            document: bson::to_vec(&doc).unwrap_or_default(),
-                        };
-                        if tx.send(event).await.is_err() {
-                            return;
-                        }
+/// Polling loop for `mongodb_find`. Runs forever (until the
+/// runtime is dropped) and pushes documents into the channel.
+async fn find_poll_loop(
+    client: Arc<mongodb::Client>,
+    config: MongodbConfig,
+    args: FindArgs,
+    tx: tokio::sync::mpsc::Sender<DocumentEvent>,
+) {
+    let poll_interval = std::time::Duration::from_millis(args.effective_poll_ms());
+    let mut ticker = tokio::time::interval(poll_interval);
+    loop {
+        ticker.tick().await;
+        match do_find_all(&client, &config.database, &args.collection, &args.filter).await {
+            Ok(docs) => {
+                for doc in docs {
+                    let event = DocumentEvent {
+                        collection: args.collection.clone(),
+                        document: bson::to_vec(&doc).unwrap_or_default(),
+                    };
+                    if tx.send(event).await.is_err() {
+                        return;
                     }
                 }
-                Err(e) => {
-                    log::warn!("mongodb.find: {e}");
-                }
+            }
+            Err(e) => {
+                log::warn!("mongodb.find: {e}");
             }
         }
     }
-
-    pub const VTABLE: InputAdapterVtable = InputAdapterVtable {
-        open,
-        next,
-        close,
-    };
 }
 
 // ---------------------------------------------------------------------------
