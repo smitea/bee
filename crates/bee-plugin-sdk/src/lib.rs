@@ -28,6 +28,7 @@ use std::sync::Arc;
 use sha2::{Digest, Sha256};
 
 pub mod event;
+pub mod kv;
 pub mod macros;
 pub mod vtable;
 pub use macros::Factory;
