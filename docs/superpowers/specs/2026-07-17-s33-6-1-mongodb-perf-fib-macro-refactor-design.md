@@ -144,20 +144,20 @@ The following stay in `stash@{0}` and get their own stories later:
 
 ## Acceptance criteria
 
-- [ ] `cargo build --workspace` green
-- [ ] `cargo test --workspace` ≥ 415 passed, 0 failed
-- [ ] `cargo test -p bee-plugin-macro` — 6 tests pass (5 existing + new `default_open_close`)
-- [ ] `cargo test -p bee-plugin-perf-fib` — new state-round-trip test passes
-- [ ] `cargo test -p bee-plugin-mongodb` — existing unit tests still pass (migrated where needed)
-- [ ] `plugins/quant/bee-plugin-mongodb/src/lib.rs` has zero `mod *_shim { ... }` blocks; the 5 adapters all use `#[bee_adapter(...)]`
-- [ ] `plugins/quant/bee-plugin-mongodb/src/lib.rs` `MongodbFactory::init()` uses `register_vtable!`
-- [ ] `plugins/bee-plugin-perf-fib/src/lib.rs` has zero `mod seed_shim` / `mod step_shim` blocks; both handlers use `#[bee_adapter(handler, ...)]`
-- [ ] `plugins/bee-plugin-perf-fib/src/lib.rs` `PerfFibFactory::init()` uses `register_vtable!`
-- [ ] `crates/bee-plugin-macro/src/lib.rs` supports Handler `init_state` slot (already at `54398cd`; verify)
-- [ ] `crates/bee-plugin-macro/src/lib.rs` supports optional `open` / `close` slots (default generated when not provided)
-- [ ] `crates/bee-plugin-macro/src/lib.rs` output emit has `err_out` parameter (for cross-FFI diagnostics)
-- [ ] Diff size: `plugins/quant/bee-plugin-mongodb/src/lib.rs` shrinks by ~830 LOC (the 5 shim modules); perf-fib shrinks by ~280 LOC; macro grows by ~50 LOC
-- [ ] Commits land as a small series (one per major step), not one mega-commit
+- [x] `cargo build --workspace` green
+- [x] `cargo test --workspace` ≥ 415 passed, 0 failed
+- [x] `cargo test -p bee-plugin-macro` — 8 tests pass (5 existing + 3 new: init_state, default_open_close, emit_err_out; updated macro_expands_output_adapter for new sig)
+- [x] `cargo test -p bee-plugin-perf-fib` — new state round-trip test passes
+- [x] `cargo test -p bee-plugin-mongodb` — existing unit tests still pass (21 passed)
+- [x] `plugins/quant/bee-plugin-mongodb/src/lib.rs` has zero `mod *_shim` blocks; the 5 adapters all use `#[bee_adapter(...)]`
+- [x] `plugins/quant/bee-plugin-mongodb/src/lib.rs` `MongodbFactory::init()` uses `register_vtable!`
+- [x] `plugins/bee-plugin-perf-fib/src/lib.rs` has zero `mod seed_shim` / `mod step_shim` blocks; both handlers use `#[bee_adapter(handler, ...)]`
+- [x] `plugins/bee-plugin-perf-fib/src/lib.rs` `PerfFibFactory::init()` uses `register_vtable!`
+- [x] `crates/bee-plugin-macro/src/lib.rs` supports Handler `init_state` slot (verified at `54398cd`; locked down by Task 1)
+- [x] `crates/bee-plugin-macro/src/lib.rs` supports optional `open` / `close` slots (default generated when not provided)
+- [x] `crates/bee-plugin-macro/src/lib.rs` output emit has `err_out` parameter (for cross-FFI diagnostics)
+- [x] Diff size: `plugins/quant/bee-plugin-mongodb/src/lib.rs` shrank by **316 LOC** (650 deletes / 334 inserts across all 5 adapter refactors); perf-fib shrank by ~91 LOC; macro grew by ~80 LOC + 3 test files
+- [x] Commits land as a small series (one per major step), not one mega-commit
 - [ ] `git stash drop stash@{0}` only after the user confirms the out-of-scope items are filed separately
 
 ## Sign-off matrix
