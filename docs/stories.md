@@ -1117,6 +1117,118 @@ Targets get filled in (and may be revised) once a baseline cluster exists.
 
 ---
 
+### S42 · DSL `CREATE SINK` syntax (sink-via-plugin)
+
+- **Type**: AFK
+- **Blocked by**: S15 (DataFusion executor wrapper)
+- **ADRs**: 0006 (SQL runtime), 0010 (per-call args)
+
+> **Source**: extracted from `stash@{0}` (WIP pre-S33.6.1 work, file `crates/bee-dsl-sql/src/{lib,physical,preprocess}.rs`).
+
+**What to build**
+
+The current `EMIT INTO <target>` preprocessor recognises only `console`. S42 extends it to accept a plugin-backed sink via the `CREATE SINK <name> AS <body>` pattern (or equivalent `EMIT INTO <plugin_name>` syntax — pick one during design). The preprocessor strips the directive and binds the emitted rows to the plugin's output adapter.
+
+- Add `EmitTarget::Plugin(String)` variant to `crates/bee-dsl-sql/src/preprocess.rs::EmitTarget` enum
+- Extend `strip_emit_into` to parse `CREATE SINK <name>` declarations (or the chosen syntax)
+- Update `crates/bee-dsl-sql/src/physical.rs` to route plugin-bound sinks through the `register_vtable!` path (or equivalent)
+- Update `crates/bee-dsl-sql/src/lib.rs` to re-export the new API
+
+**Acceptance criteria**
+
+- [ ] `cargo build --workspace` green
+- [ ] SQL with `CREATE SINK foo AS SELECT ... FROM binance.subscribe(...)` compiles + deploys
+- [ ] `cargo test -p bee-dsl-sql` green; new unit tests for `strip_emit_into` cover `Plugin` target
+- [ ] Stash diff `git stash show stash@{0} -- crates/bee-dsl-sql/` applied on top of HEAD with no merge conflicts
+- [ ] Documentation: the SQL syntax accepted by `CREATE SINK` is described in `crates/bee-dsl-sql/src/preprocess.rs` and (if material) in `docs/product-design.md`
+
+---
+
+### S43 · Plugin KV port + adapters (host-side FFI hook)
+
+- **Type**: AFK
+- **Blocked by**: S29 (Datasource managed entity)
+- **ADRs**: 0004 (KV cluster), 0005 (plugin FFI), 0009 (multi-version)
+
+> **Source**: extracted from `stash@{0}` (untracked file `crates/bee-plugin-sdk/src/kv.rs`, 228 lines).
+
+**What to build**
+
+Plugins need per-stream state (e.g. Producer HWM). The stash introduces a `Kv` port trait + two adapters:
+
+- `crates/bee-plugin-sdk/src/kv.rs` (new module): defines `pub trait Kv: Send + Sync + 'static` with `get(&self, key: &str) -> Option<Vec<u8>>` + `put(&self, key: &str, value: Vec<u8>)`
+- `InProcessKv` adapter: process-global `HashMap<String, Vec<u8>>` guarded by `Mutex` (test/MVP)
+- `HostKv` adapter: wraps `BeeHostV1` FFI function pointers (`kv_get` / `kv_put`) so production plugins write through to the cluster KV (per ADR-0004)
+- Extend `BeeHostV1` C struct in `crates/bee-plugin-sdk/src/lib.rs` with `kv_get` + `kv_put` function pointer slots
+- One new integration test in `crates/bee-plugin-sdk/tests/` that loads a sample plugin which calls `kv.put` / `kv.get` through both adapters
+
+**Acceptance criteria**
+
+- [ ] `cargo build --workspace` green
+- [ ] `cargo test --workspace` ≥ 415 passed, 0 failed
+- [ ] `kv_get` / `kv_put` exposed in `BeeHostV1` (additive, non-breaking)
+- [ ] `HostKv` adapter round-trips through the FFI without panicking
+- [ ] Stash's `kv.rs` applied on top of HEAD; existing plugin code paths unaffected
+- [ ] Documentation: a short note in `crates/bee-plugin-sdk/src/lib.rs` explains the port-vs-adapter pattern (1 adapter = hypothetical seam; 2 adapters = real one)
+
+---
+
+### S44 · S41 demo cleanup (trim prime_sieve.sql + retune)
+
+- **Type**: AFK
+- **Blocked by**: S41 (performance showcase)
+- **ADRs**: none
+
+> **Source**: extracted from `stash@{0}` (3726 → 73 lines in `examples/performance/prime_sieve.sql` + sibling SQL changes + `scripts/demo-perf.sh`).
+
+**What to build**
+
+The S41 demo's `prime_sieve.sql` ships with 1229 sieving phases (every prime ≤ 10⁴). Running the full sieve takes ~3 minutes. S44 trims it to a more demo-friendly shape (~10–20 primes, runs in seconds) so the demo script can fit in a 5-minute evaluator walkthrough. The correctness invariant (`count(*) = 5_761_455` for primes ≤ 10⁸) must still hold for the full version (kept under a separate `prime_sieve_full.sql` or behind a CLI flag).
+
+- `examples/performance/prime_sieve.sql`: trim from 1229 phases to ~10–20 phases (e.g., primes 2/3/5/7/11/13/17/19/23/29/31/37/41/43/47)
+- Verify the trimmed sieve still produces a correct (but reduced) prime count
+- Either keep `prime_sieve_full.sql` for the full 10⁸ run OR add a `BEE_FULL_SIEVE=1` env var to the demo script
+- Update `scripts/demo-perf.sh` to reflect the smaller phase count (timing table)
+- `examples/performance/fibonacci.sql` + `multi_stream_analytics.sql`: review the stash changes; keep any improvements, drop noise
+
+**Acceptance criteria**
+
+- [ ] `examples/performance/prime_sieve.sql` runs end-to-end in < 30s (vs. the current ~3 minutes)
+- [ ] Correctness check on the trimmed sieve still passes (or `BEE_FULL_SIEVE=1` restores the slow path)
+- [ ] `scripts/demo-perf.sh` updated table reflects the new phase count + wall-clock
+- [ ] `cargo test -p bee-dsl-sql` green (no SQL preprocessor regression)
+- [ ] Stash diff `git stash show stash@{0} -- examples/ scripts/` applied on top of HEAD with no merge conflicts
+
+---
+
+### S45 · `.gitignore` cleanup — exclude mdbook build output
+
+- **Type**: AFK
+- **Blocked by**: None
+- **ADRs**: none
+
+> **Source**: `stash@{0}` includes `docs/book/` (mdbook build output, ~60 files, untracked).
+
+**What to build**
+
+The `docs/book/` directory is an mdbook build output (HTML, CSS, JS, fonts). It should be regenerated on demand via `mdbook build`, not committed. Add `docs/book/book/` (or `docs/book/`) to `.gitignore` so future builds don't accidentally commit the artifact.
+
+- Add `/docs/book/book/` (or the right path) to `.gitignore`
+- Remove the existing `docs/book/` from `stash@{0}` after applying the ignore (the file system already has the dir; just gitignore it)
+- Verify `git status` is clean after `git stash drop` (or after `git stash pop` + `git restore --staged docs/book/`)
+- Document the build command in `docs/book/README.md` or in `CONTEXT.md` (e.g., `mdbook serve docs/book` for local preview)
+
+**Acceptance criteria**
+
+- [ ] `/docs/book/` added to `.gitignore`
+- [ ] `git status` shows no untracked files under `docs/book/`
+- [ ] `docs/book/README.md` (or `CONTEXT.md`) documents `mdbook serve docs/book`
+- [ ] No `.html` / `.js` / `.css` / `.woff2` files under `docs/book/` are tracked in git
+
+---
+
+# Conventions
+
 # Conventions
 
 ## Story format
