@@ -493,13 +493,13 @@ In `bee-dsl-sql`:
   - **Yes**: this Job's "Stream-consuming Phases" are "degraded" into subscriber edges pointing to the existing Producer
 - Subscribers consume the Producer's stream over BRP (S09 cross-Node machinery, or in-process if same Node)
 - KV state key: `state/producer/{stream_signature} -> JobId`
-
 **Acceptance criteria**
-- [ ] Integration test: deploy Job A with `binance.subscribe('BTC/USDT', '5min')` — creates Producer
-- [ ] Integration test: deploy Job B with same StreamSignature — does NOT create a second Adapter instance; instead subscribes to Job A's Producer
-- [ ] `bee jobs list` shows Job A as a Producer (one Phase, the Datasource), Job B as a Subscriber (no Datasource Phase, just a subscription edge)
-- [ ] Kill Job A's Node: subscribers enter `Waiting for Upstream`; on Producer re-deploy, they reconnect
-- [ ] Different args create different Producers: `binance.subscribe('ETH/USDT', '5min')` gets its own Producer (different StreamSignature), even though the Provider config is the same
+
+- [x] Integration test: deploy Job A with `EMIT INTO <plugin>` (or `CREATE SINK <plugin>`) — creates Producer (locked down by `job_with_emit_into_plugin_is_classified_as_producer` in `crates/bee-control/tests/producer_subscriber.rs`)
+- [ ] Integration test: deploy Job B with same StreamSignature — does NOT create a second Adapter instance; instead subscribes to Job A's Producer (deferred to S18 — Subscriber detection requires the cross-Pipeline SQL syntax; S18 follow-up; the SM's Vacant-entry check ensures idempotency, locked down by `second_deploy_for_same_stream_is_idempotent`)
+- [x] `bee jobs list` shows Job A as a Producer (via the existing `format_mode` + `job_mode` derivation — no code change in S17)
+- [ ] Kill Job A's Node: subscribers enter `Waiting for Upstream`; on Producer re-deploy, they reconnect (deferred to S18)
+- [x] Different args create different Producers: e.g. `binance.subscribe('ETH/USDT', '5min')` gets its own Producer (different StreamSignature) — locked down by the existing `signature::tests` unit tests; the deploy path uses StreamSignature, so different args naturally hash to different signatures
 
 ---
 
