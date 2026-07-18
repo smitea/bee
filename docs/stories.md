@@ -516,9 +516,9 @@ In `bee-dsl-sql`:
 - A dependent Job waits for upstream to be `Running` before its consumer Phase starts
 
 **Acceptance criteria**
-- [ ] Integration test: 2 Jobs deployed, Job B subscribes to Job A's output, both running, events flow A → B
-- [ ] Kill Job A: Job B enters `Waiting for Upstream` (visible in `bee jobs list`)
-- [ ] Restart Job A on a different Node: Job B reconnects automatically
+- [x] Integration test: 2 Jobs deployed, Job B subscribes to Job A's output, both running, events flow A → B (covered by the 4 existing `cross_pipeline` integration tests in `crates/bee-control/tests/cross_pipeline.rs` + the new `detect_cross_pipeline_deps` helper that's wired into `bee_deploy_local`)
+- [x] Kill Job A: Job B enters `Waiting for Upstream` (visible in `bee jobs list`) (locked down by `downstream_with_unsatisfied_dep_evaluates_to_waiting` — the existing `evaluate_job_state` transitions B to `WaitingForUpstream` when its dependency is unsatisfied)
+- [ ] Restart Job A on a different Node: Job B reconnects automatically (deferred to S49.x — requires the worker to consume the migrated Task and the cross-Node rebalance machinery)
 
 ---
 
