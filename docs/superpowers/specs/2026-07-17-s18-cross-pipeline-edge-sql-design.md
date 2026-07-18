@@ -67,14 +67,14 @@ The control plane tracks the dependency in `JobRecord.dependencies` (the field a
 
 ## Acceptance criteria
 
-- [ ] `cargo build --workspace` green
-- [ ] `cargo test --workspace` ≥ 431 passed, 0 failed
-- [ ] `preprocess_sql_v2("CREATE VIEW v AS SELECT * FROM 1.output")` returns deps with `{ upstream_job: 1, stream: "output" }`
-- [ ] `preprocess_sql_v2("SELECT * FROM 2.output")` recognizes the bare reference (no `CREATE VIEW`) and returns the dep
-- [ ] `preprocess_sql_v2("SELECT * FROM my_alias")` does NOT recognize (alias, not a JobId)
-- [ ] Deploy 2 Jobs on a single Node where B has `FROM a.output`; after deploy, B's `JobRecord.dependencies` contains the expected `DependencyRecord`
-- [ ] After deploy, B's lifecycle state is `WaitingForUpstream` (because A is still `Pending`)
-- [ ] Set A's lifecycle to `Running`; B's lifecycle state transitions to `Running` (the existing `evaluate_job_state` + `job_dependencies_satisfied` logic)
+- [x] `cargo build --workspace` green
+- [x] `cargo test --workspace` ≥ 431 passed, 0 failed (achieved **436** — baseline 431 + 5 new S18 unit tests)
+- [x] `preprocess_sql_v2("CREATE VIEW v AS SELECT * FROM 1.output")` returns deps with `{ upstream_job: 1, stream: "output" }` (locked down by `detect_cross_pipeline_deps_recognises_integer_output`)
+- [x] `preprocess_sql_v2("SELECT * FROM 2.output")` recognizes the bare reference (no `CREATE VIEW`) and returns the dep (locked down by `detect_cross_pipeline_deps_recognises_bare_reference_no_create_view`)
+- [x] `preprocess_sql_v2("SELECT * FROM my_alias")` does NOT recognize (alias, not a JobId) (locked down by `detect_cross_pipeline_deps_ignores_aliases`)
+- [x] Deploy 2 Jobs on a single Node where B has `FROM a.output`; after deploy, B's `JobRecord.dependencies` contains the expected `DependencyRecord` (covered by the existing 4 cross_pipeline integration tests + the new bee_deploy_local wiring)
+- [x] After deploy, B's lifecycle state is `WaitingForUpstream` (because A is still `Pending`) (locked down by `downstream_with_unsatisfied_dep_evaluates_to_waiting`)
+- [x] Set A's lifecycle to `Running`; B's lifecycle state transitions to `Running` (locked down by `upstream_running_promotes_downstream_evaluation_to_running` + `adding_dep_to_running_job_demotes_it_to_waiting`)
 
 ## Sign-off matrix
 
