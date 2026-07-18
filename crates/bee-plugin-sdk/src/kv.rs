@@ -288,6 +288,8 @@ mod tests {
             kv_get: Some(mock_kv_get),
             kv_put: Some(mock_kv_put),
             kv_cas: None,
+            secret_get: None,
+            secret_put: None,
             current_stream_id: None,
         };
 
@@ -345,6 +347,8 @@ mod tests {
             kv_get: Some(mock_kv_get),
             kv_put: None,
             kv_cas: None,
+            secret_get: None,
+            secret_put: None,
             current_stream_id: None,
         };
         let host_ptr = &host as *const crate::BeeHostV1;

@@ -205,6 +205,35 @@ pub struct BeeHostV1 {
         ) -> i32,
     >,
 
+    /// Secret store (S30): read a secret by (tenant, id). Returns
+    /// 0 on success and writes the value pointer + length to
+    /// `out_value` and `out_len` (caller frees via `host_alloc_free`).
+    /// Returns 1 on not-found. Returns -1 on error. Goes through the
+    /// host's `SecretStore` (per-tenant scoping + audit logging);
+    /// distinct from `kv_get` which hits the raw KV.
+    pub secret_get: Option<
+        unsafe extern "C" fn(
+            ctx: *mut std::ffi::c_void,
+            tenant: u16,
+            id: *const std::ffi::c_char,
+            out_value: *mut *mut u8,
+            out_len: *mut usize,
+        ) -> i32,
+    >,
+
+    /// Secret store (S30): write a secret (overwrites). Returns 0
+    /// on success, -1 on error. The host's `SecretStore` enforces
+    /// per-tenant scoping.
+    pub secret_put: Option<
+        unsafe extern "C" fn(
+            ctx: *mut std::ffi::c_void,
+            tenant: u16,
+            id: *const std::ffi::c_char,
+            value: *const u8,
+            len: usize,
+        ) -> i32,
+    >,
+
     /// Get the current stream_id (32-byte hash of the SQL call site).
     /// Returns 0 on success, -1 on error.
     pub current_stream_id: Option<
@@ -296,6 +325,65 @@ impl BeeHostV1 {
             0 => Ok(true),
             1 => Ok(false),
             _ => Err(SdkError::KvError("kv_cas failed")),
+        }
+    }
+
+    /// Safe wrapper for `secret_get`. Returns `Ok(Some(value))` if
+    /// found, `Ok(None)` if not found, `Err(SdkError)` on error.
+    /// The plugin receives a fresh `Vec<u8>`; the host-allocated
+    /// bytes are leaked (MVP — the plugin process exits shortly;
+    /// threading `host_alloc_free` is a S30.x follow-up).
+    pub fn safe_secret_get(
+        &self,
+        tenant: u16,
+        id: &str,
+    ) -> Result<Option<Vec<u8>>, SdkError> {
+        let f = self
+            .secret_get
+            .ok_or(SdkError::HostFnMissing("secret_get"))?;
+        let c_id = std::ffi::CString::new(id)
+            .map_err(|_| SdkError::InvalidKey(id.into()))?;
+        let mut out_value: *mut u8 = std::ptr::null_mut();
+        let mut out_len: usize = 0;
+        let rc = unsafe {
+            f(self.ctx, tenant, c_id.as_ptr(), &mut out_value, &mut out_len)
+        };
+        match rc {
+            0 => {
+                if out_value.is_null() || out_len == 0 {
+                    return Ok(None);
+                }
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(out_value, out_len).to_vec()
+                };
+                // TODO: free via host_alloc_free (S30.x follow-up).
+                Ok(Some(bytes))
+            }
+            1 => Ok(None),
+            _ => Err(SdkError::KvError("secret_get failed".into())),
+        }
+    }
+
+    /// Safe wrapper for `secret_put`. Returns `Ok(())` on success,
+    /// `Err(SdkError)` on error. Goes through the host's
+    /// `SecretStore` which enforces per-tenant scoping.
+    pub fn safe_secret_put(
+        &self,
+        tenant: u16,
+        id: &str,
+        value: &[u8],
+    ) -> Result<(), SdkError> {
+        let f = self
+            .secret_put
+            .ok_or(SdkError::HostFnMissing("secret_put"))?;
+        let c_id = std::ffi::CString::new(id)
+            .map_err(|_| SdkError::InvalidKey(id.into()))?;
+        let rc = unsafe {
+            f(self.ctx, tenant, c_id.as_ptr(), value.as_ptr(), value.len())
+        };
+        match rc {
+            0 => Ok(()),
+            _ => Err(SdkError::KvError("secret_put failed".into())),
         }
     }
 
@@ -680,12 +768,95 @@ mod tests {
             kv_get: None,
             kv_put: None,
             kv_cas: None,
+            secret_get: None,
+            secret_put: None,
             current_stream_id: None,
         };
         assert!(host.kv_get.is_none());
         assert!(host.kv_put.is_none());
         assert!(host.kv_cas.is_none());
+        assert!(host.secret_get.is_none());
+        assert!(host.secret_put.is_none());
         assert!(host.current_stream_id.is_none());
+    }
+
+    #[test]
+    fn bee_host_v1_secret_get_round_trip_through_mock_ffi() {
+        // Mock FFI: a process-global HashMap stands in for the
+        // host's SecretStore. secret_get reads from it;
+        // secret_put writes to it.
+        use std::collections::HashMap;
+        use std::sync::Mutex;
+        static STORE: std::sync::OnceLock<Mutex<HashMap<(u16, String), Vec<u8>>>> =
+            std::sync::OnceLock::new();
+        let store = STORE.get_or_init(|| Mutex::new(HashMap::new()));
+        store.lock().unwrap().clear();
+
+        unsafe extern "C" fn mock_secret_get(
+            _ctx: *mut std::ffi::c_void,
+            tenant: u16,
+            id: *const std::ffi::c_char,
+            out_value: *mut *mut u8,
+            out_len: *mut usize,
+        ) -> i32 {
+            let c_id = std::ffi::CStr::from_ptr(id);
+            let key = c_id.to_str().unwrap().to_string();
+            let store = STORE.get().unwrap();
+            let store = store.lock().unwrap();
+            match store.get(&(tenant, key)) {
+                Some(v) => {
+                    let len = v.len();
+                    let ptr = v.as_ptr();
+                    *out_value = ptr as *mut u8;
+                    *out_len = len;
+                    0
+                }
+                None => 1,
+            }
+        }
+
+        unsafe extern "C" fn mock_secret_put(
+            _ctx: *mut std::ffi::c_void,
+            tenant: u16,
+            id: *const std::ffi::c_char,
+            value: *const u8,
+            len: usize,
+        ) -> i32 {
+            let c_id = std::ffi::CStr::from_ptr(id);
+            let key = c_id.to_str().unwrap().to_string();
+            let bytes = std::slice::from_raw_parts(value, len).to_vec();
+            let store = STORE.get().unwrap();
+            store.lock().unwrap().insert((tenant, key), bytes);
+            0
+        }
+
+        let host = BeeHostV1 {
+            ctx: std::ptr::null_mut(),
+            register_adapter: None,
+            register_input_adapter_vtable: None,
+            register_output_adapter_vtable: None,
+            register_handler_vtable: None,
+            kv_get: None,
+            kv_put: None,
+            kv_cas: None,
+            secret_get: Some(mock_secret_get),
+            secret_put: Some(mock_secret_put),
+            current_stream_id: None,
+        };
+
+        // Round-trip: put then get, tenant 0.
+        host.safe_secret_put(0, "binance_api_key", b"secret123")
+            .unwrap();
+        let got = host.safe_secret_get(0, "binance_api_key").unwrap();
+        assert_eq!(got, Some(b"secret123".to_vec()));
+
+        // Not-found: different tenant.
+        let got = host.safe_secret_get(1, "binance_api_key").unwrap();
+        assert_eq!(got, None, "tenant 1 must not see tenant 0's secret");
+
+        // Not-found: different key.
+        let got = host.safe_secret_get(0, "missing_key").unwrap();
+        assert_eq!(got, None);
     }
 
     // ---- AbiVersion (S20) ----
