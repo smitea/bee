@@ -1231,10 +1231,10 @@ The `docs/book/` directory is an mdbook build output (HTML, CSS, JS, fonts). It 
 
 **Acceptance criteria**
 
-- [ ] `/docs/book/` added to `.gitignore`
-- [ ] `git status` shows no untracked files under `docs/book/`
-- [ ] `docs/book/README.md` (or `CONTEXT.md`) documents `mdbook serve docs/book`
-- [ ] No `.html` / `.js` / `.css` / `.woff2` files under `docs/book/` are tracked in git
+- [x] `/docs/book/` added to `.gitignore` (specifically `/docs/book/book/`; the source `src/` + `book.toml` stay tracked)
+- [x] `git status` shows no untracked files under `docs/book/` (the only entry is `docs/book/README.md`, the new source file we just added)
+- [x] `docs/book/README.md` (or `CONTEXT.md`) documents `mdbook serve docs/book`
+- [x] No `.html` / `.js` / `.css` / `.woff2` files under `docs/book/` are tracked in git (verified by simulation: `mkdir docs/book/book; touch index.html; git status` — `docs/book/book/` is correctly hidden by `.gitignore`)
 
 ---
 
