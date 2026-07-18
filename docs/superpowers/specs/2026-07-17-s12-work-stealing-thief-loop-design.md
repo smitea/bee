@@ -51,10 +51,10 @@ This story adds the **thief loop**: a background task in each Node that periodic
 
 ## Acceptance criteria
 
-- [ ] `cargo build --workspace` green
-- [ ] `cargo test --workspace` ≥ 432 passed, 0 failed
-- [ ] Integration test: 3-Node in-process cluster, deploy a Job on node 1, `shutdown_node(2)`, the thief loop on node 1 (or 3) takes over the Tasks within 5 seconds
-- [ ] Concurrent StealTask from two thieves: only one wins (covered by the existing atomic CAS at `control_plane.rs:184-206`); the integration test confirms the second thief gets no-op'd
+- [x] `cargo build --workspace` green
+- [x] `cargo test --workspace` ≥ 432 passed, 0 failed (achieved **434** — +1 S12 lib test + +1 S12 integration test)
+- [x] Integration test: 3-Node in-process cluster, deploy a Job on node 1, `shutdown_node(2)`, the thief loop on node 1 (or 3) takes over the Tasks within 5 seconds (locked down by `thief_loop_takes_over_orphaned_tasks_after_node_shutdown_s12` in `crates/bee-control/tests/work_stealing.rs`)
+- [x] Concurrent StealTask from two thieves: only one wins (covered by the existing atomic CAS at `control_plane.rs:184-206`); the integration test `concurrent_steal_task_from_two_thieves_only_one_wins` confirms the second thief gets no-op'd
 
 ## Sign-off matrix
 
