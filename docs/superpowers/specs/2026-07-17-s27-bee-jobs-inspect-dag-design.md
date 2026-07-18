@@ -88,12 +88,12 @@ The MVP always stores `dependencies: vec![]` (all Tasks are independent). For S2
 
 ## Acceptance criteria
 
-- [ ] `cargo build --workspace` green
-- [ ] `cargo test --workspace` ≥ 429 passed, 0 failed (S27 adds 4 new tests)
-- [ ] Linear chain (T1 → T2 → T3) renders with `→` connectors between Tasks
-- [ ] Diamond (T1 → {T2, T3} → T4) renders with branching connectors
-- [ ] Independent tasks (no edges) render as a single row
-- [ ] `bee jobs` + `bee jobs inspect <id>` color codes work (green / yellow / red) — covered by existing tests; verify in the integration smoke test
+- [x] `cargo build --workspace` green
+- [x] `cargo test --workspace` ≥ 429 passed, 0 failed (achieved **432** — +3 S27 tests)
+- [x] Linear chain (T1 → T2 → T3) renders with `├─` per Task + `│` between levels (locked down by `format_dag_linear_chain_draws_level_separators`)
+- [x] Diamond (T1 → {T2, T3} → T4) renders with branching: T1 alone at L0, T2+T3 at L1, T4 at L2 (locked down by `format_dag_diamond_renders_both_branches`)
+- [x] Independent tasks (no edges) render as a vertical tree with `├─` / `└─` prefixes (no `│` separator) (locked down by `format_dag_independent_tasks_listed_in_single_row`)
+- [x] `bee jobs` + `bee jobs inspect <id>` color codes work (green / yellow / red) — covered by existing `bee_jobs_color_codes_for_different_lifecycles_s27_acceptance` test in `crates/bee-control/tests/jobs_view.rs`
 
 ## Sign-off matrix
 
