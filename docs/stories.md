@@ -1248,6 +1248,34 @@ The `docs/book/` directory is an mdbook build output (HTML, CSS, JS, fonts). It 
 
 # Conventions
 
+### S49 · `bee deploy` (local) + `bee jobs wait` (local)
+
+- **Type**: AFK
+- **Blocked by**: S27 (`bee jobs list` / `bee jobs inspect` exist)
+- **ADRs:** none
+- **Source:** `bee/src/main.rs` (added `bee_deploy_local` + `bee_jobs_wait_local` helpers)
+
+**What to build**
+
+`bee deploy <sql_file>` (local mode): reads the SQL, calls `extract_phase_dag` (after pre-stripping `CREATE SOURCE` / `CREATE VIEW` / `CREATE SINK` via `preprocess_sql_v2`), registers a Job + N Tasks in the local in-process ControlPlane. Prints the new `job_id`.
+
+`bee jobs wait --job <id> --until done [--timeout-secs <n>]` (local mode): polls the local ControlPlane every 200ms for the Job's lifecycle state. Returns when the Job reaches a terminal state (`Completed` / `Failed`) or when the timeout expires (default 5 min).
+
+**Acceptance criteria**
+
+- [x] `cargo build --workspace` green
+- [x] `cargo test --workspace` ≥ 429 passed, 0 failed (achieved 429)
+- [x] `bee deploy examples/performance/prime_sieve.sql` exits 0 and prints `deployed as job 1`
+- [x] `bee jobs` (no arg, list) shows the new Job header table (in the same process; cross-process state doesn't persist, which is the MVP contract)
+- [x] `bee jobs inspect 1` works (same-process; cross-process returns "job 1 not found")
+- [x] `bee jobs wait --job 1 --until done --timeout-secs 3` returns non-zero with `timeout after 3s waiting for job 1 to reach a terminal state`
+- [x] `bee deploy` with an invalid SQL file (no SELECTs) exits non-zero with `extract_phase_dag: dag: no SELECT statements found`
+- [ ] `scripts/demo-perf.sh` end-to-end: deploys all 3 demos, waits for each, prints a summary table (deferred — the script itself needs updates to use the new `deploy` + `wait` flow; that's a S49.x follow-up)
+
+> **Done (2026-07-17)** via commits `ef95e63` + `a338ce7`. Unlocks `scripts/demo-perf.sh` (S45) + S33.1 multi-node demo script usage.
+
+---
+
 # Conventions
 
 ## Story format
