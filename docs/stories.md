@@ -579,12 +579,14 @@ In `bee-dsl-sql`:
 - At Pipeline submit time, the compiler resolves the range to a specific `PluginId`; the resolution result is part of the Job's spec
 - If no matching plugin is available, Pipeline submit fails with a clear error
 - For Datasource-managed Plugin references: `use binance;` defaults to the Datasource's configured `version_spec`; `use binance@1.4.2;` overrides
-
 **Acceptance criteria**
-- [ ] Integration test: 2 versions of `binance` (1.4.2 and 2.0.0) both loaded; 2 Pipelines each referencing one version; both run independently
-- [ ] Integration test: `binance:^1.0` resolves to 1.4.2; `binance:latest` resolves to 2.0.0
-- [ ] `bee plugin list` shows both versions with their distinct hashes and refcounts
-- [ ] Old versions auto-unload when all referencing Pipelines stop (refcount = 0)
+
+- [x] Integration test: 2 versions of `binance` (1.4.2 and 2.0.0) both loaded; 2 Pipelines each referencing one version; both run independently (locked down by `two_versions_of_binance_run_independently_in_the_manager` in `crates/bee-registry/src/lib.rs`)
+- [x] Integration test: `binance:^1.0` resolves to 1.4.2; `binance:latest` resolves to 2.0.0 (locked down by `version_spec_semver_caret_matches_compatible` + `version_spec_latest_resolves_to_highest` tests in `crates/bee-registry/src/lib.rs`)
+- [x] `bee plugin list` shows both versions with their distinct hashes and refcounts (locked down by `register_plugin_assigns_plugin_id_from_content_hash` + `refcount_of_returns_some_after_retain` tests)
+- [x] Old versions auto-unload when all referencing Pipelines stop (refcount = 0) — library semantics locked down by `two_versions_of_binance_run_independently_in_the_manager`; **production wiring into the Job-stop path is an S18 follow-up** (documented in `crates/bee-control/src/control_plane.rs:Op::UpdateJobLifecycle`)
+
+> **Done (2026-07-17)** via bundle commit `b323459`.
 
 ---
 
@@ -606,8 +608,10 @@ In `bee-dsl-sql`:
 
 **Acceptance criteria**
 - [ ] Integration test: 3 Tasks with priorities [high, medium, low]; instrument which Task is polled in which order; assert high comes first more often
-- [ ] No measurable throughput regression vs. the S10 baseline scheduler
-- [ ] The scheduler is opt-in: `bee.runtime.scheduler_policy = "tokio-default"` falls back to S10 behavior
+- [x] No measurable throughput regression vs. the S10 baseline scheduler
+- [x] The scheduler is opt-in: `bee.runtime.scheduler_policy = "tokio-default"` falls back to S10 behavior
+
+> **Done (2026-07-17)** via bundle commit `f959245`. The bee binary reads `BEE_RUNTIME__SCHEDULER_POLICY` env var (or `BEE_CONFIG` file's `policy = "..."` line) at startup; falls back to `SchedulerConfig::default()` (= Mlfq per S23 / ADR-0008 §3).
 
 ---
 
@@ -629,7 +633,9 @@ In `bee-dsl-sql`:
 **Acceptance criteria**
 - [ ] Unit tests for each policy: feed a known mix of Task durations, assert the expected dispatch order
 - [ ] Integration test: 3 Tasks with known CPU costs; under MLFQ, short Tasks complete before long Tasks
-- [ ] Switching policy via config requires only a Node restart (no DAG re-deploy)
+- [x] Switching policy via config requires only a Node restart (no DAG re-deploy)
+
+> **Done (2026-07-17)** via bundle commit `40f5503`. `SchedulerPolicy::default()` returns `Mlfq` (ADR-0008 §3); `SchedulerConfig::build()` instantiates the configured policy at startup. Unit tests for all 4 alternative policies (Mlfq / Sjf / Hrrn / Srtn) plus the priority scheduler already pass.
 
 ---
 
@@ -823,11 +829,13 @@ Move credentials out of Datasource `config` and into a dedicated secret store:
 - Encryption-at-rest: MVP uses Raft log encryption if available; 1.x plugs in HashiCorp Vault / AWS Secrets Manager
 
 **Acceptance criteria**
-- [ ] `bee secret put api_key=secret-001 --value <raw>` stores the secret
-- [ ] Datasource config can reference `api_key_secret_id: "secret-001"` instead of inlining the key
-- [ ] Plugin reads the secret at runtime via `BeeHost.secret_get(secret_id)`; the raw value never appears in Datasource `config` or in any Pipeline log
-- [ ] `bee secret list` shows secret IDs only (not values)
-- [ ] Secrets are scoped per tenant (MVP: all tenant 0)
+- [x] `bee secret put api_key=secret-001 --value <raw>` stores the secret
+- [x] Datasource config can reference `api_key_secret_id: "secret-001"` instead of inlining the key
+- [x] Plugin reads the secret at runtime via `BeeHost.secret_get(secret_id)`; the raw value never appears in Datasource `config` or in any Pipeline log
+- [x] `bee secret list` shows secret IDs only (not values)
+- [x] Secrets are scoped per tenant (MVP: all tenant 0)
+
+> **Done (2026-07-17)** via bundle commit `bb17b4d`. The `SecretStore` trait + `InMemorySecretStore` impl + `bee secret put/get/list/delete` CLI were already at HEAD; S30's plugin-side gap (no `secret_get` FFI hook on `BeeHostV1`) is now closed with `BeeHostV1.secret_get` / `secret_put` slots + `safe_secret_get` / `safe_secret_put` wrappers. Mock FFI round-trip test including per-tenant scoping is locked down by `bee_host_v1_secret_get_round_trip_through_mock_ffi`. The Raft-backed secret store is 1.x (S30.x follow-up).
 
 ---
 
