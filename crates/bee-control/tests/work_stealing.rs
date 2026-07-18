@@ -145,6 +145,79 @@ async fn steal_task_transitions_orphaned_to_migrating_with_new_owner() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn thief_loop_takes_over_orphaned_tasks_after_node_shutdown_s12() {
+    // S12 acceptance: the NodeThiefLoop background task
+    // automatically takes over Orphaned tasks within 5s (no
+    // human / test-driven StealTask submission). This is the
+    // production failover loop closure.
+    use bee_control::work_stealing::spawn_thief_loop;
+
+    let mut deployer = Deployer::new(DeployerConfig::default()).await;
+    let tasks = vec![started(1), started(2), started(3)];
+    let job_id = deployer
+        .deploy(linear_pipeline(tasks, vec![]))
+        .await
+        .unwrap();
+    let mapping = deployer.job_to_node_mapping(job_id).await;
+    let original_owner_of_2 = mapping[&2];
+
+    // Start heartbeat + thief loop.
+    let log = deployer.log.clone();
+    let mut hb = HeartbeatOrchestrator::new(
+        deployer.cluster.clone(),
+        HeartbeatConfig {
+            interval: Duration::from_millis(100),
+            orphan_threshold: Duration::from_millis(300),
+        },
+        log,
+    );
+    hb.start();
+    let _thief_handle = spawn_thief_loop(deployer.cluster.clone());
+
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    // Kill the original owner.
+    deployer.cluster.shutdown_node(original_owner_of_2).await;
+
+    // Wait for task 2 to be taken over by another node.
+    let thief: u32 = (1..=3u32)
+        .find(|id| *id != original_owner_of_2 && deployer.cluster.is_alive(*id))
+        .expect("a free node must exist");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut took_over = false;
+    while tokio::time::Instant::now() < deadline {
+        let status = read_task_status_anywhere(&deployer.cluster, 2).await;
+        let owner = read_task_owner_anywhere(&deployer.cluster, 2).await;
+        if matches!(status, Some(TaskStatus::Migrating) | Some(TaskStatus::Running))
+            && owner == Some(thief)
+        {
+            took_over = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        took_over,
+        "thief loop did not take over Orphaned task 2 within 5s"
+    );
+
+    // migrating_from_node should be the original owner.
+    for (_, handle) in deployer.cluster.nodes() {
+        if !deployer.cluster.is_alive(handle.id) {
+            continue;
+        }
+        let cp = handle.cp.lock().await;
+        if let Some(t) = cp.get_task(2) {
+            assert_eq!(t.migrating_from_node, Some(original_owner_of_2));
+        }
+    }
+
+    _thief_handle.abort();
+    hb.stop();
+    hb.join().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_steal_task_from_two_thieves_only_one_wins() {
     let mut deployer = Deployer::new(DeployerConfig::default()).await;
     let tasks = vec![started(1), started(2), started(3)];
