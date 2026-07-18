@@ -1272,7 +1272,7 @@ The `docs/book/` directory is an mdbook build output (HTML, CSS, JS, fonts). It 
 - [x] `bee deploy` with an invalid SQL file (no SELECTs) exits non-zero with `extract_phase_dag: dag: no SELECT statements found`
 - [ ] `scripts/demo-perf.sh` end-to-end: deploys all 3 demos, waits for each, prints a summary table (deferred — the script itself needs updates to use the new `deploy` + `wait` flow; that's a S49.x follow-up)
 
-> **Done (2026-07-17)** via commits `ef95e63` + `a338ce7`. Unlocks `scripts/demo-perf.sh` (S45) + S33.1 multi-node demo script usage.
+> **Done (2026-07-17)** via commits `ef95e63` + `a338ce7` + `6448f37`. Unlocks `scripts/demo-perf.sh` (S45) + S33.1 multi-node demo script usage. The `demo-perf.sh` now demonstrates the S49 `bee deploy` + `bee jobs wait` paths at the top (with a 2s timeout, expected to time out — no worker), then runs the 3 demos via `bee run` for actual performance measurement.
 
 ---
 

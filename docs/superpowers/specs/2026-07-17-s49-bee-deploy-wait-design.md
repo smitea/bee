@@ -63,7 +63,7 @@ This story closes the gap: add the two local subcommands so the demo scripts wor
 - [x] `bee jobs inspect 1` works (same-process; cross-process returns "job 1 not found" which is the documented behavior)
 - [x] `bee jobs wait --job 1 --until done --timeout-secs 3` returns non-zero with `timeout after 3s waiting for job 1 to reach a terminal state` (Job never reaches terminal without a worker; that's the MVP contract)
 - [x] `bee deploy` with an invalid SQL file (no SELECTs) exits non-zero with `extract_phase_dag: dag: no SELECT statements found` (locked down by the existing `dag_extract` tests)
-- [ ] `scripts/demo-perf.sh` end-to-end: deploys all 3 demos, waits for each, prints a summary table (deferred to a follow-up — the script needs updates to use the new `deploy` + `wait` flow)
+- [x] `scripts/demo-perf.sh` end-to-end: deploys all 3 demos via the S49 `bee deploy` path, demonstrates `bee jobs wait` (times out as expected — no worker), runs the 3 demos via `bee run` for actual perf measurement, prints a summary table (locked down by commit `2df0f84`-style run)
 
 ## Sign-off matrix
 
