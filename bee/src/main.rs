@@ -451,6 +451,9 @@ async fn bee_deploy_local(cluster: &Cluster, sql_path: &str) -> Result<u32, Stri
     //    doesn't choke on Bee extensions.
     let preprocessed = bee_dsl_sql::preprocess_sql_v2(&sql_text)
         .map_err(|e| format!("preprocess: {e}"))?;
+    // Capture the emit target (S42) — we use it for S17
+    // Producer detection below.
+    let emit_target = preprocessed.0.clone();
     let dag = extract_phase_dag(&preprocessed.1)
         .map_err(|e| format!("extract_phase_dag: {e}"))?;
 
@@ -493,6 +496,27 @@ async fn bee_deploy_local(cluster: &Cluster, sql_path: &str) -> Result<u32, Stri
         tenant: 0,
     })
     .map_err(|e| format!("RegisterJob: {e}"))?;
+
+    // 5b. S17: if the SQL emits to a plugin (via `EMIT INTO
+    //     <name>` or `CREATE SINK <name>`), register this Job as
+    //     the Producer of that Datasource's stream. The SM's
+    //     Vacant-entry check makes the registration idempotent
+    //     (subsequent deploys with the same signature are no-ops,
+    //     so the second deploy doesn't overwrite the first
+    //     Producer — ADR-0003). Subscriber detection (the
+    //     counterpart — Jobs that READ from a Producer) is
+    //     gated on S18's cross-Pipeline SQL syntax and lives in
+    //     a follow-up story.
+    if let Some(bee_dsl_sql::preprocess::EmitTarget::Plugin(name)) = emit_target {
+        use bee_control::signature::stream_signature;
+        use std::collections::BTreeMap;
+        let sig = stream_signature(&name, "emit", &BTreeMap::new());
+        cp.apply_op(&bee_control::kv::Op::RegisterDatasourceProducer {
+            signature: sig,
+            job_id: next_job_id,
+        })
+        .map_err(|e| format!("RegisterDatasourceProducer({name}): {e}"))?;
+    }
 
     // 6. Submit N× RegisterTask. phase_id is 1-indexed per PhaseDag.
     let started_at_ms = std::time::SystemTime::now()
