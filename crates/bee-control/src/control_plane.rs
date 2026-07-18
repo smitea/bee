@@ -267,6 +267,15 @@ impl ControlPlaneStateMachine {
                     }
                 })?;
                 job.lifecycle = *state;
+                // S21 TODO: when `state` transitions to a terminal
+                // state (Completed / Failed / Revoked), call
+                // `plugin_manager.release(plugin_id)` for each
+                // plugin the Job was using. This wires the existing
+                // `release` auto-unload logic into the Job-stop
+                // path. The control plane currently doesn't own a
+                // PluginManager reference; the orchestrator (S18
+                // follow-up) will own one and dispatch the release
+                // alongside UpdateJobLifecycle.
                 Ok(())
             }
             Op::Put { .. }
