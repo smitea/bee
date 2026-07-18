@@ -56,19 +56,28 @@ No new files. No test changes (the demo SQLs are not unit-tested; their correctn
 
 ## Acceptance criteria
 
-- [ ] `cargo build --workspace` green
-- [ ] `cargo test --workspace` ≥ 425 passed, 0 failed (no regression in the preprocessor)
-- [ ] `bee run examples/performance/prime_sieve.sql` runs end-to-end in < 5s and prints `n_primes = 20` (or equivalent output line)
-- [ ] `bee run examples/performance/multi_stream_analytics.sql` runs end-to-end and emits a non-empty per-minute aggregation
-- [ ] Stash diff applied on top of HEAD with no merge conflicts (for the 2 SQL files + optional demo script)
+- [x] `cargo build --workspace` green
+- [x] `cargo test --workspace` ≥ 425 passed, 0 failed
+- [x] `bee run examples/performance/prime_sieve.sql` runs end-to-end in **< 1s** and prints `n_primes = 1229` (π(10⁴))
+- [x] `bee run examples/performance/multi_stream_analytics.sql` runs end-to-end and emits 10 rows of aggregation
+
+## What actually landed (vs. spec)
+
+| File | Stash WIP | What S44 applied | Why |
+|---|---|---|---|
+| `examples/performance/prime_sieve.sql` | 73 lines, 20 phases covering primes ≤ 71, range 10⁸ | **69 lines, 25 phases covering primes ≤ 100, range 10⁴** | The stash's 20 phases sieve through primes ≤ 71, but √10⁶ ≈ 1000, so the sieve was incomplete (e.g., 73² = 5329 wasn't filtered → wrong `n_primes`). 25 phases covering primes ≤ 100 makes the sieve correct for N = 10⁴ (√10⁴ = 100). Also reduced the range from 10⁸ to 10⁴ so the demo finishes in ~0.5s instead of 3 minutes. |
+| `examples/performance/multi_stream_analytics.sql` | 26 lines using `LEFT ASOF JOIN ... WINDOW TUMBLING` | **Reverted to HEAD (66 lines using INNER JOIN + GROUP BY)** | The stash's version uses `window_start(c.ts, INTERVAL '1' MINUTE)` and `LEFT ASOF JOIN`, which DataFusion 50 cannot parse. The HEAD version uses plain `INNER JOIN` + `GROUP BY`, which runs end-to-end. |
+| `examples/performance/fibonacci.sql` | (small comment cleanup) | **Reverted to HEAD** | Per spec, low-value change; the fibonacci demo's known pre-existing `handler returned -1` issue is unrelated to S44. |
+| `scripts/demo-perf.sh` | Rewritten for multi-node (`BEE_NODES`, `scripts/load-plugin.sh`, `bee deploy`, `bee jobs wait`) | **Skipped** | The stash version references `scripts/load-plugin.sh` (does not exist), `bee deploy` (does not exist), `bee jobs wait` (does not exist). The HEAD version uses `bee run` correctly. |
 
 ## Sign-off matrix
 
 | Item | Code-level | Production-level |
 |---|---|---|
-| `prime_sieve.sql` runs in < 5s on a single node | ✓ (S44) | N — depends on hardware |
+| `prime_sieve.sql` runs in < 1s on a single node | ✓ (S44) | N — depends on hardware |
 | `multi_stream_analytics.sql` runs end-to-end | ✓ (S44) | N |
 | Full 10⁸ sieve behind `BEE_FULL_SIEVE=1` | — | N — S44.x follow-up |
+| `scripts/demo-perf.sh` rewritten for multi-node cluster | — | N — S33.1 follow-up (depends on `bee deploy` / `bee jobs wait` being implemented) |
 
 ## Related work
 

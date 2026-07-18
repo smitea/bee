@@ -1201,11 +1201,14 @@ The S41 demo's `prime_sieve.sql` ships with 1229 sieving phases (every prime ≤
 
 **Acceptance criteria**
 
-- [ ] `examples/performance/prime_sieve.sql` runs end-to-end in < 30s (vs. the current ~3 minutes)
-- [ ] Correctness check on the trimmed sieve still passes (or `BEE_FULL_SIEVE=1` restores the slow path)
-- [ ] `scripts/demo-perf.sh` updated table reflects the new phase count + wall-clock
-- [ ] `cargo test -p bee-dsl-sql` green (no SQL preprocessor regression)
-- [ ] Stash diff `git stash show stash@{0} -- examples/ scripts/` applied on top of HEAD with no merge conflicts
+- [x] `examples/performance/prime_sieve.sql` runs end-to-end in < 30s (achieved **~0.5s**; sieve covers primes ≤ 100, range 10⁴, expected `n_primes = 1229` = π(10⁴))
+- [x] Correctness check on the trimmed sieve still passes (verified `n_primes = 1229`)
+- [ ] Correctness check on the trimmed sieve still passes (or `BEE_FULL_SIEVE=1` restores the slow path) — superseded; full-sieve follow-up is S44.x
+- [ ] `scripts/demo-perf.sh` updated table reflects the new phase count + wall-clock — superseded; stash version was broken (referenced non-existent `bee deploy` / `scripts/load-plugin.sh`); HEAD version kept
+- [x] `cargo test -p bee-dsl-sql` green (no SQL preprocessor regression)
+- [x] Stash diff `git stash show stash@{0} -- examples/ scripts/` applied on top of HEAD with no merge conflicts
+
+> **Note (2026-07-17)**: The stash's `multi_stream_analytics.sql` rewrite was **reverted** to HEAD because it used `LEFT ASOF JOIN ... WINDOW TUMBLING` syntax that DataFusion 50 cannot parse. The HEAD version runs end-to-end (~0.7s).
 
 ---
 
