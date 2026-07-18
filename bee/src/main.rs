@@ -46,7 +46,7 @@ use bee_control::raft::admin_client::AdminClient;
 use bee_control::raft::admin_protocol::{AdminRequest, AdminResponse};
 use bee_control::raft::cluster::{Cluster, ClusterConfig};
 use bee_control::secret_store::{InMemorySecretStore, SecretStore};
-use bee_dsl_sql::{run_pipeline_with_config, RunConfig};
+use bee_dsl_sql::{dag::extract_phase_dag, run_pipeline_with_config, RunConfig};
 use bee_plugin_sdk::{compute_plugin_id, VersionSpec};
 use bee_transport::Connection;
 
@@ -153,6 +153,7 @@ async fn main() -> ExitCode {
         Some("jobs") => match run_jobs_cli(
             args.get(1).map(String::as_str),
             args.get(2).map(String::as_str),
+            &args[1..],
         )
         .await
         {
@@ -167,6 +168,36 @@ async fn main() -> ExitCode {
             Err(e) => {
                 eprintln!("{}: cluster failed: {}", PKG_NAME, e);
                 ExitCode::from(1)
+            }
+        },
+        Some("deploy") => {
+            // S49: `bee deploy <sql_file>` (local mode). Spins up
+            // a 3-Node in-process Cluster, extracts the DAG, and
+            // registers a Job + N Tasks. The remote counterpart
+            // (`bee --connect <addr> deploy <sql_file>`) sends an
+            // admin RPC; this local path is the MVP primary
+            // entry point.
+            let sql_path = args.get(1);
+            let result: Result<u32, String> = async {
+                let sql_path = sql_path
+                    .ok_or_else(|| "deploy requires <sql_file>".to_string())?;
+                let cluster = Cluster::new(ClusterConfig::default()).await;
+                cluster
+                    .wait_for_leader(Duration::from_secs(3))
+                    .await
+                    .ok_or_else(|| "no leader elected".to_string())?;
+                bee_deploy_local(&cluster, sql_path).await
+            }
+            .await;
+            match result {
+                Ok(job_id) => {
+                    println!("deployed as job {job_id}");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("{}: deploy failed: {}", PKG_NAME, e);
+                    ExitCode::from(1)
+                }
             }
         },
         Some("diagnostics") => match run_diagnostics(args.get(1).map(String::as_str)).await {
@@ -330,6 +361,7 @@ async fn run_cluster_status_cli(subcommand: Option<&str>) -> Result<(), String> 
 async fn run_jobs_cli(
     subcommand: Option<&str>,
     job_id_arg: Option<&str>,
+    args: &[String],
 ) -> Result<(), String> {
     let cluster = Cluster::new(ClusterConfig::default()).await;
     cluster
@@ -376,7 +408,155 @@ async fn run_jobs_cli(
             }
             Err("no alive node".to_string())
         }
+        Some("wait") => {
+            // Parse `--job <id>` (and optional `--timeout-secs <n>`)
+            // from the args slice.
+            let id: u32 = args
+                .iter()
+                .position(|a| a == "--job")
+                .and_then(|i| args.get(i + 1))
+                .ok_or_else(|| "jobs wait requires --job <id>".to_string())?
+                .parse()
+                .map_err(|e| format!("invalid job_id: {e}"))?;
+            let timeout_secs: u64 = args
+                .iter()
+                .position(|a| a == "--timeout-secs")
+                .and_then(|i| args.get(i + 1))
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(300); // 5 minutes default per S49 spec
+            match bee_jobs_wait_local(&cluster, id, timeout_secs).await {
+                Ok(state) => {
+                    println!("job {id} reached {state}");
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            }
+        }
         Some(other) => Err(format!("unknown jobs subcommand `{other}`")),
+    }
+}
+
+/// S49: `bee deploy <sql_file>` (local mode). Reads the SQL,
+/// extracts the DAG, registers a Job + N Tasks in the local
+/// ControlPlane. Returns the new JobId.
+async fn bee_deploy_local(cluster: &Cluster, sql_path: &str) -> Result<u32, String> {
+    // 1. Read the SQL file.
+    let sql_text = std::fs::read_to_string(sql_path)
+        .map_err(|e| format!("read {sql_path}: {e}"))?;
+
+    // 2. Extract the DAG. The S33.5.3 `extract_phase_dag` is
+    //    raw-parser based; we pre-strip `CREATE SOURCE` /
+    //    `CREATE VIEW` / `CREATE SINK` first via the Bee
+    //    preprocessor so the underlying DataFusion parser
+    //    doesn't choke on Bee extensions.
+    let preprocessed = bee_dsl_sql::preprocess_sql_v2(&sql_text)
+        .map_err(|e| format!("preprocess: {e}"))?;
+    let dag = extract_phase_dag(&preprocessed.1)
+        .map_err(|e| format!("extract_phase_dag: {e}"))?;
+
+    // 3. Find the leader's ControlPlane (consistency: write
+    //    through the leader; in MVP, the in-process 3-node
+    //    cluster has a single CP).
+    let leader_id = cluster
+        .leader()
+        .await
+        .ok_or_else(|| "no leader elected".to_string())?;
+    let leader_handle = cluster
+        .nodes()
+        .find(|(id, _)| *id == leader_id)
+        .map(|(_, h)| h)
+        .ok_or_else(|| format!("leader node {leader_id} handle not found"))?
+        .clone();
+    let mut cp = leader_handle.cp.lock().await;
+
+    // 4. Allocate JobId + TaskIds by scanning existing.
+    let next_job_id = cp
+        .list_jobs()
+        .iter()
+        .map(|j| j.job_id)
+        .max()
+        .map(|m| m + 1)
+        .unwrap_or(1);
+    let next_task_id = cp
+        .list_tasks()
+        .iter()
+        .map(|t| t.task_id)
+        .max()
+        .map(|m| m + 1)
+        .unwrap_or(1);
+
+    // 5. Submit RegisterJob.
+    cp.apply_op(&bee_control::kv::Op::RegisterJob {
+        job_id: next_job_id,
+        dag_hash: dag.dag_hash.clone(),
+        owner_node: leader_id,
+        tenant: 0,
+    })
+    .map_err(|e| format!("RegisterJob: {e}"))?;
+
+    // 6. Submit N× RegisterTask. phase_id is 1-indexed per PhaseDag.
+    let started_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    for (i, phase) in dag.phases.iter().enumerate() {
+        let task_id = next_task_id + i as u32;
+        cp.apply_op(&bee_control::kv::Op::RegisterTask {
+            task_id,
+            job_id: next_job_id,
+            phase_id: phase.phase_id,
+            owner_node: leader_id,
+            status: bee_control::kv::TaskStatus::Pending,
+            started_at_ms,
+        })
+        .map_err(|e| format!("RegisterTask[{i}]: {e}"))?;
+    }
+
+    Ok(next_job_id)
+}
+
+/// S49: `bee jobs wait --job <id> --until done` (local mode).
+/// Polls the local ControlPlane for the Job's lifecycle state
+/// every 200ms. Returns when the Job reaches a terminal state
+/// (Completed / Failed / Revoked) or when the timeout expires.
+async fn bee_jobs_wait_local(
+    cluster: &Cluster,
+    job_id: u32,
+    timeout_secs: u64,
+) -> Result<&'static str, String> {
+    use bee_control::JobLifecycleState;
+
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_secs(timeout_secs);
+    loop {
+        // Read from any alive node's CP. The in-process 3-node
+        // cluster has a single shared CP via the leader's
+        // ControlPlaneStateMachine; any alive node sees the
+        // same state.
+        for (_id, handle) in cluster.nodes() {
+            if cluster.is_alive(_id) {
+                let cp = handle.cp.lock().await;
+                if let Some(job) = cp.get_job(job_id) {
+                    let state = job.lifecycle;
+                    if matches!(
+                        state,
+                        JobLifecycleState::Completed | JobLifecycleState::Failed
+                    ) {
+                        return Ok(match state {
+                            JobLifecycleState::Completed => "completed",
+                            JobLifecycleState::Failed => "failed",
+                            _ => unreachable!(),
+                        });
+                    }
+                }
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(format!(
+                "timeout after {timeout_secs}s waiting for job {job_id} to reach a terminal state"
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
 }
 
