@@ -98,6 +98,24 @@ impl std::fmt::Display for SchedulerPolicy {
     }
 }
 
+impl std::str::FromStr for SchedulerPolicy {
+    type Err = String;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "priority" => Ok(Self::Priority),
+            "tokio-default" => Ok(Self::TokioDefault),
+            "mlfq" => Ok(Self::Mlfq),
+            "sjf" => Ok(Self::Sjf),
+            "hrrn" => Ok(Self::Hrrn),
+            "srtn" => Ok(Self::Srtn),
+            other => Err(format!(
+                "unknown scheduler policy: `{other}`; expected one of \
+                 priority, tokio-default, mlfq, sjf, hrrn, srtn"
+            )),
+        }
+    }
+}
+
 /// The trait the runtime uses to decide which ready Task to poll
 /// next. S22 defines the trait + two impls; S23 adds more.
 pub trait RuntimeScheduler: Send + Sync {
@@ -730,6 +748,17 @@ impl SchedulerConfig {
     }
 }
 
+impl std::str::FromStr for SchedulerConfig {
+    type Err = String;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        let policy: SchedulerPolicy = s.parse()?;
+        Ok(Self {
+            policy,
+            ..Self::default()
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1026,5 +1055,34 @@ mod tests {
         // SchedulerConfig::default() inherits from SchedulerPolicy::default().
         let cfg = SchedulerConfig::default();
         assert_eq!(cfg.policy, SchedulerPolicy::Mlfq);
+    }
+
+    #[test]
+    fn scheduler_policy_from_str_parses_all_variants() {
+        // S22: the config knob `bee.runtime.scheduler_policy` reads
+        // a string and parses it into SchedulerPolicy. Lock down
+        // all 6 variants.
+        assert_eq!("priority".parse::<SchedulerPolicy>().unwrap(), SchedulerPolicy::Priority);
+        assert_eq!("tokio-default".parse::<SchedulerPolicy>().unwrap(), SchedulerPolicy::TokioDefault);
+        assert_eq!("mlfq".parse::<SchedulerPolicy>().unwrap(), SchedulerPolicy::Mlfq);
+        assert_eq!("sjf".parse::<SchedulerPolicy>().unwrap(), SchedulerPolicy::Sjf);
+        assert_eq!("hrrn".parse::<SchedulerPolicy>().unwrap(), SchedulerPolicy::Hrrn);
+        assert_eq!("srtn".parse::<SchedulerPolicy>().unwrap(), SchedulerPolicy::Srtn);
+    }
+
+    #[test]
+    fn scheduler_policy_from_str_rejects_unknown() {
+        let result = "bogus-policy".parse::<SchedulerPolicy>();
+        assert!(result.is_err(), "unknown policy must error");
+    }
+
+    #[test]
+    fn scheduler_config_from_str_delegates_to_policy() {
+        // SchedulerConfig::from_str parses the policy and keeps the
+        // other fields at their defaults.
+        let cfg: SchedulerConfig = "tokio-default".parse().unwrap();
+        assert_eq!(cfg.policy, SchedulerPolicy::TokioDefault);
+        assert_eq!(cfg.mlfq_levels, 3, "non-policy fields must default");
+        assert_eq!(cfg.mlfq_demote_after, 5);
     }
 }

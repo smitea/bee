@@ -58,6 +58,13 @@ const PKG_DESCRIPTION: &str = env!("CARGO_PKG_DESCRIPTION");
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
+    // S22: load scheduler config at startup so cluster status can
+    // report the active policy.
+    let scheduler_cfg = load_scheduler_config();
+    eprintln!(
+        "{}: scheduler policy: {}",
+        PKG_NAME, scheduler_cfg.policy
+    );
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("--version") | Some("-V") => {
@@ -1237,4 +1244,52 @@ fn print_help() {
     println!("                              report whether each cdylib artifact is built");
     println!("                              (target/debug/lib<name>.dylib or .so). MVP static");
     println!("                              list; S34-S39 swaps in a libloading-driven scan.");
+}
+
+/// S22: load the runtime scheduler policy from configuration.
+///
+/// Priority order (highest first):
+/// 1. `BEE_RUNTIME__SCHEDULER_POLICY` env var (one of: priority,
+///    tokio-default, mlfq, sjf, hrrn, srtn)
+/// 2. `BEE_CONFIG` file path env var → file with `policy = "mlfq"`
+///    line (a trivial `key = "value"` line scanner; full TOML is
+///    overkill for the MVP single-knob config)
+/// 3. `SchedulerConfig::default()` (currently Mlfq per S23 / ADR-0008 §3)
+///
+/// Invalid values log a warning and fall back to the default.
+fn load_scheduler_config() -> bee_runtime::scheduler::SchedulerConfig {
+    use std::str::FromStr;
+    if let Ok(s) = std::env::var("BEE_RUNTIME__SCHEDULER_POLICY") {
+        match bee_runtime::scheduler::SchedulerConfig::from_str(&s) {
+            Ok(cfg) => return cfg,
+            Err(e) => eprintln!(
+                "{}: warning: invalid BEE_RUNTIME__SCHEDULER_POLICY={s:?}: {e}; \
+                 using default",
+                PKG_NAME
+            ),
+        }
+    }
+    if let Ok(path) = std::env::var("BEE_CONFIG") {
+        if let Ok(s) = std::fs::read_to_string(&path) {
+            for line in s.lines() {
+                let line = line.trim();
+                let Some(rest) = line.strip_prefix("policy") else {
+                    continue;
+                };
+                let rest = rest
+                    .trim()
+                    .trim_start_matches('=')
+                    .trim()
+                    .trim_matches('"');
+                match bee_runtime::scheduler::SchedulerConfig::from_str(rest) {
+                    Ok(cfg) => return cfg,
+                    Err(e) => eprintln!(
+                        "{}: warning: invalid policy in {path}: {e}; using default",
+                        PKG_NAME
+                    ),
+                }
+            }
+        }
+    }
+    bee_runtime::scheduler::SchedulerConfig::default()
 }
