@@ -2088,4 +2088,47 @@ mod tests {
         // The result should have the substitution applied.
         assert!(s.contains("FROM (SELECT 1)"), "got: {s}");
     }
+
+    // ---- S18: detect_cross_pipeline_deps tests ----
+
+    #[test]
+    fn detect_cross_pipeline_deps_recognises_integer_output() {
+        let sql = "CREATE VIEW v AS SELECT * FROM 1.output;";
+        let deps = detect_cross_pipeline_deps(sql);
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].upstream_job, 1);
+        assert_eq!(deps[0].stream, "output");
+    }
+
+    #[test]
+    fn detect_cross_pipeline_deps_dedupes() {
+        let sql = "SELECT a.col, b.col FROM 1.output AS a, 1.output AS b;";
+        let deps = detect_cross_pipeline_deps(sql);
+        assert_eq!(deps.len(), 1, "duplicate 1.output should dedupe");
+    }
+
+    #[test]
+    fn detect_cross_pipeline_deps_handles_multiple_upstreams() {
+        let sql = "SELECT * FROM 1.output JOIN 2.output ON true;";
+        let deps = detect_cross_pipeline_deps(sql);
+        assert_eq!(deps.len(), 2);
+        assert_eq!(deps[0].upstream_job, 1);
+        assert_eq!(deps[1].upstream_job, 2);
+    }
+
+    #[test]
+    fn detect_cross_pipeline_deps_ignores_aliases() {
+        // `my_alias` is not numeric — must not match.
+        let sql = "SELECT * FROM my_alias;";
+        let deps = detect_cross_pipeline_deps(sql);
+        assert_eq!(deps.len(), 0);
+    }
+
+    #[test]
+    fn detect_cross_pipeline_deps_recognises_bare_reference_no_create_view() {
+        let sql = "SELECT * FROM 7.output;";
+        let deps = detect_cross_pipeline_deps(sql);
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].upstream_job, 7);
+    }
 }
