@@ -108,19 +108,90 @@ fn format_job_inspect_inner(job: &JobRecord, tasks: &[&TaskRecord]) -> String {
 }
 
 fn format_dag(tasks: &[&TaskRecord]) -> String {
+    use std::collections::{HashMap, VecDeque};
+
     if tasks.is_empty() {
         return "    (no tasks)\n".to_string();
     }
-    let mut sorted: Vec<&&TaskRecord> = tasks.iter().collect();
-    sorted.sort_by_key(|t| t.task_id);
+
+    // 1. Build child map (parent -> [child]) and find roots (no
+    //    dependencies). Tasks that depend on a missing parent
+    //    (e.g. the dep was deleted) are also treated as roots.
+    let mut by_id: HashMap<u32, &TaskRecord> = HashMap::new();
+    for t in tasks {
+        by_id.insert(t.task_id, *t);
+    }
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    for t in tasks {
+        for &dep in &t.dependencies {
+            children.entry(dep).or_default().push(t.task_id);
+        }
+    }
+    let mut roots: Vec<u32> = Vec::new();
+    for t in tasks {
+        if t.dependencies.is_empty()
+            || t.dependencies.iter().all(|d| !by_id.contains_key(d))
+        {
+            roots.push(t.task_id);
+        }
+    }
+    roots.sort();
+
+    // 2. BFS for level (longest path from any root). Tasks missed
+    //    by BFS (cyclic deps) get level 0 as a fallback.
+    let mut level: HashMap<u32, usize> = HashMap::new();
+    let mut queue: VecDeque<(u32, usize)> =
+        roots.iter().map(|&r| (r, 0)).collect();
+    while let Some((id, lvl)) = queue.pop_front() {
+        if level.get(&id).copied().unwrap_or(usize::MAX) <= lvl {
+            continue;
+        }
+        level.insert(id, lvl);
+        if let Some(kids) = children.get(&id) {
+            for &c in kids {
+                queue.push_back((c, lvl + 1));
+            }
+        }
+    }
+    for t in tasks {
+        level.entry(t.task_id).or_insert(0);
+    }
+
+    // 3. Group by level, sort each level by task_id.
+    let mut max_level = 0usize;
+    let mut by_level: HashMap<usize, Vec<u32>> = HashMap::new();
+    for (&id, &lvl) in &level {
+        max_level = max_level.max(lvl);
+        by_level.entry(lvl).or_default().push(id);
+    }
+    for v in by_level.values_mut() {
+        v.sort();
+    }
+
+    // 4. Render each level as `├─ Task N [status]` (or `└─` for
+    //    the last Task in the level), separated by `│` between
+    //    levels. For independent tasks (all at level 0), this
+    //    falls back to a vertical tree with `├─` / `└─` prefixes.
     let mut out = String::new();
-    for (i, t) in sorted.iter().enumerate() {
-        let prefix = if i + 1 == sorted.len() {
-            "    └─ "
-        } else {
-            "    ├─ "
-        };
-        out.push_str(&format!("{}Task {}\n", prefix, t.task_id));
+    for lvl in 0..=max_level {
+        if let Some(ids) = by_level.get(&lvl) {
+            for (i, id) in ids.iter().enumerate() {
+                let prefix = if i + 1 == ids.len() { "└─" } else { "├─" };
+                let t = by_id.get(id).copied();
+                let status = t
+                    .map(|t| format_status(t.status))
+                    .unwrap_or_else(|| "unknown".into());
+                out.push_str(&format!(
+                    "    {} Task {} [{}]\n",
+                    prefix,
+                    id,
+                    colorize_status(&status)
+                ));
+            }
+        }
+        if lvl < max_level {
+            out.push_str("    │\n");
+        }
     }
     out
 }
@@ -344,6 +415,7 @@ mod tests {
             status: TaskStatus::Running,
             started_at_ms: 0,
             migrating_from_node: None,
+            dependencies: Vec::new(),
         };
         let task2 = TaskRecord {
             task_id: 2,
@@ -353,13 +425,15 @@ mod tests {
             status: TaskStatus::Running,
             started_at_ms: 0,
             migrating_from_node: None,
+            dependencies: Vec::new(),
         };
         let s = format_dag(&[&task1, &task2]);
         assert!(s.contains("Task 1"));
         assert!(s.contains("Task 2"));
-        // The connector characters ├─ / └─ are present
-        assert!(s.contains("├─"));
-        assert!(s.contains("└─"));
+        // S27: 2 independent Tasks render as a single row in
+        // the new layer-based layout (no `│` connector between
+        // them — they're at the same level).
+        assert!(!s.contains("│"), "no level separator: {s}");
     }
 
     #[test]
@@ -388,5 +462,94 @@ mod tests {
         ] {
             let _ = format_status(s);
         }
+    }
+
+    // ---- S27: format_dag real-DAG layout ----
+
+    fn mk_task(task_id: u32, deps: Vec<u32>) -> TaskRecord {
+        TaskRecord {
+            task_id,
+            job_id: 1,
+            phase_id: task_id,
+            owner_node: 1,
+            status: TaskStatus::Running,
+            started_at_ms: 0,
+            migrating_from_node: None,
+            dependencies: deps,
+        }
+    }
+
+    #[test]
+    fn format_dag_independent_tasks_listed_in_single_row() {
+        // T1, T2, T3 with no edges between them.
+        let tasks = vec![
+            mk_task(1, vec![]),
+            mk_task(2, vec![]),
+            mk_task(3, vec![]),
+        ];
+        let s = format_dag(&tasks.iter().collect::<Vec<_>>());
+        assert!(s.contains("Task 1"));
+        assert!(s.contains("Task 2"));
+        assert!(s.contains("Task 3"));
+        // Independent tasks: no `│` connector (no edges between
+        // levels — all on one row).
+        assert!(!s.contains("│"), "no level separator expected: {s}");
+    }
+
+    #[test]
+    fn format_dag_linear_chain_draws_level_separators() {
+        // T1 -> T2 -> T3 (linear chain). 3 levels; 2 `│` separators.
+        let tasks = vec![
+            mk_task(1, vec![]),
+            mk_task(2, vec![1]),
+            mk_task(3, vec![2]),
+        ];
+        let s = format_dag(&tasks.iter().collect::<Vec<_>>());
+        // T1 must appear before T2 before T3.
+        let p1 = s.find("Task 1").unwrap();
+        let p2 = s.find("Task 2").unwrap();
+        let p3 = s.find("Task 3").unwrap();
+        assert!(p1 < p2 && p2 < p3, "ordering: {s}");
+        // 2 `│` connectors (between L0-L1 and L1-L2).
+        assert_eq!(s.matches("│").count(), 2, "expected 2 level separators: {s}");
+    }
+
+    #[test]
+    fn format_dag_diamond_renders_both_branches() {
+        // T1 -> {T2, T3} -> T4 (diamond). Levels: L0={T1}, L1={T2,T3}, L2={T4}.
+        let tasks = vec![
+            mk_task(1, vec![]),
+            mk_task(2, vec![1]),
+            mk_task(3, vec![1]),
+            mk_task(4, vec![2, 3]),
+        ];
+        let s = format_dag(&tasks.iter().collect::<Vec<_>>());
+        // All 4 tasks present.
+        assert!(s.contains("Task 1"));
+        assert!(s.contains("Task 2"));
+        assert!(s.contains("Task 3"));
+        assert!(s.contains("Task 4"));
+        // 2 `│` separators (L0->L1 and L1->L2).
+        assert_eq!(s.matches("│").count(), 2, "expected 2 level separators: {s}");
+        // T2 and T3 must be at the same level: between the same
+        // pair of `│` separators (and the same prefix style).
+        let mut t2_line: Option<usize> = None;
+        let mut t3_line: Option<usize> = None;
+        for (i, line) in s.lines().enumerate() {
+            if line.contains("Task 2") {
+                t2_line = Some(i);
+            }
+            if line.contains("Task 3") {
+                t3_line = Some(i);
+            }
+        }
+        assert!(t2_line.is_some() && t3_line.is_some());
+        let t2_line = t2_line.unwrap();
+        let t3_line = t3_line.unwrap();
+        // T2 must be on a line BETWEEN the same pair of `│`
+        // markers as T3. Count `│` lines above each.
+        let pipe_above = |line: usize| s.lines().take(line).filter(|l| l.trim() == "│").count();
+        assert_eq!(pipe_above(t2_line), pipe_above(t3_line),
+            "T2 and T3 must share a level (same `│` count above): {s}");
     }
 }

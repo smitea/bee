@@ -73,6 +73,15 @@ pub struct TaskRecord {
     /// CLI uses this to show the "source → target" view required
     /// by S28 acceptance. `None` for non-Migrating Tasks.
     pub migrating_from_node: Option<u32>,
+    /// S27: intra-Job Task dependencies (Phase DAG edges). A
+    /// Task whose `phase_id` is downstream of another Task in
+    /// the same Job lists the upstream's `task_id` here. S18
+    /// (cross-Pipeline edges) is the follow-up that populates
+    /// this in production for cross-Job edges; the MVP DAG
+    /// always has empty `dependencies` (independent phases).
+    /// `format_dag` (S27) reads this to render the DAG layout.
+    #[serde(default)]
+    pub dependencies: Vec<u32>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -155,6 +164,7 @@ impl ControlPlaneStateMachine {
                         status: *status,
                         started_at_ms: *started_at_ms,
                         migrating_from_node: None,
+                        dependencies: Vec::new(),
                     },
                 );
                 Ok(())
