@@ -201,6 +201,8 @@ pub fn load_plugin(path: &Path) -> Result<LoadedPlugin, LoadError> {
             kv_get: None,
             kv_put: None,
             kv_cas: None,
+            secret_get: None,
+            secret_put: None,
             current_stream_id: None,
         });
         let host_ptr: *mut BeeHostV1 = &mut *host;

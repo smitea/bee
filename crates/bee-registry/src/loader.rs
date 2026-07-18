@@ -227,6 +227,8 @@ fn build_demo_host() -> BeeHostV1 {
         kv_get: Some(host_kv_get),
         kv_put: Some(host_kv_put),
         kv_cas: Some(host_kv_cas),
+        secret_get: None,
+        secret_put: None,
         current_stream_id: Some(host_current_stream_id),
     }
 }
