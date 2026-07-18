@@ -94,7 +94,7 @@ async fn job_with_no_deps_starts_pending_evaluates_to_running() {
             Op::RegisterJob {
                 job_id: 1,
                 dag_hash: "h".into(),
-                owner_node: 1, tenant: 0, },
+                owner_node: 1, tenant: 0, dependencies: vec![] },
         )
         .await
         .unwrap();
@@ -122,7 +122,7 @@ async fn downstream_with_unsatisfied_dep_evaluates_to_waiting() {
             Op::RegisterJob {
                 job_id: 1,
                 dag_hash: "a".into(),
-                owner_node: 1, tenant: 0, },
+                owner_node: 1, tenant: 0, dependencies: vec![] },
         )
         .await
         .unwrap();
@@ -133,7 +133,7 @@ async fn downstream_with_unsatisfied_dep_evaluates_to_waiting() {
             Op::RegisterJob {
                 job_id: 2,
                 dag_hash: "b".into(),
-                owner_node: 1, tenant: 0, },
+                owner_node: 1, tenant: 0, dependencies: vec![] },
         )
         .await
         .unwrap();
@@ -182,7 +182,7 @@ async fn upstream_running_promotes_downstream_evaluation_to_running() {
             Op::RegisterJob {
                 job_id: 1,
                 dag_hash: "a".into(),
-                owner_node: 1, tenant: 0, },
+                owner_node: 1, tenant: 0, dependencies: vec![] },
         )
         .await
         .unwrap();
@@ -192,7 +192,8 @@ async fn upstream_running_promotes_downstream_evaluation_to_running() {
             Op::RegisterJob {
                 job_id: 2,
                 dag_hash: "b".into(),
-                owner_node: 1, tenant: 0, },
+                owner_node: 1, tenant: 0,     dependencies: Vec::new(),
+},
         )
         .await
         .unwrap();
@@ -258,7 +259,7 @@ async fn adding_dep_to_running_job_demotes_it_to_waiting() {
             Op::RegisterJob {
                 job_id: 1,
                 dag_hash: "a".into(),
-                owner_node: 1, tenant: 0, },
+                owner_node: 1, tenant: 0, dependencies: vec![] },
         )
         .await
         .unwrap();
@@ -268,7 +269,7 @@ async fn adding_dep_to_running_job_demotes_it_to_waiting() {
             Op::RegisterJob {
                 job_id: 2,
                 dag_hash: "b".into(),
-                owner_node: 1, tenant: 0, },
+                owner_node: 1, tenant: 0, dependencies: vec![] },
         )
         .await
         .unwrap();

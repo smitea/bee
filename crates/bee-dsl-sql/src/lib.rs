@@ -34,9 +34,10 @@ pub use physical::{
     run_pipeline_with_config, DataFusionPhase, RunConfig, RunMode,
 };
 pub use preprocess::{
-    check_strict_mode, extract_stream_identities, parse_use_directives,
-    preprocess, strip_create_source_and_view, strip_emit_into, strip_create_sink,
-    CreateDefinition, CreateKind, EmitTarget, UseDirective,
+    check_strict_mode, detect_cross_pipeline_deps, extract_stream_identities,
+    parse_use_directives, preprocess, strip_create_source_and_view, strip_emit_into,
+    strip_create_sink, CreateDefinition, CreateKind, DependencyRecord, EmitTarget,
+    UseDirective,
 };
 
 /// S41 (9b / 9c): preprocess a SQL string for execution, including:

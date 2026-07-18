@@ -27,7 +27,7 @@ pub mod work_stealing;
 pub use bee_types::JobLifecycleState;
 
 pub use builtin_handlers::{LogSink, StartedHandler, TerminalHandler};
-pub use control_plane::{ControlPlaneStateMachine, JobRecord, TaskRecord};
+pub use control_plane::{ControlPlaneStateMachine, DependencyRecord, JobRecord, TaskRecord};
 pub use deployer::{Deployer, DeployerConfig, Edge, HandlerKind, Pipeline, TaskSpec};
 pub use heartbeat::{HeartbeatConfig, HeartbeatOrchestrator};
 pub use kv::{KVStateMachine, Op, TaskStatus, TxnError};

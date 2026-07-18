@@ -15,6 +15,7 @@ test-fixtures = []
 [dependencies]
 datafusion = { workspace = true }
 arrow-array = "56"
+serde = { version = "1", features = ["derive"] }
 arrow-schema = "56"
 bee-runtime = { workspace = true }
 bee-plugin-sdk = { workspace = true }

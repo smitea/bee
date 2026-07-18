@@ -92,7 +92,7 @@ async fn control_plane_records_job_and_task_to_node_mapping() {
             Op::RegisterJob {
                 job_id: 999,
                 dag_hash: "x".to_string(),
-                owner_node: leader, tenant: 0, },
+                owner_node: leader, tenant: 0, dependencies: vec![] },
         )
         .await;
     assert!(res.is_ok(), "cluster still accepts ControlPlane ops after deploy");

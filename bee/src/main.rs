@@ -454,6 +454,11 @@ async fn bee_deploy_local(cluster: &Cluster, sql_path: &str) -> Result<u32, Stri
     // Capture the emit target (S42) — we use it for S17
     // Producer detection below.
     let emit_target = preprocessed.0.clone();
+    // S18: detect cross-Pipeline edges (`FROM <job_id>.output`).
+    // The orchestrator drives B's lifecycle to
+    // `WaitingForUpstream` until the upstream Job is `Running`.
+    let dependencies =
+        bee_dsl_sql::preprocess::detect_cross_pipeline_deps(&preprocessed.1);
     let dag = extract_phase_dag(&preprocessed.1)
         .map_err(|e| format!("extract_phase_dag: {e}"))?;
 
@@ -488,12 +493,23 @@ async fn bee_deploy_local(cluster: &Cluster, sql_path: &str) -> Result<u32, Stri
         .map(|m| m + 1)
         .unwrap_or(1);
 
-    // 5. Submit RegisterJob.
+    // 5. Submit RegisterJob. Convert deps from the
+    //    `bee_dsl_sql::DependencyRecord` (returned by
+    //    `detect_cross_pipeline_deps`) to the
+    //    `bee_control::DependencyRecord` (used by the SM).
+    let bee_control_deps: Vec<bee_control::DependencyRecord> = dependencies
+        .iter()
+        .map(|d| bee_control::DependencyRecord {
+            upstream_job: d.upstream_job,
+            stream: d.stream.clone(),
+        })
+        .collect();
     cp.apply_op(&bee_control::kv::Op::RegisterJob {
         job_id: next_job_id,
         dag_hash: dag.dag_hash.clone(),
         owner_node: leader_id,
         tenant: 0,
+        dependencies: bee_control_deps,
     })
     .map_err(|e| format!("RegisterJob: {e}"))?;
 

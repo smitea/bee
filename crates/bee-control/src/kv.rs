@@ -25,6 +25,8 @@
 
 use std::collections::HashMap;
 
+use crate::control_plane::DependencyRecord;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TxnError {
     Conflict {
@@ -61,6 +63,13 @@ pub enum Op {
         /// S29: tenant namespace (`u16`; 0 = global per ADR-0010).
         /// MVP: struct field only; ACL check is 1.x.
         tenant: u16,
+        /// S18: cross-Pipeline edges. A Job B with
+        /// `CREATE VIEW v AS SELECT ... FROM a.output` (where
+        /// `a` is JobId 1) gets `DependencyRecord { upstream_job: 1, stream: "output" }`.
+        /// The orchestrator (`evaluate_job_state`) holds B in
+        /// `WaitingForUpstream` until upstream Job 1 is `Running`.
+        #[serde(default)]
+        dependencies: Vec<DependencyRecord>,
     },
     RegisterTask {
         task_id: u32,

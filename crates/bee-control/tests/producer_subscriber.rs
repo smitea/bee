@@ -31,6 +31,7 @@ fn job_with_emit_into_plugin_is_classified_as_producer() {
         dag_hash: "demo".into(),
         owner_node: 1,
         tenant: 0,
+        dependencies: vec![]
     })
     .unwrap();
 
@@ -59,6 +60,7 @@ fn job_without_emit_into_plugin_is_classified_as_independent() {
         dag_hash: "plain".into(),
         owner_node: 1,
         tenant: 0,
+        dependencies: vec![]
     })
     .unwrap();
     assert_eq!(cp.job_mode(1), JobMode::Independent);
@@ -83,6 +85,7 @@ fn second_deploy_for_same_stream_is_idempotent() {
         dag_hash: "first".into(),
         owner_node: 1,
         tenant: 0,
+        dependencies: vec![]
     })
     .unwrap();
     cp.apply_op(&Op::RegisterJob {
@@ -90,6 +93,7 @@ fn second_deploy_for_same_stream_is_idempotent() {
         dag_hash: "second".into(),
         owner_node: 1,
         tenant: 0,
+        dependencies: vec![]
     })
     .unwrap();
     let sig = stream_signature("binance", "emit", &BTreeMap::new());

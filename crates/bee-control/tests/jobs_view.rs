@@ -40,7 +40,7 @@ async fn bee_jobs_after_deploy_shows_the_job() {
             Op::RegisterJob {
                 job_id: 1,
                 dag_hash: "linear-3".into(),
-                owner_node: leader, tenant: 0, },
+                owner_node: leader, tenant: 0, dependencies: vec![] },
         )
         .await
         .unwrap();
@@ -106,7 +106,7 @@ async fn bee_jobs_inspect_shows_dag_and_per_task_status() {
             Op::RegisterJob {
                 job_id: 1,
                 dag_hash: "my-pipeline".into(),
-                owner_node: leader, tenant: 0, },
+                owner_node: leader, tenant: 0, dependencies: vec![] },
         )
         .await
         .unwrap();
@@ -121,7 +121,7 @@ async fn bee_jobs_inspect_shows_dag_and_per_task_status() {
                     owner_node: tid,
                     status: TaskStatus::Running,
                     started_at_ms: 0,
-                },
+},
             )
             .await
             .unwrap();
@@ -185,6 +185,7 @@ async fn bee_jobs_inspect_unknown_job_returns_none_at_library_level() {
                     dag_hash: format!("job-{id}"),
                     owner_node: leader,
                     tenant: 0,
+                dependencies: vec![],
                 },
             )
             .await
@@ -231,6 +232,7 @@ async fn job_mode_distinguishes_producer_subscriber_independent() {
                 dag_hash: "d".into(),
                 owner_node: leader,
                 tenant: 0,
+                        dependencies: vec![],
             },
         )
         .await
@@ -261,6 +263,7 @@ async fn job_mode_distinguishes_producer_subscriber_independent() {
                 dag_hash: "i".into(),
                 owner_node: leader,
                 tenant: 0,
+                        dependencies: vec![],
             },
         )
         .await
@@ -304,6 +307,7 @@ async fn job_mode_producer_wins_when_chained() {
                 dag_hash: "d".into(),
                 owner_node: leader,
                 tenant: 0,
+                        dependencies: vec![],
             },
         )
         .await

@@ -825,6 +825,70 @@ struct CreateHit {
     body: String,
 }
 
+/// S18: scan a SQL text for cross-Pipeline edge references of the
+/// form `<job_id>.output` (where `<job_id>` is a numeric literal —
+/// the JobId of the upstream Job). Returns one
+/// `DependencyRecord` per distinct upstream JobId. The MVP
+/// only recognizes the `output` stream name; richer stream names
+/// (e.g. `binance.btc_5min`) are a S18.x follow-up.
+///
+/// Aliases like `my_alias` (non-numeric tokens) are correctly
+/// ignored — the scanner only triggers on digit runs.
+pub fn detect_cross_pipeline_deps(sql: &str) -> Vec<DependencyRecord> {
+    use std::collections::BTreeSet;
+
+    let bytes = sql.as_bytes();
+    let mut seen: BTreeSet<u32> = BTreeSet::new();
+    let mut out: Vec<DependencyRecord> = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if !bytes[i].is_ascii_digit() {
+            i += 1;
+            continue;
+        }
+        // Consume the digit run.
+        let start = i;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+        let n: u32 = std::str::from_utf8(&bytes[start..i])
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        // Skip whitespace + check for `.output`.
+        let mut j = i;
+        while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+            j += 1;
+        }
+        if bytes.get(j..j + 7) == Some(b".output") {
+            if seen.insert(n) {
+                out.push(DependencyRecord {
+                    upstream_job: n,
+                    stream: "output".to_string(),
+                });
+            }
+            i = j + 7;
+        }
+        // Otherwise fall through and continue scanning.
+    }
+    out
+}
+
+/// S18: a cross-Pipeline edge metadata. The upstream Job's
+/// output stream that the downstream Job depends on.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DependencyRecord {
+    /// The upstream Job's id. When this Job is `Running`,
+    /// the dependent Job's lifecycle is allowed to advance
+    /// from `WaitingForUpstream` to `Running`.
+    pub upstream_job: u32,
+    /// The output stream name (e.g. "output"). MVP always
+    /// uses "output"; richer stream names (e.g. the upstream's
+    /// `CREATE SINK binance.btc_5min AS ...`) are a S18.x
+    /// follow-up.
+    pub stream: String,
+}
+
 /// Find the `AS` keyword in `upper` (case-insensitive form of the
 /// relevant slice of the original SQL). Returns the byte offset of
 /// the `A` in `AS`. The `AS` must be preceded by whitespace and

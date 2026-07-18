@@ -104,6 +104,7 @@ mod tests {
             dag_hash: "my-job".into(),
             owner_node: 1,
             tenant: 0,
+                    dependencies: vec![],
         })
         .unwrap();
         cp.apply_op(&Op::RegisterTask {
@@ -134,6 +135,7 @@ mod tests {
             dag_hash: "h".into(),
             owner_node: 1,
             tenant: 0,
+                    dependencies: vec![],
         })
         .unwrap();
         cp.apply_op(&Op::RegisterTask {

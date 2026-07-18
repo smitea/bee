@@ -121,7 +121,7 @@ impl ControlPlaneStateMachine {
 
     pub fn apply_op(&mut self, op: &Op) -> Result<(), TxnError> {
         match op {
-            Op::RegisterJob { job_id, dag_hash, owner_node, tenant } => {
+            Op::RegisterJob { job_id, dag_hash, owner_node, tenant, dependencies } => {
                 // Preserve existing lifecycle + dependencies +
                 // started_at + migrating_from on a re-Register of the
                 // same job_id (the Deployer may re-register after a

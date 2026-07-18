@@ -175,6 +175,7 @@ mod tests {
                     dag_hash: "h".into(),
                     owner_node: leader,
                     tenant: 0,
+                            dependencies: vec![],
                 },
             )
             .await
