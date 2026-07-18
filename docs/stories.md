@@ -724,12 +724,14 @@ In `bee-dsl-sql`:
   - Per-Task status, owner Node, runtime metrics summary
   - Cross-Pipeline dependencies (input from / output to which other Jobs)
 - Both commands read from any Node (queries ControlPlane SM via Raft read)
-
 **Acceptance criteria**
-- [ ] `bee jobs` works on a fresh cluster (returns empty)
-- [ ] After S10's deploy, `bee jobs` shows the Job
-- [ ] `bee jobs inspect <JobId>` shows a DAG diagram and per-Task status
-- [ ] Color-coded output (green = running, yellow = migrating, red = failed)
+
+- [x] `bee jobs` works on a fresh cluster (returns empty) — covered by `format_jobs_returns_empty_for_fresh_cp` test
+- [x] After S10's deploy, `bee jobs` shows the Job — covered by `format_jobs_includes_registered_job` test
+- [x] `bee jobs inspect <JobId>` shows a DAG diagram and per-Task status — covered by `bee_jobs_inspect_shows_dag_and_per_task_status` (integration test in `crates/bee-control/tests/jobs_view.rs`) + the new `format_dag_*` unit tests for linear / diamond / independent layouts
+- [x] Color-coded output (green = running, yellow = migrating, red = failed) — covered by `bee_jobs_color_codes_for_different_lifecycles_s27_acceptance`
+
+> **Done (2026-07-17)** via commit `9ce9559`. The DAG layout now reads `TaskRecord::dependencies` (new field added in the same commit) and renders a layer-based diagram with `├─ Task N [status]` per line + `│` between levels. The MVP demo (prime_sieve.sql) has 25 phases with no edges → renders as a vertical tree with `├─` / `└─` prefixes. Cross-Pipeline edges (S18) are a follow-up that populates `dependencies` in production; until then, the diagram shows the independent-phases layout.
 
 ---
 
