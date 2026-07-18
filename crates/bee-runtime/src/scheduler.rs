@@ -66,13 +66,14 @@ impl std::fmt::Display for TaskPriority {
 /// per ADR-0008 §3), `Sjf`, `Hrrn`, `Srtn`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SchedulerPolicy {
-    /// S22 cooperative priority scheduler.
-    #[default]
+    /// S22 cooperative priority scheduler (opt-in via config).
     Priority,
     /// S10 baseline: plain `tokio::spawn`, no priority bias.
     TokioDefault,
-    /// S23: Multi-Level Feedback Queue with aging. The ADR-0008
-    /// default. Demotes long-running Tasks, promotes starved ones.
+    /// S23 default (per ADR-0008 §3): Multi-Level Feedback Queue
+    /// with aging. Demotes long-running Tasks, promotes starved
+    /// ones.
+    #[default]
     Mlfq,
     /// S23: Shortest Job First. Needs `expected_duration` per
     /// Task (historical average).
@@ -748,8 +749,9 @@ mod tests {
     }
 
     #[test]
-    fn policy_default_is_priority() {
-        assert_eq!(SchedulerPolicy::default(), SchedulerPolicy::Priority);
+    fn policy_default_is_mlfq() {
+        // S23 (ADR-0008 §3): MLFQ is the default scheduling policy.
+        assert_eq!(SchedulerPolicy::default(), SchedulerPolicy::Mlfq);
     }
 
     #[test]
@@ -1019,13 +1021,10 @@ mod tests {
     }
 
     #[test]
-    fn scheduler_config_default_uses_priority_s22_default() {
-        // S22 default was Priority; S23's ADR-0008 default is MLFQ.
-        // The SchedulerPolicy::default() is still Priority (S22);
-        // SchedulerConfig::default() uses the SchedulerPolicy
-        // default. Operators who want MLFQ explicitly set it via
-        // bee.runtime.scheduler_policy = "mlfq".
+    fn scheduler_config_default_uses_mlfq_s23_default() {
+        // S23 (ADR-0008 §3): MLFQ is the default scheduling policy.
+        // SchedulerConfig::default() inherits from SchedulerPolicy::default().
         let cfg = SchedulerConfig::default();
-        assert_eq!(cfg.policy, SchedulerPolicy::Priority);
+        assert_eq!(cfg.policy, SchedulerPolicy::Mlfq);
     }
 }
