@@ -659,9 +659,9 @@ In `bee-dsl-sql`:
 - Default scrape interval: 5s
 
 **Acceptance criteria**
-- [ ] `bee diagnostics <TaskId>` prints all four metrics for the given Task
-- [ ] Histogram buckets are sensible (e.g., 1ms, 10ms, 100ms, 1s, 10s)
-- [ ] No regression: adding metrics adds < 1% CPU overhead
+- [x] `bee diagnostics <TaskId>` prints all four metrics for the given Task (locked down by `format_diagnostics_renders_real_metrics` in `crates/bee-control/tests/diagnostics_view.rs` — verifies "events_processed_total: 5" + bucket array)
+- [x] Histogram buckets are sensible (e.g., 1ms, 10ms, 100ms, 1s, 10s) — the `latency_bucket_counts: [u64; 5]` field matches `Histogram::bucket_counts()` exactly
+- [ ] No regression: adding metrics adds < 1% CPU overhead (deferred to a benchmark story; the runtime is plumbed correctly but no benchmark harness exists)
 
 ---
 
