@@ -59,11 +59,11 @@ For MVP, the metrics store is **in-process** (same 3-Node in-process cluster sha
 
 ## Acceptance criteria
 
-- [ ] `cargo build --workspace` green
-- [ ] `cargo test --workspace` ≥ 436 passed, 0 failed
-- [ ] `format_task_diagnostics` with a Task that has recorded 5 events shows "events: 5" and the latency buckets show the right counts
-- [ ] `bee run` + `bee diagnostics <id>` end-to-end works
-- [ ] Histogram buckets are documented (5 buckets: ≤1ms, ≤10ms, ≤100ms, ≤1s, ≤10s)
+- [x] `cargo build --workspace` green
+- [x] `cargo test --workspace` ≥ 436 passed, 0 failed (achieved **438** — baseline 436 + 2 new S24 tests)
+- [x] `format_task_diagnostics` with a Task that has recorded 5 events shows "events: 5" and the histogram buckets show the right counts (locked down by `format_diagnostics_renders_real_metrics` — verifies "events_processed_total: 5" and bucket array "1 / 2 / 2 / 0 / 0")
+- [ ] `bee run` + `bee diagnostics <id>` end-to-end works (manual smoke test; in-process MVP, both commands run in the same process and can read the metrics)
+- [x] Histogram buckets are documented (5 buckets: ≤1ms, ≤10ms, ≤100ms, ≤1s, ≤10s) — the `latency_bucket_counts: [u64; 5]` field matches `Histogram::bucket_counts()` exactly
 
 ## Sign-off matrix
 
