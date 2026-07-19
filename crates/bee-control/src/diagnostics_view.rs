@@ -47,10 +47,24 @@ pub async fn format_task_diagnostics(
     }
 
     out.push_str("\n  --- metrics (S24) ---\n");
-    out.push_str("  events_processed_total:       (requires Node admin RPC; S28 follow-up)\n");
-    out.push_str("  processing_latency_p50/p99:   (requires Node admin RPC; S28 follow-up)\n");
-    out.push_str("  cpu_seconds_total:            (requires Node admin RPC; S28 follow-up)\n");
-    out.push_str("  backpressure_wait_seconds_total: (requires Node admin RPC; S28 follow-up)\n");
+    if let Some(metrics) = cp.get_task_metrics(task.task_id) {
+        out.push_str(&format!(
+            "  events_processed_total: {}\n",
+            metrics.events_processed_total
+        ));
+        let b = metrics.latency_bucket_counts;
+        out.push_str(&format!(
+            "  latency buckets (≤1ms / ≤10ms / ≤100ms / ≤1s / ≤10s): \
+             [{} / {} / {} / {} / {}]\n",
+            b[0], b[1], b[2], b[3], b[4]
+        ));
+        out.push_str(&format!(
+            "  backpressure_wait_seconds_total: {:.3}\n",
+            metrics.backpressure_wait_seconds_total_ns as f64 / 1_000_000_000.0
+        ));
+    } else {
+        out.push_str("  (no metrics recorded yet; worker hasn't run)\n");
+    }
 
     out.push_str("\n  --- recent log lines ---\n");
     out.push_str("  (S28 follow-up: tail the task's local log buffer)\n");

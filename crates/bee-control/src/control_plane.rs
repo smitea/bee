@@ -96,6 +96,11 @@ pub struct ControlPlaneStateMachine {
     /// The first writer wins — subsequent deploys of the same signature
     /// become Subscribers pointing at the existing Producer.
     datasource_producers: HashMap<String, u32>,
+    /// S24: per-Task metrics (events_processed_total, latency
+    /// histogram, backpressure_wait_seconds). The worker pushes
+    /// via `Op::RecordTaskMetrics`; `format_task_diagnostics`
+    /// reads from this map. Last-writer-wins.
+    task_metrics: HashMap<u32, crate::kv::TaskMetricsSnapshot>,
 }
 
 /// S17 §4: a Job's role with respect to Stream sharing.
@@ -288,6 +293,13 @@ impl ControlPlaneStateMachine {
                 // alongside UpdateJobLifecycle.
                 Ok(())
             }
+            // S24: worker pushes a metrics snapshot for a Task it's
+            // running. Last-writer-wins; the most recent snapshot
+            // is the source of truth for `format_task_diagnostics`.
+            Op::RecordTaskMetrics { task_id, snapshot } => {
+                self.task_metrics.insert(*task_id, snapshot.clone());
+                Ok(())
+            }
             Op::Put { .. }
             | Op::Del { .. }
             | Op::Cas { .. }
@@ -433,6 +445,15 @@ impl ControlPlaneStateMachine {
 
     pub fn get_task(&self, task_id: u32) -> Option<&TaskRecord> {
         self.tasks.get(&task_id)
+    }
+
+    /// S24: get the most recent metrics snapshot for a Task.
+    /// Returns `None` if the worker hasn't pushed a snapshot yet.
+    pub fn get_task_metrics(
+        &self,
+        task_id: u32,
+    ) -> Option<&crate::kv::TaskMetricsSnapshot> {
+        self.task_metrics.get(&task_id)
     }
 
     pub fn job_count(&self) -> usize {

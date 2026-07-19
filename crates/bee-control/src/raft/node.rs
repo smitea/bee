@@ -625,7 +625,8 @@ impl Node {
                 | Op::StealTask { .. }
                 | Op::RegisterDatasourceProducer { .. }
                 | Op::RegisterDependency { .. }
-                | Op::UpdateJobLifecycle { .. } => {
+                | Op::UpdateJobLifecycle { .. }
+                | Op::RecordTaskMetrics { .. } => {
                     let _ = cp.apply_op(&entry.op);
                 }
             }

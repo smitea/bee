@@ -110,6 +110,28 @@ pub enum Op {
     /// Scheduled → Running (or WaitingForUpstream → Running once deps
     /// are met).
     UpdateJobLifecycle { job_id: u32, state: JobLifecycleState },
+    /// S24: the worker pushes a metrics snapshot for a Task it's
+    /// running. Stored in `ControlPlaneStateMachine::task_metrics`
+    /// (last-writer-wins). Read by `format_task_diagnostics` for
+    /// `bee diagnostics <id>`. MVP: in-process only; cross-Node
+    /// push is a S49.x follow-up.
+    RecordTaskMetrics { task_id: u32, snapshot: TaskMetricsSnapshot },
+}
+
+/// S24: a snapshot of a Task's metrics. Captured by the worker
+/// (via `PhaseMetrics::snapshot()` in the runtime) and pushed
+/// to the leader via `Op::RecordTaskMetrics`. Decoupled from
+/// `crate::runtime::PhaseMetrics` (a POD struct) so
+/// `bee-control` doesn't have to depend on the runtime's types.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TaskMetricsSnapshot {
+    /// Total events the handler has finished processing.
+    pub events_processed_total: u64,
+    /// 5 latency buckets (≤1ms, ≤10ms, ≤100ms, ≤1s, ≤10s).
+    /// Matches `crate::runtime::Histogram::bucket_counts()`.
+    pub latency_bucket_counts: [u64; 5],
+    /// Total backpressure wait time, in nanoseconds.
+    pub backpressure_wait_seconds_total_ns: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -228,7 +250,8 @@ impl KVStateMachine {
                 | Op::StealTask { .. }
                 | Op::RegisterDatasourceProducer { .. }
                 | Op::RegisterDependency { .. }
-                | Op::UpdateJobLifecycle { .. } => Err(TxnError::WrongSm),
+                | Op::UpdateJobLifecycle { .. }
+                | Op::RecordTaskMetrics { .. } => Err(TxnError::WrongSm),
         }
     }
 
@@ -286,7 +309,8 @@ impl KVStateMachine {
                 | Op::StealTask { .. }
                 | Op::RegisterDatasourceProducer { .. }
                 | Op::RegisterDependency { .. }
-                | Op::UpdateJobLifecycle { .. } => unreachable!("non-KV op checked above"),
+                | Op::UpdateJobLifecycle { .. }
+                | Op::RecordTaskMetrics { .. } => unreachable!("non-KV op checked above"),
             }
         }
         Ok(())
