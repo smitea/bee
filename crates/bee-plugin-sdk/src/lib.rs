@@ -44,6 +44,7 @@ pub mod event;
 pub mod kv;
 pub mod macros;
 pub mod vtable;
+pub use event::EventBytes;
 pub use macros::Factory;
 
 /// Content-hash of the loaded plugin binary. Two builds of the same

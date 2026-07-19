@@ -93,24 +93,46 @@ pub fn register_perf_fib(ctx: &SessionContext) -> DfResult<()> {
         manifest.handlers.len(),
     );
 
-    // Per-UDF state blob (opaque bincode bytes, rolled forward
-    // by the vtable's `handle` function across invocations).
-    // The first call passes an empty blob; subsequent calls
-    // pass whatever the vtable wrote to `new_state_out` on
-    // the previous call.
-    let state: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    // Per-handler state blob (opaque bincode bytes, rolled forward
+    // by the vtable's `handle` function across invocations). The
+    // first call passes whatever `init_state` produced; subsequent
+    // calls pass whatever the vtable wrote to `new_state_out` on
+    // the previous call. Per-handler so a UDF's state doesn't leak
+    // across handlers.
+    let state: Arc<Mutex<std::collections::HashMap<String, Vec<u8>>>> =
+        Arc::new(Mutex::new(std::collections::HashMap::new()));
 
     // Resolve each Handler's vtable pointer BEFORE leaking the
     // LoadedPlugin (the lookup borrows the loaded plugin's
     // internal `handlers` map). After `leak()`, the library is
     // kept alive for the program's lifetime; the vtable
     // pointers remain valid forever.
-    let handler_vtables: Vec<(String, plugin_loader::SendVtable)> = manifest
+    let handler_vtables: Vec<(String, plugin_loader::SendVtable, Vec<u8>)> = manifest
         .handlers
         .iter()
         .filter_map(|h| {
             let vtable = loaded.handler_vtable(&h.name)?;
-            Some((h.name.clone(), plugin_loader::SendVtable::new(vtable)))
+            let sv = plugin_loader::SendVtable::new(vtable);
+            // Seed the per-handler state by calling `init_state`.
+            // Without this, the first `handle` call passes empty
+            // state bytes, which the macro's bincode deserializer
+            // rejects for non-empty state types (returns -1).
+            let mut out = bee_plugin_sdk::EventBytes::EMPTY;
+            let init_state_fn = unsafe { (*vtable).init_state };
+            let rc = unsafe { init_state_fn(&mut out) };
+            if rc != 0 {
+                eprintln!(
+                    "register_perf_fib: handler `{name}` init_state returned {rc}",
+                    name = h.name,
+                );
+                return None;
+            }
+            let initial_state = if out.ptr.is_null() || out.len == 0 {
+                Vec::new()
+            } else {
+                unsafe { std::slice::from_raw_parts(out.ptr, out.len).to_vec() }
+            };
+            Some((h.name.clone(), sv, initial_state))
         })
         .collect();
     for handler in &manifest.handlers {
@@ -131,7 +153,15 @@ pub fn register_perf_fib(ctx: &SessionContext) -> DfResult<()> {
     // so unloading mid-process would be UB.
     loaded.leak();
 
-    for (handler_name, vtable_ptr) in handler_vtables {
+    for (handler_name, vtable_ptr, initial_state) in handler_vtables {
+
+        // Seed this handler's per-handler state with whatever
+        // `init_state` produced (so the first `handle` call gets
+        // a valid `FibState` instead of empty bytes).
+        state.lock().unwrap().insert(
+            handler_name.clone(),
+            initial_state,
+        );
 
         // Per the perf-fib demo, both `fib_seed` and `fib_step`
         // are declared `Int64 -> Int64` in SQL. DataFusion
@@ -166,12 +196,22 @@ pub fn register_perf_fib(ctx: &SessionContext) -> DfResult<()> {
                     })?
                     .clone();
 
-                let mut state_guard = state_for_udf.lock().map_err(|e| {
+                let mut state_map_guard = state_for_udf.lock().map_err(|e| {
                     DataFusionError::Plan(format!(
                         "{}: state lock poisoned: {e}",
                         handler_name_for_udf
                     ))
                 })?;
+                // Lazy-init: first time this handler is called, seed
+                // the per-handler state with empty bytes (the host
+                // should have pre-seeded it via `init_state` at
+                // registration; if not, the macro's bincode
+                // deserializer will fail and the call will return
+                // -1).
+                let state_entry = state_map_guard
+                    .entry(handler_name_for_udf.clone())
+                    .or_insert_with(Vec::new);
+                let state_bytes_vec: &mut Vec<u8> = state_entry;
 
                 let mut out: Vec<i64> = Vec::with_capacity(in_arr.len());
                 for i in 0..in_arr.len() {
@@ -180,16 +220,16 @@ pub fn register_perf_fib(ctx: &SessionContext) -> DfResult<()> {
                     // loaded cdylib's `init()` and is valid for
                     // the program's lifetime (the `LoadedPlugin`
                     // is leaked above). The state's lifetime is
-                    // the same as `state_guard`'s scope. The
-                    // vtable's `handle` function reads `state`
-                    // and `event`; the new state is written
-                    // back into `state_guard` (we copy the
-                    // bytes after the call returns).
+                    // tied to the per-handler `Vec<u8>` in the
+                    // map; the vtable's `handle` function reads
+                    // `state` and `event`; the new state is
+                    // written back into the same Vec after the
+                    // call returns.
                     let (value, new_state_bytes) = unsafe {
                         plugin_loader::call_handler_vtable(
                             vtable_ptr.as_ptr(),
                             n,
-                            &state_guard,
+                            state_bytes_vec.as_slice(),
                         )
                     }?;
                     // Roll the state forward so the next
@@ -200,10 +240,21 @@ pub fn register_perf_fib(ctx: &SessionContext) -> DfResult<()> {
                     // handler (like `fib_seed`) the plugin
                     // writes back the same sentinel, so the
                     // assignment is a no-op.
-                    *state_guard = new_state_bytes;
+                    state_bytes_vec.clear();
+                    state_bytes_vec.extend_from_slice(&new_state_bytes);
                     out.push(value);
                 }
-                drop(state_guard);
+                // Drop the map guard before the post-loop insert
+                // to release the borrow. We need the lock only
+                // to mutate the entry; once the loop is done,
+                // we can take the Vec out and re-insert without
+                // holding the guard.
+                let final_state = state_bytes_vec.clone();
+                drop(state_map_guard);
+                state_for_udf.lock().unwrap().insert(
+                    handler_name_for_udf.clone(),
+                    final_state,
+                );
 
                 let out_arr = Arc::new(Int64Array::from(out));
                 Ok(ColumnarValue::Array(out_arr))
