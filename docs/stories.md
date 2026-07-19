@@ -1113,13 +1113,13 @@ Targets get filled in (and may be revised) once a baseline cluster exists.
 **Acceptance criteria**
 
 - [ ] `plugins/bee-plugin-perf-fib/` is an independent workspace member; `Cargo.toml` declares `crate-type = ["cdylib"]`
-- [ ] `fib_step` is correct against the first 20 known Fibonacci values (unit test)
-- [ ] `fib_step` state round-trip: compute 100 values, restart the plugin mid-run, verify state is restored and the 101st value is correct
-- [ ] `generate_series` and `generate_events` are gated behind `#[cfg(feature = "test-fixtures")]` and not in the production binary
-- [ ] `examples/performance/fibonacci.sql` compiles and emits the first 20 fib values to the console in the correct order
-- [ ] `examples/performance/prime_sieve.sql` compiles and the console emits `n_primes = 5761455` (hard correctness check for ≤ 10^8)
-- [ ] `examples/performance/multi_stream_analytics.sql` compiles and emits a non-empty per-minute aggregation
-- [ ] `scripts/demo-perf.sh` runs all 3 demos on a 3-node cluster and prints a measured performance table
+ - [x] `fib_step` is correct against the first 20 known Fibonacci values (unit test)
+ - [x] `fib_step` state round-trip: compute 100 values, restart the plugin mid-run, verify state is restored and the 101st value is correct
+ - [x] `generate_series` and `generate_events` are gated behind `#[cfg(feature = "test-fixtures")]` and not in the production binary
+ - [x] `examples/performance/fibonacci.sql` compiles and emits the first 20 fib values to the console in the correct order (fixed 2026-07-17 by per-handler state init in `udfs.rs` — `cargo run -p bee -- run examples/performance/fibonacci.sql` now prints "1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610, 987, 1597, 2584, 4181, 6765")
+ - [ ] `examples/performance/prime_sieve.sql` compiles and the console emits `n_primes = 5761455` (hard correctness check for ≤ 10^8) — superseded by S44's trimmed version (`n_primes = 1229` for ≤ 10^4)
+ - [x] `examples/performance/multi_stream_analytics.sql` compiles and emits a non-empty per-minute aggregation
+ - [ ] `scripts/demo-perf.sh` runs all 3 demos on a 3-node cluster and prints a measured performance table — superseded by S49's local deploy+wait flow
 - [ ] Killing one Node mid-sieve does not lose any prime (Work-Stealing works correctly)
 - [ ] README.md "Performance Demos" section links to `scripts/demo-perf.sh` and `examples/performance/README.md`
 - [ ] `docs/product-design.md` §4.4 "Performance showcase" describes the 3 demos and links to the script
