@@ -584,7 +584,7 @@ In `bee-dsl-sql`:
 - [x] Integration test: 2 versions of `binance` (1.4.2 and 2.0.0) both loaded; 2 Pipelines each referencing one version; both run independently (locked down by `two_versions_of_binance_run_independently_in_the_manager` in `crates/bee-registry/src/lib.rs`)
 - [x] Integration test: `binance:^1.0` resolves to 1.4.2; `binance:latest` resolves to 2.0.0 (locked down by `version_spec_semver_caret_matches_compatible` + `version_spec_latest_resolves_to_highest` tests in `crates/bee-registry/src/lib.rs`)
 - [x] `bee plugin list` shows both versions with their distinct hashes and refcounts (locked down by `register_plugin_assigns_plugin_id_from_content_hash` + `refcount_of_returns_some_after_retain` tests)
-- [x] Old versions auto-unload when all referencing Pipelines stop (refcount = 0) — library semantics locked down by `two_versions_of_binance_run_independently_in_the_manager`; **production wiring into the Job-stop path is an S18 follow-up** (documented in `crates/bee-control/src/control_plane.rs:Op::UpdateJobLifecycle`)
+- [x] Old versions auto-unload when all referencing Pipelines stop (refcount = 0) — library semantics locked down by `two_versions_of_binance_run_independently_in_the_manager`; **production wiring into the Job-stop path completed 2026-07-17** (locked down by `release_on_completed_lifecycle_unloads_plugin` in `crates/bee-control/tests/refcount_release_on_job_stop.rs` — Job with `plugins: {X}` transitioning to `Completed` auto-unloads `X`)
 
 > **Done (2026-07-17)** via bundle commit `b323459`.
 
