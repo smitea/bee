@@ -11,6 +11,7 @@ fn test_config() -> ClusterConfig {
         base_election_timeout: Duration::from_millis(800),
         heartbeat_interval: Duration::from_millis(100),
         nodes: Vec::new(), // in-memory default
+        plugin_manager: None,
     }
 }
 
@@ -28,7 +29,7 @@ async fn register_job_on_node1_is_visible_on_node2_after_replication() {
             Op::RegisterJob {
                 job_id: 42,
                 dag_hash: "sha256:abc".to_string(),
-                owner_node: 1, tenant: 0, dependencies: vec![] },
+                owner_node: 1, tenant: 0, dependencies: vec![], plugins: vec![] },
         )
         .await
         .expect("submit must succeed");
@@ -62,7 +63,7 @@ async fn register_task_and_update_status_replicate_linearly() {
             Op::RegisterJob {
                 job_id: 1,
                 dag_hash: "h1".to_string(),
-                owner_node: 1, tenant: 0, dependencies: vec![] },
+                owner_node: 1, tenant: 0, dependencies: vec![], plugins: vec![] },
         )
         .await
         .unwrap();
@@ -141,7 +142,7 @@ async fn kv_and_control_plane_sms_coexist_without_interference() {
             Op::RegisterJob {
                 job_id: 7,
                 dag_hash: "h7".to_string(),
-                owner_node: 1, tenant: 0, dependencies: vec![] },
+                owner_node: 1, tenant: 0, dependencies: vec![], plugins: vec![] },
         )
         .await
         .unwrap();
@@ -224,11 +225,11 @@ async fn update_status_for_unknown_task_is_a_silent_noop() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn control_plane_apply_op_routes_to_correct_sm() {
     use bee_control::kv::TxnError;
-    let mut cp = ControlPlaneStateMachine::new();
+    let mut cp = ControlPlaneStateMachine::new(std::sync::Arc::new(std::sync::Mutex::new(bee_registry::PluginManager::new())));
     cp.apply_op(&Op::RegisterJob {
         job_id: 1,
         dag_hash: "x".to_string(),
-        owner_node: 1, tenant: 0, dependencies: vec![] })
+        owner_node: 1, tenant: 0, dependencies: vec![], plugins: vec![] })
     .unwrap();
     let err = cp
         .apply_op(&Op::Put {

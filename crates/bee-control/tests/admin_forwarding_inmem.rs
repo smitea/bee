@@ -47,6 +47,7 @@ async fn boot_3_node_inmem() -> Cluster {
         n: 3,
         base_election_timeout: Duration::from_millis(500),
         heartbeat_interval: Duration::from_millis(50),
+        plugin_manager: None,
         nodes: (0..3)
             .map(|i| {
                 let id = (i + 1) as u32;
@@ -287,7 +288,7 @@ async fn admin_no_leader_inmem() {
     use tokio::sync::Mutex;
 
     let kv = Arc::new(Mutex::new(KVStateMachine::new()));
-    let cp = Arc::new(Mutex::new(ControlPlaneStateMachine::new()));
+    let cp = Arc::new(Mutex::new(ControlPlaneStateMachine::new(std::sync::Arc::new(std::sync::Mutex::new(bee_registry::PluginManager::new())))));
     let state = Arc::new(Mutex::new(bee_control::raft::node::NodeState::default()));
     // leader_id defaults to None (per NodeState::default()).
     let mut senders: HashMap<u32, tokio::sync::mpsc::Sender<(u32, _)>> = HashMap::new();

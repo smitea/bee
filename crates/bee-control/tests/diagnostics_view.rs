@@ -5,7 +5,7 @@ use bee_control::kv::{Op, TaskMetricsSnapshot, TaskStatus};
 
 #[test]
 fn task_metrics_round_trip_via_op() {
-    let mut cp = ControlPlaneStateMachine::new();
+    let mut cp = ControlPlaneStateMachine::new(std::sync::Arc::new(std::sync::Mutex::new(bee_registry::PluginManager::new())));
 
     // Register a Job + Task.
     cp.apply_op(&Op::RegisterJob {
@@ -13,6 +13,7 @@ fn task_metrics_round_trip_via_op() {
         dag_hash: "x".into(),
         owner_node: 1,
         tenant: 0,
+        plugins: vec![],
         dependencies: vec![],
     })
     .unwrap();
@@ -49,12 +50,13 @@ fn task_metrics_round_trip_via_op() {
 async fn format_diagnostics_renders_real_metrics() {
     use bee_control::diagnostics_view::format_task_diagnostics;
 
-    let mut cp = ControlPlaneStateMachine::new();
+    let mut cp = ControlPlaneStateMachine::new(std::sync::Arc::new(std::sync::Mutex::new(bee_registry::PluginManager::new())));
     cp.apply_op(&Op::RegisterJob {
         job_id: 1,
         dag_hash: "x".into(),
         owner_node: 1,
         tenant: 0,
+        plugins: vec![],
         dependencies: vec![],
     })
     .unwrap();

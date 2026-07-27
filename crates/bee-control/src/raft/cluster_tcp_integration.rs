@@ -66,6 +66,7 @@ async fn boot_tcp_3_node() -> (Cluster, Vec<SocketAddr>) {
         base_election_timeout: Duration::from_millis(500),
         heartbeat_interval: Duration::from_millis(50),
         nodes: specs,
+        plugin_manager: None,
     };
     let cluster = Cluster::new_with_specs(config).await;
     (cluster, addrs)

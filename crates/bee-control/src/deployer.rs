@@ -325,8 +325,9 @@ impl Deployer {
                         job_id,
                         dag_hash: pipeline.name.clone(),
                         owner_node: leader,
-                        tenant: 0, // S29 MVP: deployer defaults to tenant 0 (global)
-                        dependencies: Vec::new(), // S18 MVP: no cross-Pipeline edges
+                        tenant: 0,
+                        dependencies: vec![],
+                        plugins: vec![],
                     },
                 )
             .await

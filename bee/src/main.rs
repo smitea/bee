@@ -509,6 +509,7 @@ async fn bee_deploy_local(cluster: &Cluster, sql_path: &str) -> Result<u32, Stri
         dag_hash: dag.dag_hash.clone(),
         owner_node: leader_id,
         tenant: 0,
+                        plugins: vec![],
         dependencies: bee_control_deps,
     })
     .map_err(|e| format!("RegisterJob: {e}"))?;

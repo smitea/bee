@@ -32,7 +32,7 @@ async fn boot_admin_with_no_plugin_manager()
     -> (AdminServer, AdminClient)
 {
     let kv = Arc::new(Mutex::new(KVStateMachine::new()));
-    let cp = Arc::new(Mutex::new(ControlPlaneStateMachine::new()));
+    let cp = Arc::new(Mutex::new(ControlPlaneStateMachine::new(std::sync::Arc::new(std::sync::Mutex::new(bee_registry::PluginManager::new())))));
     let state = Arc::new(Mutex::new(NodeState::default()));
     let mut admin = AdminServer::start(
         "127.0.0.1:0".parse().unwrap(),
@@ -181,7 +181,7 @@ async fn boot_admin_with_stub_binance()
     -> (AdminServer, AdminClient)
 {
     let kv = Arc::new(Mutex::new(KVStateMachine::new()));
-    let cp = Arc::new(Mutex::new(ControlPlaneStateMachine::new()));
+    let cp = Arc::new(Mutex::new(ControlPlaneStateMachine::new(std::sync::Arc::new(std::sync::Mutex::new(bee_registry::PluginManager::new())))));
     let state = Arc::new(Mutex::new(NodeState::default()));
     let mut mgr = bee_registry::PluginManager::new();
     mgr.register_plugin(&StubBinancePlugin)

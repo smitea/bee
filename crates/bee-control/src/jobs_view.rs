@@ -267,7 +267,7 @@ mod tests {
     use crate::kv::{JobLifecycleState, TaskStatus};
 
     fn empty_cp() -> ControlPlaneStateMachine {
-        ControlPlaneStateMachine::new()
+        ControlPlaneStateMachine::new(std::sync::Arc::new(std::sync::Mutex::new(bee_registry::PluginManager::new())))
     }
 
     #[test]
@@ -285,7 +285,8 @@ mod tests {
             dag_hash: "h1".into(),
             owner_node: 1,
         tenant: 0,
-                dependencies: vec![],
+        plugins: vec![],
+        dependencies: vec![],
         })
         .unwrap();
         let s = format_jobs(&cp);
@@ -303,7 +304,8 @@ mod tests {
             dag_hash: "h1".into(),
             owner_node: 1,
         tenant: 0,
-                dependencies: vec![],
+        plugins: vec![],
+        dependencies: vec![],
         })
         .unwrap();
         cp.apply_op(&crate::kv::Op::UpdateJobLifecycle {
@@ -323,7 +325,8 @@ mod tests {
             dag_hash: "h1".into(),
             owner_node: 1,
         tenant: 0,
-                dependencies: vec![],
+        plugins: vec![],
+        dependencies: vec![],
         })
         .unwrap();
         cp.apply_op(&crate::kv::Op::UpdateJobLifecycle {
@@ -343,7 +346,8 @@ mod tests {
             dag_hash: "h1".into(),
             owner_node: 1,
         tenant: 0,
-                dependencies: vec![],
+        plugins: vec![],
+        dependencies: vec![],
         })
         .unwrap();
         cp.apply_op(&crate::kv::Op::UpdateJobLifecycle {
@@ -372,7 +376,8 @@ mod tests {
             dag_hash: "my-pipeline".into(),
             owner_node: 1,
             tenant: 0,
-                    dependencies: vec![],
+            plugins: vec![],
+            dependencies: vec![],
         })
         .unwrap();
         cp.apply_op(&crate::kv::Op::RegisterTask {

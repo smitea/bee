@@ -35,7 +35,7 @@ async fn forward_arm_returns_queued() {
         bee_control::kv::KVStateMachine::new(),
     ));
     let cp = std::sync::Arc::new(tokio::sync::Mutex::new(
-        bee_control::control_plane::ControlPlaneStateMachine::new(),
+        bee_control::control_plane::ControlPlaneStateMachine::new(std::sync::Arc::new(std::sync::Mutex::new(bee_registry::PluginManager::new()))),
     ));
     let state = std::sync::Arc::new(tokio::sync::Mutex::new(
         bee_control::raft::node::NodeState::default(),

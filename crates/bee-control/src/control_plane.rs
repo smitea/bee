@@ -13,6 +13,10 @@
 //! RegisterJob never affects the KV store.
 
 use std::collections::HashMap;
+use std::sync::Arc;
+
+use bee_plugin_sdk::PluginId;
+use bee_registry::PluginManager;
 
 use crate::kv::{JobLifecycleState, Op, TaskStatus, TxnError};
 
@@ -42,6 +46,13 @@ pub struct JobRecord {
     /// MVP: struct field only; ACL check
     /// (`ds.tenant == job.tenant || ds.tenant == 0`) is 1.x.
     pub tenant: u16,
+    /// S21 close-out: the set of Plugin ids the Job uses. When
+    /// the Job transitions to a terminal state (Completed /
+    /// Failed), the SM calls `plugin_manager.release(plugin_id)`
+    /// for each entry. The plugin auto-unloads when refcount
+    /// hits 0.
+    #[serde(default)]
+    pub plugins: std::collections::HashSet<PluginId>,
 }
 
 /// S18: one upstream dependency declared by a downstream Job — for
@@ -84,7 +95,7 @@ pub struct TaskRecord {
     pub dependencies: Vec<u32>,
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Clone)]
 pub struct ControlPlaneStateMachine {
     jobs: HashMap<u32, JobRecord>,
     tasks: HashMap<u32, TaskRecord>,
@@ -92,6 +103,12 @@ pub struct ControlPlaneStateMachine {
     /// the `Op::Heartbeat` apply path; the S11 orchestrator uses this
     /// to detect missing nodes and mark their tasks as `Orphaned`.
     last_heartbeat: HashMap<u32, u64>,
+    /// S21 close-out: plugin manager for auto-release on terminal
+    /// lifecycle transitions. Owned by the Node; passed in at
+    /// construction time. For the in-process 3-Node cluster, all
+    /// nodes share the same PluginManager. Wrapped in `Mutex` so
+    /// `release(&mut self)` can be called from `apply_op`.
+    plugin_manager: Arc<std::sync::Mutex<PluginManager>>,
     /// S17 Producer/Subscriber registry: `DatasourceSignature -> JobId`.
     /// The first writer wins — subsequent deploys of the same signature
     /// become Subscribers pointing at the existing Producer.
@@ -119,23 +136,47 @@ pub enum JobMode {
     Independent,
 }
 
+/// S21 close-out: returns true if the state is terminal
+/// (Completed or Failed). Terminal states trigger plugin
+/// release in the SM's `UpdateJobLifecycle` apply path.
+fn is_terminal(s: JobLifecycleState) -> bool {
+    matches!(s, JobLifecycleState::Completed | JobLifecycleState::Failed)
+}
+
 impl ControlPlaneStateMachine {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(plugin_manager: Arc<std::sync::Mutex<PluginManager>>) -> Self {
+        Self {
+            jobs: HashMap::new(),
+            tasks: HashMap::new(),
+            last_heartbeat: HashMap::new(),
+            datasource_producers: HashMap::new(),
+            task_metrics: HashMap::new(),
+            plugin_manager,
+        }
     }
 
     pub fn apply_op(&mut self, op: &Op) -> Result<(), TxnError> {
         match op {
-            Op::RegisterJob { job_id, dag_hash, owner_node, tenant, dependencies } => {
+            Op::RegisterJob { job_id, dag_hash, owner_node, tenant, dependencies: _, plugins } => {
                 // Preserve existing lifecycle + dependencies +
-                // started_at + migrating_from on a re-Register of the
-                // same job_id (the Deployer may re-register after a
-                // dep change).
-                let (lifecycle, dependencies, started_at_ms, migrating_from_node) = self
+                // started_at + migrating_from + plugins on a
+                // re-Register of the same job_id (the Deployer may
+                // re-register after a dep change). On the *first*
+                // Register, populate `plugins` from the op (the
+                // `S21` close-out needs the Job to remember its
+                // Plugin set so the SM can release them on
+                // terminal lifecycle transition).
+                let (lifecycle, dependencies, started_at_ms, migrating_from_node, plugins) = self
                     .jobs
                     .get(job_id)
-                    .map(|j| (j.lifecycle, j.dependencies.clone(), j.started_at_ms, j.migrating_from_node))
-                    .unwrap_or((JobLifecycleState::Pending, Vec::new(), 0, None));
+                    .map(|j| (j.lifecycle, j.dependencies.clone(), j.started_at_ms, j.migrating_from_node, j.plugins.clone()))
+                    .unwrap_or((
+                        JobLifecycleState::Pending,
+                        Vec::new(),
+                        0,
+                        None,
+                        plugins.iter().cloned().collect(),
+                    ));
                 self.jobs.insert(
                     *job_id,
                     JobRecord {
@@ -147,6 +188,7 @@ impl ControlPlaneStateMachine {
                         started_at_ms,
                         migrating_from_node,
                         tenant: *tenant,
+                        plugins,
                     },
                 );
                 Ok(())
@@ -281,16 +323,19 @@ impl ControlPlaneStateMachine {
                         actual: None,
                     }
                 })?;
+                let prev_state = job.lifecycle;
                 job.lifecycle = *state;
-                // S21 TODO: when `state` transitions to a terminal
-                // state (Completed / Failed / Revoked), call
-                // `plugin_manager.release(plugin_id)` for each
-                // plugin the Job was using. This wires the existing
-                // `release` auto-unload logic into the Job-stop
-                // path. The control plane currently doesn't own a
-                // PluginManager reference; the orchestrator (S18
-                // follow-up) will own one and dispatch the release
-                // alongside UpdateJobLifecycle.
+                // S21 close-out: when the Job transitions to a
+                // terminal state, release each Plugin it used.
+                // The plugin auto-unloads when its refcount hits 0.
+                // Only release on a forward edge into a terminal
+                // state (skip re-applies).
+                if is_terminal(*state) && !is_terminal(prev_state) {
+                    let mut pm = self.plugin_manager.lock().unwrap();
+                    for plugin_id in job.plugins.iter() {
+                        pm.release(plugin_id);
+                    }
+                }
                 Ok(())
             }
             // S24: worker pushes a metrics snapshot for a Task it's

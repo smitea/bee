@@ -23,7 +23,7 @@ fn job_with_emit_into_plugin_is_classified_as_producer() {
     // `Producer`. We test the SM-level derivation here; the
     // full `bee_deploy_local` CLI flow is exercised manually
     // (the deploy path is one process; the CP is per-process).
-    let mut cp = ControlPlaneStateMachine::new();
+    let mut cp = ControlPlaneStateMachine::new(std::sync::Arc::new(std::sync::Mutex::new(bee_registry::PluginManager::new())));
 
     // Register a Job.
     cp.apply_op(&Op::RegisterJob {
@@ -31,6 +31,7 @@ fn job_with_emit_into_plugin_is_classified_as_producer() {
         dag_hash: "demo".into(),
         owner_node: 1,
         tenant: 0,
+        plugins: vec![],
         dependencies: vec![]
     })
     .unwrap();
@@ -54,12 +55,13 @@ fn job_with_emit_into_plugin_is_classified_as_producer() {
 fn job_without_emit_into_plugin_is_classified_as_independent() {
     // The "plain" SQL case: a Job with no `EMIT INTO <plugin>` /
     // `CREATE SINK <plugin>` is `Independent` (the default).
-    let mut cp = ControlPlaneStateMachine::new();
+    let mut cp = ControlPlaneStateMachine::new(std::sync::Arc::new(std::sync::Mutex::new(bee_registry::PluginManager::new())));
     cp.apply_op(&Op::RegisterJob {
         job_id: 1,
         dag_hash: "plain".into(),
         owner_node: 1,
         tenant: 0,
+        plugins: vec![],
         dependencies: vec![]
     })
     .unwrap();
@@ -79,12 +81,13 @@ fn second_deploy_for_same_stream_is_idempotent() {
     //
     // This test locks down "subsequent deploy is idempotent" so
     // we don't regress while building toward S18.
-    let mut cp = ControlPlaneStateMachine::new();
+    let mut cp = ControlPlaneStateMachine::new(std::sync::Arc::new(std::sync::Mutex::new(bee_registry::PluginManager::new())));
     cp.apply_op(&Op::RegisterJob {
         job_id: 1,
         dag_hash: "first".into(),
         owner_node: 1,
         tenant: 0,
+        plugins: vec![],
         dependencies: vec![]
     })
     .unwrap();
@@ -93,6 +96,7 @@ fn second_deploy_for_same_stream_is_idempotent() {
         dag_hash: "second".into(),
         owner_node: 1,
         tenant: 0,
+        plugins: vec![],
         dependencies: vec![]
     })
     .unwrap();

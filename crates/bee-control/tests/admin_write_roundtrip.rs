@@ -25,7 +25,7 @@ use tokio::sync::Mutex;
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn admin_kv_put_roundtrip() {
     let kv = Arc::new(Mutex::new(KVStateMachine::new()));
-    let cp = Arc::new(Mutex::new(ControlPlaneStateMachine::new()));
+    let cp = Arc::new(Mutex::new(ControlPlaneStateMachine::new(std::sync::Arc::new(std::sync::Mutex::new(bee_registry::PluginManager::new())))));
     let state = Arc::new(Mutex::new(NodeState::default()));
     let mut admin = AdminServer::start(
         "127.0.0.1:0".parse().unwrap(),
@@ -76,7 +76,7 @@ async fn admin_register_datasource_no_plugin_manager() {
     // admin_datasource_validation.rs
     // (test: register_datasource_full_happy_path).
     let kv = Arc::new(Mutex::new(KVStateMachine::new()));
-    let cp = Arc::new(Mutex::new(ControlPlaneStateMachine::new()));
+    let cp = Arc::new(Mutex::new(ControlPlaneStateMachine::new(std::sync::Arc::new(std::sync::Mutex::new(bee_registry::PluginManager::new())))));
     let state = Arc::new(Mutex::new(NodeState::default()));
     let mut admin = AdminServer::start(
         "127.0.0.1:0".parse().unwrap(),
@@ -123,7 +123,7 @@ async fn admin_deploy_roundtrip() {
     // 1` is a single-SELECT SQL → 1 phase
     // → 1 Task.
     let kv = Arc::new(Mutex::new(KVStateMachine::new()));
-    let cp = Arc::new(Mutex::new(ControlPlaneStateMachine::new()));
+    let cp = Arc::new(Mutex::new(ControlPlaneStateMachine::new(std::sync::Arc::new(std::sync::Mutex::new(bee_registry::PluginManager::new())))));
     let state = Arc::new(Mutex::new(NodeState::default()));
     let mut admin = AdminServer::start(
         "127.0.0.1:0".parse().unwrap(),

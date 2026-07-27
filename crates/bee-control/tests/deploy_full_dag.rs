@@ -19,7 +19,7 @@ use tokio::sync::Mutex;
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn deploy_two_phase_sql_creates_job_and_two_tasks() {
     let kv = Arc::new(Mutex::new(KVStateMachine::new()));
-    let cp = Arc::new(Mutex::new(ControlPlaneStateMachine::new()));
+    let cp = Arc::new(Mutex::new(ControlPlaneStateMachine::new(std::sync::Arc::new(std::sync::Mutex::new(bee_registry::PluginManager::new())))));
     let state = Arc::new(Mutex::new(NodeState::default()));
     let mut admin = AdminServer::start(
         "127.0.0.1:0".parse().unwrap(),

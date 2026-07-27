@@ -25,6 +25,8 @@
 
 use std::collections::HashMap;
 
+use bee_plugin_sdk::PluginId;
+
 use crate::control_plane::DependencyRecord;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,6 +72,12 @@ pub enum Op {
         /// `WaitingForUpstream` until upstream Job 1 is `Running`.
         #[serde(default)]
         dependencies: Vec<DependencyRecord>,
+        /// S21 close-out: the set of Plugin ids the Job uses.
+        /// When the Job transitions to a terminal state, the SM
+        /// calls `plugin_manager.release(plugin_id)` for each
+        /// entry.
+        #[serde(default)]
+        plugins: Vec<PluginId>,
     },
     RegisterTask {
         task_id: u32,

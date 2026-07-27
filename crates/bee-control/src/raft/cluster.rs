@@ -13,7 +13,7 @@ use super::tcp::TcpTransport;
 use super::transport::{InMemoryTransport, NodeTransport, Router};
 use super::types::{NodeCommand, NodeId, Role, RpcMessage, Term, LogIndex};
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ClusterConfig {
     pub n: usize,
     pub base_election_timeout: Duration,
@@ -24,6 +24,25 @@ pub struct ClusterConfig {
     /// path). If non-empty, each entry's `transport` is
     /// honored.
     pub nodes: Vec<NodeSpec>,
+    /// S21 close-out: optional shared `PluginManager`
+    /// for the in-process cluster. `None` (default) →
+    /// constructor builds a fresh one. Tests that need
+    /// to observe plugin refcounts from outside the
+    /// cluster pass a pre-built `Arc<Mutex<PluginManager>>`
+    /// and read it back via the returned handle.
+    pub plugin_manager: Option<Arc<std::sync::Mutex<bee_registry::PluginManager>>>,
+}
+
+impl std::fmt::Debug for ClusterConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClusterConfig")
+            .field("n", &self.n)
+            .field("base_election_timeout", &self.base_election_timeout)
+            .field("heartbeat_interval", &self.heartbeat_interval)
+            .field("nodes", &self.nodes)
+            .field("plugin_manager", &self.plugin_manager.as_ref().map(|_| "PluginManager"))
+            .finish()
+    }
 }
 
 impl Default for ClusterConfig {
@@ -33,6 +52,7 @@ impl Default for ClusterConfig {
             base_election_timeout: Duration::from_millis(800),
             heartbeat_interval: Duration::from_millis(100),
             nodes: Vec::new(), // empty → in-memory default
+            plugin_manager: None,
         }
     }
 }
@@ -147,6 +167,21 @@ impl Cluster {
         let n = config.n;
         let ids: Vec<NodeId> = (1..=n as NodeId).collect();
 
+        // S21 close-out: all in-process nodes share the same
+        // PluginManager (the in-process 3-Node cluster has a
+        // single logical plugin view). Wrapped in `Mutex` so the
+        // SM can call `release(&mut self)` from `apply_op`.
+        // `ClusterConfig::plugin_manager` lets tests inject
+        // their own instance to observe refcounts from outside.
+        let plugin_manager = config
+            .plugin_manager
+            .clone()
+            .unwrap_or_else(|| {
+                std::sync::Arc::new(
+                    std::sync::Mutex::new(bee_registry::PluginManager::new()),
+                )
+            });
+
         let mut senders: HashMap<NodeId, mpsc::Sender<(NodeId, RpcMessage)>> = HashMap::new();
         let mut inboxes: Vec<(NodeId, mpsc::Receiver<(NodeId, RpcMessage)>)> = Vec::new();
         let mut cmd_inboxes: Vec<(NodeId, mpsc::Receiver<NodeCommand>)> = Vec::new();
@@ -177,7 +212,7 @@ impl Cluster {
                 ),
             );
             let kv = Arc::new(Mutex::new(KVStateMachine::new()));
-            let cp = Arc::new(Mutex::new(ControlPlaneStateMachine::new()));
+            let cp = Arc::new(Mutex::new(ControlPlaneStateMachine::new(plugin_manager.clone())));
             let node_config = NodeConfig {
                 base_election_timeout: config.base_election_timeout,
                 heartbeat_interval: config.heartbeat_interval,
@@ -257,6 +292,20 @@ impl Cluster {
         config: ClusterConfig,
         specs: &std::collections::HashMap<NodeId, NodeSpec>,
     ) -> Self {
+        // S21 close-out: TCP cluster nodes also share a single
+        // PluginManager (in production each Node would have its
+        // own copy; for the in-process 3-Node test cluster this
+        // is fine). `ClusterConfig::plugin_manager` lets tests
+        // inject their own instance to observe refcounts from
+        // outside.
+        let plugin_manager = config
+            .plugin_manager
+            .clone()
+            .unwrap_or_else(|| {
+                std::sync::Arc::new(
+                    std::sync::Mutex::new(bee_registry::PluginManager::new()),
+                )
+            });
         // Two-phase boot: bind ALL listeners first,
         // then dial ALL peers. This is required
         // because each Node's peers include the
@@ -326,7 +375,7 @@ impl Cluster {
                 }
             });
             let kv = Arc::new(Mutex::new(KVStateMachine::new()));
-            let cp = Arc::new(Mutex::new(ControlPlaneStateMachine::new()));
+            let cp = Arc::new(Mutex::new(ControlPlaneStateMachine::new(plugin_manager.clone())));
             let node_config = spec_to_node_node_config(&specs[&id], &config, i);
             let node = Node::new(
                 id,

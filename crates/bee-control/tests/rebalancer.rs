@@ -40,6 +40,7 @@ async fn register_old_task(
                 dag_hash: "h".into(),
                 owner_node,
                 tenant: 0,
+                        plugins: vec![],
                 dependencies: vec![],
             },
         )

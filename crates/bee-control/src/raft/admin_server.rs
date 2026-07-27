@@ -461,6 +461,7 @@ async fn validate_register_datasource(
                 dag_hash: dag.dag_hash.clone(),
                 owner_node,
                 tenant: 0,
+                                        plugins: vec![],
                 dependencies: Vec::new(),
             };
             if let AdminResponse::Error(e) =
@@ -741,6 +742,7 @@ async fn dispatch(
                 dag_hash: dag.dag_hash.clone(),
                 owner_node,
                 tenant: 0,
+                                        plugins: vec![],
                 dependencies: Vec::new(),
             };
             if let Err(e) = cp_locked.apply_op(&op) {

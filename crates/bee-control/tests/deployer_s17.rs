@@ -102,6 +102,7 @@ async fn deploy_second_pipeline_with_same_signature_becomes_subscriber() {
                 owner_node: leader,
                 tenant: 0,
                 dependencies: vec![],
+                plugins: vec![],
             },
         )
         .await
@@ -189,6 +190,7 @@ async fn deploy_repeat_of_same_signature_is_idempotent() {
                 owner_node: leader,
                 tenant: 0,
                 dependencies: vec![],
+                plugins: vec![],
             },
         )
         .await
@@ -236,7 +238,8 @@ async fn deploy_multiple_pipelines_only_first_is_producer() {
                         dag_hash: "d".into(),
                         owner_node: leader,
                         tenant: 0,
-                                dependencies: vec![],
+                        dependencies: vec![],
+                        plugins: vec![],
                     },
                 )
                 .await

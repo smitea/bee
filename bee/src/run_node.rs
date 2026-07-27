@@ -147,7 +147,7 @@ pub async fn run_node(args: Vec<String>) -> Result<(), String> {
     // in this process (the MVP does not replicate
     // them via the KV cluster — that's S33.2).
     let kv = Arc::new(Mutex::new(KVStateMachine::new()));
-    let cp = Arc::new(Mutex::new(ControlPlaneStateMachine::new()));
+    let cp = Arc::new(Mutex::new(ControlPlaneStateMachine::new(std::sync::Arc::new(std::sync::Mutex::new(bee_registry::PluginManager::new())))));
     let peer_ids: Vec<NodeId> = peers.iter().map(|(pid, _)| *pid).collect();
     let node_config = NodeConfig {
         base_election_timeout: Duration::from_millis(base_election_timeout_ms),

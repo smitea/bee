@@ -52,14 +52,14 @@ async fn subscriber_state_machine_drives_off_real_cp_lifecycle() {
     // via `list_jobs()`.
     cluster.submit(leader, Op::RegisterDatasourceProducer { signature: "sig".into(), job_id: 1 })
         .await.expect("register producer 1");
-    cluster.submit(leader, Op::RegisterJob { job_id: 1, dag_hash: "d".into(), owner_node: leader, tenant: 0, dependencies: vec![] })
+    cluster.submit(leader, Op::RegisterJob { job_id: 1, dag_hash: "d".into(), owner_node: leader, tenant: 0, dependencies: vec![], plugins: vec![] })
         .await.expect("register job 1");
     cluster.submit(leader, Op::UpdateJobLifecycle { job_id: 1, state: JobLifecycleState::Running })
         .await.expect("job 1 -> Running");
 
     // Job 2: Subscriber. Wire the dep AFTER Job 2 is Running (S18
     // auto-flip pattern), then set Running again.
-    cluster.submit(leader, Op::RegisterJob { job_id: 2, dag_hash: "d".into(), owner_node: leader, tenant: 0, dependencies: vec![] })
+    cluster.submit(leader, Op::RegisterJob { job_id: 2, dag_hash: "d".into(), owner_node: leader, tenant: 0, dependencies: vec![], plugins: vec![] })
         .await.expect("register job 2");
     cluster.submit(leader, Op::UpdateJobLifecycle { job_id: 2, state: JobLifecycleState::Running })
         .await.expect("job 2 -> Running");
