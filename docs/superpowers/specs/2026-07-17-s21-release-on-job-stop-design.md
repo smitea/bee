@@ -53,11 +53,11 @@ For MVP, the `plugin_manager` lives on the `Node` process (not on the CP SM dire
 
 ## Acceptance criteria
 
-- [ ] `cargo build --workspace` green
-- [ ] `cargo test --workspace` ≥ 438 passed, 0 failed
-- [ ] Integration test: register Plugin X → register Job with `plugins: {X}` → transition Job to `Completed` → `plugin_manager.refcount_of(X) == None` (auto-unloaded)
-- [ ] Same test, but transition to `Failed` — also releases
-- [ ] Same test, but transition to `Running` (non-terminal) — does NOT release (refcount stays at 1)
+- [x] `cargo build --workspace` green
+- [x] `cargo test --workspace` ≥ 438 passed, 0 failed
+- [x] Integration test: register Plugin X → register Job with `plugins: {X}` → transition Job to `Completed` → `plugin_manager.refcount_of(X) == None` (auto-unloaded)
+- [x] Same test, but transition to `Failed` — also releases
+- [x] Same test, but transition to `Running` (non-terminal) — does NOT release (refcount stays at 1)
 
 ## Sign-off matrix
 
