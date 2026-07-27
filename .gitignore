@@ -12,3 +12,6 @@
 # S45: mdbook build output. The source lives in
 # docs/book/src/ + docs/book/book.toml and is tracked.
 /docs/book/book/
+
+# Worktree directories (per-feature isolation)
+/.worktrees/
