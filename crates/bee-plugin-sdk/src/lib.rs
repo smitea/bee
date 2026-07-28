@@ -476,10 +476,11 @@ pub enum PluginError {
     /// supported major-version set. The `.so`/`.dylib`/`.dll` is NOT
     /// deleted — it stays on disk for inspection.
     #[error(
-        "plugin load rejected: hash={hash} claimed_abi={claimed} \
+        "plugin load rejected: path={path:?} hash={hash} claimed_abi={claimed} \
          expected_majors={expected:?} (see {migration_link})"
     )]
     AbiMismatch {
+        path: std::path::PathBuf,
         hash: String,
         claimed: String,
         expected: Vec<u32>,

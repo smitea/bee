@@ -22,12 +22,10 @@
 //!   (S24)。MVP 占位:bee 独立二进制未持 worker,直接回退到说明信息。
 //!   真实场景下 worker 在 Node 进程内,`diagnostics` 通过 admin RPC
 //!   查询对应 Node (S28 wiring)。
-//! - `plugin list` — 列出 S33-deferred demo 的 5 个 mock plugin
-//!   (binance / google_news / influxdb / mongodb / ta-lib),并报
-//!   它们的 manifest(name / feature_version / abi_version /
-//!   adapter & handler 数量)+ 对应 cdylib 构件是否已生成。MVP
-//!   静态列出(PluginManager 尚未 wire 到 CLI);S34-S39 production
-//!   plugin 上线后切到 libloading 实时清单。
+//! - `plugin list` — 从 `BEE_PLUGIN_DIR`（默认 `/etc/bee/plugins/`）加载并
+//!   列出 Plugin 名称、完整内容哈希与引用计数。
+//! - `plugin inspect <path>` — 加载指定 cdylib 并显示其内容哈希与声明的
+//!   `abi_version`，但不注册到 PluginManager。
 //!
 //! CLI 解析手动实现以遵守"零运行时外部依赖"约束
 //! (仅 `tokio` + `bytes` + `bincode` 三件套)。
@@ -48,6 +46,7 @@ use bee_control::raft::cluster::{Cluster, ClusterConfig};
 use bee_control::secret_store::{InMemorySecretStore, SecretStore};
 use bee_dsl_sql::{dag::extract_phase_dag, run_pipeline_with_config, RunConfig};
 use bee_plugin_sdk::{compute_plugin_id, VersionSpec};
+use bee_registry::PluginManager;
 use bee_transport::Connection;
 
 mod run_node;
@@ -928,53 +927,38 @@ async fn run_datasource_cli(args: &[String]) -> Result<(), String> {
 }
 
 async fn run_plugin_cli(args: &[String]) -> Result<(), String> {
-    // S33-deferred `bee plugin list`. MVP: print the 5 mock plugins
-    // that ship in `plugins/` (the PluginManager is unit-tested but
-    // not yet wired to a CLI; S34-S39 production plugins will swap
-    // the static list for a libloading-driven scan).
     match args.first().map(String::as_str) {
         Some("list") => {
-            // Crate name -> (logical plugin name, kind).
-            // `kind` is "input" / "output" / "handler" — the mock
-            // plugin set covers all three Adapter kinds + a
-            // Handler-only plugin (ta-lib).
-            let entries: &[(&str, &str, &str)] = &[
-                ("bee-plugin-binance", "binance", "input"),
-                ("bee-plugin-google-news", "google_news", "input"),
-                ("bee-plugin-influxdb", "influxdb", "output"),
-                ("bee-plugin-mongodb", "mongodb", "output"),
-                ("bee-plugin-ta-lib", "ta-lib", "handler"),
-            ];
-            // The mock plugins all declare feature_version=1.0.0 /
-            // abi_version=v1. S33 deferred the per-plugin version
-            // surface to S34; once production plugins land, this
-            // resolves through the loaded manifest.
-            println!(
-                "{:<30} | {:<12} | {:<5} | {:<5} | {:<7} | {}",
-                "crate", "name", "ver", "abi", "kind", "artifact"
-            );
-            println!("{}", "-".repeat(76));
-            for (crate_name, logical_name, kind) in entries {
-                let lib_stem = crate_name.replace('-', "_");
-                let artifact = if cfg!(target_os = "macos") {
-                    format!("target/debug/lib{lib_stem}.dylib")
-                } else {
-                    format!("target/debug/lib{lib_stem}.so")
-                };
-                let status = if std::path::Path::new(&artifact).exists() {
-                    "built"
-                } else {
-                    "missing"
-                };
-                println!(
-                    "{:<30} | {:<12} | {:<5} | {:<5} | {:<7} | {}",
-                    crate_name, logical_name, "1.0.0", "v1", kind, status,
-                );
+            let dir = env::var_os("BEE_PLUGIN_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("/etc/bee/plugins/"));
+            let mut manager = PluginManager::new();
+            let (_, errors) = bee_registry::loader::load_directory(&mut manager, &dir);
+            for error in errors {
+                eprintln!("{}: plugin load error: {}", PKG_NAME, error);
+            }
+            for id in manager.list() {
+                let manifest = manager.lookup(&id).expect("listed plugin has manifest");
+                let refcount = manager.refcount_of(&id).unwrap_or(0);
+                println!("name={} hash={} refcount={}", manifest.name, id, refcount);
             }
             Ok(())
         }
+        Some("inspect") => {
+            let path = args
+                .get(1)
+                .ok_or_else(|| "plugin inspect requires <path>".to_string())?;
+            let loaded =
+                bee_registry::loader::load_library(path).map_err(|error| error.to_string())?;
+            println!(
+                "hash={} abi_version={}",
+                loaded.id(),
+                loaded.manifest().abi_version
+            );
+            Ok(())
+        }
         Some(other) => Err(format!("unknown plugin subcommand `{other}`")),
-        None => Err("plugin requires a subcommand: list".to_string()),
+        None => Err("plugin requires a subcommand: list|inspect".to_string()),
     }
 }
 
@@ -1460,11 +1444,9 @@ fn print_help() {
     println!("                                  referencing Jobs in production; MVP: status flag).");
     println!("    datasource resume <name>  Resume a paused Datasource.");
     println!("    datasource delete <name>  Remove the Datasource entry.");
-    println!("    plugin list                List the S33-deferred mock plugins (binance /");
-    println!("                              google_news / influxdb / mongodb / ta-lib) and");
-    println!("                              report whether each cdylib artifact is built");
-    println!("                              (target/debug/lib<name>.dylib or .so). MVP static");
-    println!("                              list; S34-S39 swaps in a libloading-driven scan.");
+    println!("    plugin list                Load and list plugins from BEE_PLUGIN_DIR");
+    println!("                               (default: /etc/bee/plugins/) with hashes and refcounts.");
+    println!("    plugin inspect <path>      Show a plugin's would-be hash and claimed abi_version.");
 }
 
 /// S22: load the runtime scheduler policy from configuration.

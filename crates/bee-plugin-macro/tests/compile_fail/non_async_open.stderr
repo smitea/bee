@@ -12,7 +12,7 @@ warning: unused imports: `AdapterError`, `AdapterResult`, and `Event`
 5 | use bee_adapter::{AdapterError, AdapterResult, Event};
   |                   ^^^^^^^^^^^^  ^^^^^^^^^^^^^  ^^^^^
   |
-  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+  = note: `#[warn(unused_imports)]` on by default
 
 warning: unused import: `bee_method`
  --> tests/compile_fail/non_async_open.rs:6:37
