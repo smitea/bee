@@ -10,6 +10,7 @@ fn test_config() -> ClusterConfig {
         heartbeat_interval: Duration::from_millis(100),
         nodes: Vec::new(), // in-memory default
         plugin_manager: None,
+        log_path: None,
     }
 }
 
