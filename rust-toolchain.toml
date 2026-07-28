@@ -1,0 +1,7 @@
+[toolchain]
+# Pin a specific Rust stable version that is compatible with the
+# kstring 2.0.2 pin in Cargo.lock (kstring 2.0.3+ requires rustc 1.96+
+# which is newer than the pinned stable). Matches local dev.
+channel = "1.89.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"
