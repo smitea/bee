@@ -548,6 +548,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bee-codec",
+ "bee-control",
  "bee-dsl-sql",
  "bee-plugin-sdk",
  "bee-registry",

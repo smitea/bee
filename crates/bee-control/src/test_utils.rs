@@ -64,6 +64,12 @@ const FAST_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(50);
 /// Node transports so the in-memory transport's
 /// forwarding path can resolve the leader without
 /// racing against a closed listener.
+///
+/// `TestCluster` is `Clone`: the cluster handle +
+/// `HashMap` are cheap clones, and the owned
+/// `AdminServer`s are wrapped in an `Arc<Mutex<...>>`
+/// so a clone shares the same listener tasks.
+#[derive(Clone)]
 pub struct TestCluster {
     /// The live 3-node Raft cluster.
     pub cluster: Cluster,
@@ -77,7 +83,9 @@ pub struct TestCluster {
     /// `Drop` impl calls `AdminServer::shutdown`
     /// on each one (which sends the oneshot
     /// signal so the accept loop exits cleanly).
-    admin_servers: Vec<AdminServer>,
+    /// Wrapped in `Arc<Mutex<...>>` so the
+    /// struct is `Clone`.
+    admin_servers: Arc<std::sync::Mutex<Vec<AdminServer>>>,
 }
 
 impl TestCluster {
@@ -129,7 +137,7 @@ impl TestCluster {
                     let pr = pending_replies.clone();
                     Box::pin(async move { pr.register().await })
                 });
-            let mut admin = AdminServer::start(
+            let admin = AdminServer::start(
                 "127.0.0.1:0".parse().unwrap(),
                 kv,
                 cp,
@@ -149,7 +157,7 @@ impl TestCluster {
         Self {
             cluster,
             admin_addrs,
-            admin_servers,
+            admin_servers: Arc::new(std::sync::Mutex::new(admin_servers)),
         }
     }
 
@@ -178,7 +186,7 @@ impl TestCluster {
         Self {
             cluster,
             admin_addrs: HashMap::new(),
-            admin_servers: Vec::new(),
+            admin_servers: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -254,9 +262,22 @@ impl Drop for TestCluster {
     /// so dropping `cluster` (which drops the
     /// `cmd_tx`s) is enough to let them unwind
     /// on their own.
+    ///
+    /// Because `TestCluster` is `Clone`, the
+    /// shutdown sequence fires once when the
+    /// LAST clone is dropped. The `Arc<Mutex<...>>`
+    /// swap-out ensures we only call
+    /// `AdminServer::shutdown` once per listener
+    /// (the accept-loop tasks stay alive until
+    /// then).
     fn drop(&mut self) {
-        for srv in &mut self.admin_servers {
-            srv.shutdown();
+        if let Ok(mut guard) = self.admin_servers.lock() {
+            if !guard.is_empty() {
+                for srv in guard.iter_mut() {
+                    srv.shutdown();
+                }
+                guard.clear();
+            }
         }
     }
 }

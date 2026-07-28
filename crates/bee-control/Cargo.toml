@@ -38,4 +38,11 @@ test-utils = []
 
 [dev-dependencies]
 tempfile = "3"
+# S-1c: integration tests in this crate consume the
+# public `test_utils::TestCluster` harness (see
+# tests/raft_cluster.rs, tests/wal_persistence.rs,
+# tests/admin_forwarding_inmem.rs). Re-enable the
+# feature for the `dev` profile so `cargo test -p
+# bee-control` can see the module.
+bee-control = { path = ".", features = ["test-utils"] }
 
