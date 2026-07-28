@@ -861,11 +861,11 @@ Datasource-level observability and lifecycle:
 - **SLO dashboard** (basic, 1.x): `bee datasource sl` shows all Datasources with their health rollup.
 
 **Acceptance criteria**
-- [ ] `bee datasource inspect binance` shows: Producer Node, plugin_id, version, health metrics, referencing Job count
-- [ ] Killing the external connection 10 times in a row triggers auto-pause
-- [ ] `bee datasource pause binance` and `bee datasource resume binance` work end-to-end
-- [ ] Subscribers cleanly `Draining` during pause; cleanly reconnect on resume
-- [ ] Pause/resume does not lose events (either buffered or backpressured)
+- [x] `bee datasource inspect binance` shows: Producer Node, plugin_id, version, health metrics, referencing Job count (locked down by `inspect_returns_datasource_health_and_job_count` in `crates/bee-control/src/datasource.rs:842` + the `print_datasource_inspect` CLI in `bee/src/main.rs:1006`; `DatasourceInspection { datasource, health, producer_node, referencing_job_count }` carries Producer Node, plugin_id (via `datasource`), version_spec (via `datasource`), health snapshot, and Job count)
+- [x] Killing the external connection 10 times in a row triggers auto-pause (locked down by `should_auto_pause_triggers_at_threshold` in `crates/bee-control/src/datasource.rs:763` — 9 failures do NOT trigger, 10th does)
+- [x] `bee datasource pause binance` and `bee datasource resume binance` work end-to-end (locked down by `pause_and_resume_lifecycle` in `crates/bee-control/src/datasource.rs:702` — Active→Paused→Active round trip)
+- [ ] Subscribers cleanly `Draining` during pause; cleanly reconnect on resume (deferred — only the pause→Draining half is locked down by `pause_records_draining_event_with_referencing_jobs`; the resume→Subscriber reconnect half has no integration test)
+- [ ] Pause/resume does not lose events (either buffered or backpressured) (deferred — no event-loss test exists)
 
 ---
 
