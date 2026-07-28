@@ -20,6 +20,7 @@ use crate::icons;
 use crate::log_panel::LogRing;
 use crate::pages::data_mgmt::{self, DataFormState, DataMsg};
 use crate::pages::dashboard::{self, DashboardData, DashboardMsg};
+use crate::pages::pipelines::{self, PipelinesData, PipelinesMsg};
 use crate::pages::placeholder;
 use crate::pages::settings::{self, LogLevel, SettingsMsg};
 use crate::theme;
@@ -76,6 +77,7 @@ pub struct App {
     pub msg_rx: tokio::sync::mpsc::Receiver<ConnectionMsg>,
     pub log: LogRing,
     pub dashboard: DashboardData,
+    pub pipelines: PipelinesData,
     pub theme_kind: ThemeKind,
     pub log_level: LogLevel,
     pub dm: DataMgmtState,
@@ -86,6 +88,7 @@ pub struct App {
 pub enum Message {
     TabSelected(Tab),
     Dashboard(DashboardMsg),
+    Pipelines(PipelinesMsg),
     Data(DataMsg),
     Settings(SettingsMsg),
     CycleTheme,
@@ -108,6 +111,7 @@ impl Application for App {
             msg_rx,
             log: flags.log,
             dashboard: DashboardData::default(),
+            pipelines: PipelinesData::default(),
             theme_kind: flags.theme_kind,
             log_level: LogLevel::Info,
             dm: DataMgmtState::new(),
@@ -132,6 +136,22 @@ impl Application for App {
                 DashboardMsg::RefreshPressed => {
                     dashboard::trigger_refresh(&self.conn);
                     Command::perform(async {}, |_| Message::PumpTick)
+                }
+            },
+            Message::Pipelines(p) => match p {
+                PipelinesMsg::RefreshPressed => {
+                    self.pipelines.loading = true;
+                    pipelines::trigger_refresh(&self.conn);
+                    Command::perform(async {}, |_| Message::PumpTick)
+                }
+                PipelinesMsg::InspectPressed(id) => {
+                    self.pipelines.loading = true;
+                    pipelines::trigger_inspect(&self.conn, id);
+                    Command::perform(async {}, |_| Message::PumpTick)
+                }
+                PipelinesMsg::CloseInspectPressed => {
+                    self.pipelines.selected = None;
+                    Command::none()
                 }
             },
             Message::CycleTheme => {
@@ -250,7 +270,8 @@ impl Application for App {
             Tab::Dashboard => dashboard::view(&self.dashboard, &self.conn, &self.log)
                 .map(Message::Dashboard),
             Tab::DataMgmt => data_mgmt::view(&self.dm_form, &self.dm).map(Message::Data),
-            Tab::Pipelines => placeholder::view("Pipelines", "S-3 / S-4", icons::WORKFLOW),
+            Tab::Pipelines => pipelines::view(&self.pipelines, &self.conn, &self.log)
+                .map(Message::Pipelines),
             Tab::Settings => {
                 let addr = self.conn.addr();
                 let addr_str: &'static str = Box::leak(addr.to_string().into_boxed_str());
@@ -335,7 +356,11 @@ impl App {
                 self.dashboard.cluster = Some(detail);
             }
             AdminResponse::JobList(jobs) => {
-                self.dashboard.jobs = jobs;
+                self.dashboard.jobs = jobs.clone();
+                pipelines::apply_response(&mut self.pipelines, AdminResponse::JobList(jobs));
+            }
+            AdminResponse::JobDetail(d) => {
+                pipelines::apply_response(&mut self.pipelines, AdminResponse::JobDetail(d));
             }
             _ => {}
         }
