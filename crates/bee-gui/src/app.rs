@@ -21,6 +21,7 @@ use crate::log_panel::LogRing;
 use crate::pages::data_mgmt::{self, DataFormState, DataMsg};
 use crate::pages::dashboard::{self, DashboardData, DashboardMsg};
 use crate::pages::placeholder;
+use crate::pages::settings::{self, LogLevel, SettingsMsg};
 use crate::theme;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +41,8 @@ pub enum ThemeKind {
 }
 
 impl ThemeKind {
+    pub const ALL: [ThemeKind; 2] = [Self::Light, Self::Dark];
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Light => "Light",
@@ -51,6 +54,12 @@ impl ThemeKind {
             Self::Light => Self::Dark,
             Self::Dark => Self::Light,
         }
+    }
+}
+
+impl std::fmt::Display for ThemeKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -68,6 +77,7 @@ pub struct App {
     pub log: LogRing,
     pub dashboard: DashboardData,
     pub theme_kind: ThemeKind,
+    pub log_level: LogLevel,
     pub dm: DataMgmtState,
     pub dm_form: DataFormState,
 }
@@ -77,6 +87,7 @@ pub enum Message {
     TabSelected(Tab),
     Dashboard(DashboardMsg),
     Data(DataMsg),
+    Settings(SettingsMsg),
     CycleTheme,
     PumpTick,
 }
@@ -98,6 +109,7 @@ impl Application for App {
             log: flags.log,
             dashboard: DashboardData::default(),
             theme_kind: flags.theme_kind,
+            log_level: LogLevel::Info,
             dm: DataMgmtState::new(),
             dm_form: DataFormState::default(),
         };
@@ -135,6 +147,47 @@ impl Application for App {
                 data_mgmt::handle(&mut self.dm_form, &self.dm, &mut self.log, msg);
                 Command::none()
             }
+            Message::Settings(msg) => match msg {
+                SettingsMsg::ThemeChanged(t) => {
+                    if t != self.theme_kind {
+                        self.theme_kind = t;
+                        self.log.push(
+                            crate::log_panel::LogLevel::Info,
+                            format!("theme → {}", t.as_str()),
+                        );
+                    }
+                    Command::none()
+                }
+                SettingsMsg::LogLevelChanged(l) => {
+                    self.log_level = l.clone();
+                    self.log.push(
+                        crate::log_panel::LogLevel::Info,
+                        format!("log level → {} (also re-run with --log-level={} or RUST_LOG=bee_gui={})", l.as_str(), l.as_str(), l.as_str()),
+                    );
+                    Command::none()
+                }
+                SettingsMsg::OpenSpecLink => {
+                    self.log.push(
+                        crate::log_panel::LogLevel::Info,
+                        "spec: docs/superpowers/specs/2026-07-27-s1a-gui-foundation-design.md".to_string(),
+                    );
+                    Command::none()
+                }
+                SettingsMsg::ExportLogPressed => {
+                    let entries = self.log.snapshot();
+                    match crate::log_panel::export_to_file(&entries) {
+                        Ok(path) => self.log.push(
+                            crate::log_panel::LogLevel::Info,
+                            format!("log exported to {}", path.display()),
+                        ),
+                        Err(e) => self.log.push(
+                            crate::log_panel::LogLevel::Error,
+                            format!("export failed: {}", e),
+                        ),
+                    }
+                    Command::none()
+                }
+            },
             Message::PumpTick => {
                 let drained = try_drain(&mut self.msg_rx);
                 for m in drained {
@@ -198,7 +251,24 @@ impl Application for App {
                 .map(Message::Dashboard),
             Tab::DataMgmt => data_mgmt::view(&self.dm_form, &self.dm).map(Message::Data),
             Tab::Pipelines => placeholder::view("Pipelines", "S-3 / S-4", icons::WORKFLOW),
-            Tab::Settings => placeholder::view("设置", "S-5", icons::SETTINGS),
+            Tab::Settings => {
+                let addr = self.conn.addr();
+                let addr_str: &'static str = Box::leak(addr.to_string().into_boxed_str());
+                let state_str: &'static str = Box::leak(
+                    self.conn.state().as_str().to_string().into_boxed_str(),
+                );
+                let log_path = crate::log_panel::export_path();
+                let log_path_str: &'static str =
+                    Box::leak(log_path.display().to_string().into_boxed_str());
+                settings::view(
+                    self.theme_kind,
+                    &self.log_level,
+                    addr,
+                    state_str,
+                    log_path_str,
+                )
+                .map(Message::Settings)
+            }
         };
 
         let conn_state = self.conn.state();
