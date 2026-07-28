@@ -542,8 +542,8 @@ In `bee-dsl-sql`:
 
 **Acceptance criteria**
 - [ ] Integration test: drop a sample `libbee_plugin_fake.so` into the plugin dir, see it appear in `bee plugin list` with its hash
-- [ ] ABI mismatched plugin: rejected with clear error log (precise error format in S20)
-- [ ] `bee plugin list` output format documented
+- [x] ABI mismatched plugin: rejected with clear error log (precise error format in S20)
+- [x] `bee plugin list` output format documented
 
 ---
 
@@ -560,7 +560,7 @@ In `bee-dsl-sql`:
 - The plugin's `.so` remains on disk for inspection; it is not deleted
 
 **Acceptance criteria**
-- [ ] Integration test: plugin with `abi_version = "2.0"` is rejected when Bee expects `1.x`
+- [x] Integration test: plugin with `abi_version = "2.0"` is rejected when Bee expects `1.x`
 - [ ] Error log format includes: plugin path, computed hash, claimed `abi_version`, expected range, link to migration docs
 - [ ] `bee plugin inspect <path>` shows the would-be hash + claimed `abi_version` (useful for debugging before placing the plugin)
 
