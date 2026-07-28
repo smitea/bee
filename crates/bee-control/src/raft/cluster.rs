@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,6 +13,7 @@ use super::node::{Node, NodeConfig, NodeState};
 use super::tcp::TcpTransport;
 use super::transport::{InMemoryTransport, NodeTransport, Router};
 use super::types::{NodeCommand, NodeId, Role, RpcMessage, Term, LogIndex};
+use super::wal::RaftLogWal;
 
 #[derive(Clone)]
 pub struct ClusterConfig {
@@ -31,6 +33,12 @@ pub struct ClusterConfig {
     /// cluster pass a pre-built `Arc<Mutex<PluginManager>>`
     /// and read it back via the returned handle.
     pub plugin_manager: Option<Arc<std::sync::Mutex<bee_registry::PluginManager>>>,
+    /// S07: when `Some`, each `ClusterNodeHandle` opens
+    /// (or re-opens) its own Raft log WAL at
+    /// `<log_path>/node-<id>.wal` and replays the
+    /// persistent state on boot. `None` (default) is the
+    /// in-memory behavior (no persistence).
+    pub log_path: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for ClusterConfig {
@@ -41,6 +49,7 @@ impl std::fmt::Debug for ClusterConfig {
             .field("heartbeat_interval", &self.heartbeat_interval)
             .field("nodes", &self.nodes)
             .field("plugin_manager", &self.plugin_manager.as_ref().map(|_| "PluginManager"))
+            .field("log_path", &self.log_path)
             .finish()
     }
 }
@@ -53,6 +62,7 @@ impl Default for ClusterConfig {
             heartbeat_interval: Duration::from_millis(100),
             nodes: Vec::new(), // empty → in-memory default
             plugin_manager: None,
+            log_path: None,
         }
     }
 }
@@ -218,7 +228,24 @@ impl Cluster {
                 heartbeat_interval: config.heartbeat_interval,
                 node_offset_ms: (i as u64) * 100,
             };
-            let node = Node::new(id, peer_ids, transport, kv.clone(), cp.clone(), node_config);
+            let initial_state = if let Some(log_path) = &config.log_path {
+                let wal_path = log_path.join(format!("node-{id}.wal"));
+                let wal = RaftLogWal::open(&wal_path)
+                    .expect("RaftLogWal::open");
+                let wal = Arc::new(std::sync::Mutex::new(wal));
+                NodeState::new_from_wal(wal).expect("NodeState::new_from_wal")
+            } else {
+                NodeState::new()
+            };
+            let node = Node::new_with_state(
+                id,
+                peer_ids,
+                transport,
+                kv.clone(),
+                cp.clone(),
+                node_config,
+                initial_state,
+            );
             let state = node.state();
             // S33.5.1: snapshot the Node's
             // admin-forwarding handles BEFORE
@@ -377,13 +404,23 @@ impl Cluster {
             let kv = Arc::new(Mutex::new(KVStateMachine::new()));
             let cp = Arc::new(Mutex::new(ControlPlaneStateMachine::new(plugin_manager.clone())));
             let node_config = spec_to_node_node_config(&specs[&id], &config, i);
-            let node = Node::new(
+            let initial_state = if let Some(log_path) = &config.log_path {
+                let wal_path = log_path.join(format!("node-{id}.wal"));
+                let wal = RaftLogWal::open(&wal_path)
+                    .expect("RaftLogWal::open");
+                let wal = Arc::new(std::sync::Mutex::new(wal));
+                NodeState::new_from_wal(wal).expect("NodeState::new_from_wal")
+            } else {
+                NodeState::new()
+            };
+            let node = Node::new_with_state(
                 id,
                 peer_ids,
                 tcp as Arc<dyn NodeTransport>,
                 kv.clone(),
                 cp.clone(),
                 node_config,
+                initial_state,
             );
             let state = node.state();
             // S33.5.1: snapshot admin-forwarding
