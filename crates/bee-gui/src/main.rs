@@ -1,7 +1,14 @@
-use clap::Parser;
+//! bee-gui entry point — launches the iced window.
+
 use std::net::SocketAddr;
 
+use clap::Parser;
 use tracing_subscriber::EnvFilter;
+
+use bee_gui::app::{App, Flags};
+use iced::Application;
+use bee_gui::connection::spawn;
+use bee_gui::log_panel::LogRing;
 
 #[derive(Parser, Debug)]
 #[command(name = "bee-gui", version, about = "Bee cluster management GUI")]
@@ -23,12 +30,25 @@ fn main() -> anyhow::Result<()> {
         .parse()
         .map_err(|e| anyhow::anyhow!("invalid --connect addr '{}': {}", cli.connect, e))?;
 
-    println!("bee-gui v0.1.0 — connect={} log_level={}", cli.connect, cli.log_level);
+    let bundle = spawn(addr);
+    let log = LogRing::new();
+    let flags = Flags { bundle, log };
 
-    // For S-1a, the GUI shell is wired up via a separate `app` module that
-    // requires iced 0.12 to be fully realized. The binary here is the
-    // entry point; the full app::run() launches the iced window.
-    let _ = addr;
+    let settings = iced::Settings::<Flags> {
+        id: None,
+        window: iced::window::Settings {
+            size: iced::Size::new(1100.0, 720.0),
+            decorations: !cli.no_window_decorations,
+            ..Default::default()
+        },
+        flags,
+        fonts: Default::default(),
+        default_font: iced::Font::default(),
+        antialiasing: true,
+        default_text_size: iced::Pixels(13.0),
+    };
+
+    let _ = App::run(settings);
     Ok(())
 }
 

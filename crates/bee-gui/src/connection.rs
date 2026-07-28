@@ -1,7 +1,7 @@
 //! Single AdminClient connection lifecycle:
 //!   Connecting → Connected → Error(reason) → Disconnected
 //! Spawned on its own std::thread + tokio runtime. Communicates with the
-//! iced main thread via `tokio::sync::mpsc`.
+//! iced main thread via a held `mpsc::Receiver<ConnectionMsg>`.
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -103,10 +103,16 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Spawn the tokio runtime thread. Returns a handle for the iced side
-/// plus a `mpsc::Receiver` that delivers `ConnectionMsg` from the
-/// connection thread.
-pub fn spawn(addr: SocketAddr) -> (ConnectionHandle, mpsc::Receiver<ConnectionMsg>) {
+/// Bundle returned by `spawn`: the handle + the receiver half of the
+/// `ConnectionMsg` mpsc. The App owns the receiver and drains it each
+/// `update`.
+pub struct ConnectionBundle {
+    pub handle: ConnectionHandle,
+    pub receiver: mpsc::Receiver<ConnectionMsg>,
+}
+
+/// Spawn the tokio runtime thread.
+pub fn spawn(addr: SocketAddr) -> ConnectionBundle {
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<Cmd>(64);
     let (msg_tx, msg_rx) = mpsc::channel::<ConnectionMsg>(64);
     let state = Arc::new(Mutex::new(ConnectionState::Connecting));
@@ -152,7 +158,25 @@ pub fn spawn(addr: SocketAddr) -> (ConnectionHandle, mpsc::Receiver<ConnectionMs
         state,
         cmd_tx,
     };
-    (handle, msg_rx)
+    ConnectionBundle {
+        handle,
+        receiver: msg_rx,
+    }
+}
+
+/// Non-blocking drain of pending `ConnectionMsg`s. Returns `Vec` so the
+/// App can re-emit each as a `Message::Connection` via `update`.
+pub fn try_drain(rx: &mut mpsc::Receiver<ConnectionMsg>) -> Vec<ConnectionMsg> {
+    use tokio::sync::mpsc::error::TryRecvError;
+    let mut out = Vec::new();
+    loop {
+        match rx.try_recv() {
+            Ok(m) => out.push(m),
+            Err(TryRecvError::Empty) => break,
+            Err(TryRecvError::Disconnected) => break,
+        }
+    }
+    out
 }
 
 async fn run_request_loop(
@@ -182,41 +206,46 @@ async fn run_request_loop(
                 if let Err(ref e) = result {
                     log_rpc_failure(&ctx, e);
                 }
-                let result_for_msg = match &result {
-                    Ok(r) => Ok(r.clone()),
-                    Err(e) => Err(match e {
-                        GuiError::Io { source } => GuiError::Io {
-                            source: std::io::Error::new(source.kind(), source.to_string()),
-                        },
-                        other => match other {
-                            GuiError::Connect { addr, attempts, last_err } => GuiError::Connect {
-                                addr: *addr,
-                                attempts: *attempts,
-                                last_err: last_err.clone(),
-                            },
-                            GuiError::Timeout { rpc, elapsed_ms } => GuiError::Timeout {
-                                rpc,
-                                elapsed_ms: *elapsed_ms,
-                            },
-                            GuiError::RpcServer { msg } => GuiError::RpcServer { msg: msg.clone() },
-                            GuiError::Wire { kind, detail } => GuiError::Wire {
-                                kind: *kind,
-                                detail: detail.clone(),
-                            },
-                            GuiError::ConnectionLost { last_seen_ms } => GuiError::ConnectionLost {
-                                last_seen_ms: *last_seen_ms,
-                            },
-                            GuiError::Cancelled => GuiError::Cancelled,
-                            _ => GuiError::Cancelled,
-                        },
-                    }),
-                };
+                let result_for_msg = clone_result(&result);
                 let _ = msg_tx
                     .send(ConnectionMsg::CallResult { id, result: result_for_msg })
                     .await;
                 let _ = reply.send(result);
             }
         }
+    }
+}
+
+fn clone_result(r: &Result<AdminResponse, GuiError>) -> Result<AdminResponse, GuiError> {
+    match r {
+        Ok(v) => Ok(v.clone()),
+        Err(e) => Err(match e {
+            GuiError::Io { source } => GuiError::Io {
+                source: std::io::Error::new(source.kind(), source.to_string()),
+            },
+            GuiError::Connect {
+                addr,
+                attempts,
+                last_err,
+            } => GuiError::Connect {
+                addr: *addr,
+                attempts: *attempts,
+                last_err: last_err.clone(),
+            },
+            GuiError::Timeout { rpc, elapsed_ms } => GuiError::Timeout {
+                rpc,
+                elapsed_ms: *elapsed_ms,
+            },
+            GuiError::RpcServer { msg } => GuiError::RpcServer { msg: msg.clone() },
+            GuiError::Wire { kind, detail } => GuiError::Wire {
+                kind: *kind,
+                detail: detail.clone(),
+            },
+            GuiError::ConnectionLost { last_seen_ms } => GuiError::ConnectionLost {
+                last_seen_ms: *last_seen_ms,
+            },
+            GuiError::Cancelled => GuiError::Cancelled,
+        }),
     }
 }
 
@@ -278,5 +307,12 @@ mod tests {
         assert_eq!(rpc_kind_of(&AdminRequest::Ping), "Ping");
         assert_eq!(rpc_kind_of(&AdminRequest::ClusterStatus), "ClusterStatus");
         assert_eq!(rpc_kind_of(&AdminRequest::ListJobs), "ListJobs");
+    }
+
+    #[test]
+    fn try_drain_empty() {
+        let (_tx, mut rx) = mpsc::channel::<ConnectionMsg>(4);
+        let v = try_drain(&mut rx);
+        assert!(v.is_empty());
     }
 }

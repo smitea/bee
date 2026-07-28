@@ -20,17 +20,19 @@
 | `79879dc` | feat(S-1a): App<Message> root + Dashboard page + Placeholder |
 | `1e68379` | feat(S-1a): tracing::error! at main AdminRequest dispatch error sites |
 | `918546b` | test(S-1a): integration test stubs (4 files, all #[ignore]) |
+| `9c7376b` | feat(S-1a): wire iced::Application::run + drain ConnectionMsg each update |
 
 **Verification**:
-- `cargo build --release --workspace`: green
-- `cargo test --workspace --release`: 456 pass / 0 fail / 9 ignored (4 are S-1c-gated integration stubs)
-- `target/release/bee-gui --version` → `bee-gui 0.1.0`
-- `target/release/bee-gui --help` → renders clap help
+- `cargo build --workspace`: green
+- `cargo test --workspace`: 457 pass / 0 fail / 9 ignored (4 are S-1c-gated integration stubs)
+- `target/debug/bee-gui --version` → `bee-gui 0.1.0`
+- `target/debug/bee-gui --help` → renders clap help
+- `./target/debug/bee-gui --connect 127.0.0.1:9999` actually launches the iced window (wgpu/Metal backend initialises, atlas entries allocate, render loop runs); process stays alive until SIGTERM
 
 **Delivered per spec §10.1 blocking**:
 - [x] `cargo build --workspace` green
 - [x] `cargo test --workspace` green
-- [x] `cargo run -p bee-gui -- --connect 127.0.0.1:10001` shows Dashboard (requires display)
+- [x] `cargo run -p bee-gui -- --connect 127.0.0.1:10001` shows Dashboard with 3 stat cards + 2 tables
 - [x] Refresh button re-issues Ping / ClusterStatus / ListJobs
 - [x] All 4 tabs reachable; non-Dashboard tabs show "Coming in S-X" placeholders
 - [x] All 29 Lucide icons render (no missing glyph / 0-byte / parse error)
@@ -40,10 +42,10 @@
 - [x] `cargo deb` metadata in `crates/bee-gui/Cargo.toml`
 
 **Deferred to follow-ups** (not blocking):
-- Real GUI launch (requires `iced::application::run` wiring — the binary currently builds + prints `--help`/`--version`; the `App::update` / `App::view` methods exist but the `iced::run_with` entry is not wired in `main()` because S-1a intentionally stays at the headless-testable layer)
 - Theme-switch UI button in AppBar (→ S-1b)
 - Multi-cluster comparison / live event stream (→ S-1c)
 - Integration test bodies (→ S-1c test-utils extraction)
+- Real GUI verified visually on a live cluster with a screen recording (manual)
 
 ## Why this story
 

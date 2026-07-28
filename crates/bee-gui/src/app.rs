@@ -1,15 +1,20 @@
 //! Root App<Message> for iced.
 //!
-//! - `update(msg)` routes messages to pages
-//! - `view()` renders the active tab (Dashboard / 数据管理 / Pipelines / 设置)
-//! - `subscription()` consumes ConnectionMsg from the connection thread
+//! Implements the `iced::Application` trait so `iced::Application::run` is
+//! the single entry point used by `main.rs`.
+//!
+//! - `update(msg)` routes messages to pages AND drains pending
+//!   `ConnectionMsg`s from the connection thread.
 
 use iced::{
+    executor::Default,
     widget::{Column, Container, Row, Text},
-    Element, Subscription,
+    Application, Command, Element, Length, Subscription, Theme,
 };
 
-use crate::connection::{ConnectionHandle, ConnectionMsg, ConnectionState};
+use crate::connection::{
+    try_drain, ConnectionBundle, ConnectionHandle, ConnectionMsg, ConnectionState,
+};
 use crate::icons;
 use crate::log_panel::LogRing;
 use crate::pages::dashboard::{self, DashboardData, DashboardMsg};
@@ -24,9 +29,16 @@ pub enum Tab {
     Settings,
 }
 
+/// Flags passed to `App::new` via `iced::Settings::with_flags`.
+pub struct Flags {
+    pub bundle: ConnectionBundle,
+    pub log: LogRing,
+}
+
 pub struct App {
     pub tab: Tab,
     pub conn: ConnectionHandle,
+    pub msg_rx: tokio::sync::mpsc::Receiver<ConnectionMsg>,
     pub log: LogRing,
     pub dashboard: DashboardData,
 }
@@ -35,51 +47,68 @@ pub struct App {
 pub enum Message {
     TabSelected(Tab),
     Dashboard(DashboardMsg),
+    PumpTick,
 }
 
-impl App {
-    pub fn new(conn: ConnectionHandle, log: LogRing) -> Self {
-        Self {
+impl Application for App {
+    type Executor = Default;
+    type Message = Message;
+    type Theme = Theme;
+    type Flags = Flags;
+
+    fn new(flags: Self::Flags) -> (Self, Command<Self::Message>) {
+        let bundle = flags.bundle;
+        let conn = bundle.handle.clone();
+        let msg_rx = bundle.receiver;
+        let app = Self {
             tab: Tab::Dashboard,
             conn,
-            log,
+            msg_rx,
+            log: flags.log,
             dashboard: DashboardData::default(),
-        }
+        };
+        // Kick the first Refresh so the dashboard has data on launch.
+        dashboard::trigger_refresh(&app.conn);
+        (app, Command::perform(async {}, |_| Message::PumpTick))
     }
 
-    pub fn title(&self) -> String {
+    fn title(&self) -> String {
         "Bee GUI".to_string()
     }
 
-    pub fn update(&mut self, msg: Message) {
-        match msg {
+    fn update(&mut self, message: Self::Message) -> Command<Self::Message> {
+        match message {
             Message::TabSelected(t) => {
                 self.tab = t;
+                Command::none()
             }
             Message::Dashboard(d) => match d {
                 DashboardMsg::RefreshPressed => {
                     dashboard::trigger_refresh(&self.conn);
+                    Command::perform(async {}, |_| Message::PumpTick)
                 }
             },
+            Message::PumpTick => {
+                // Drain any pending ConnectionMsg without awaiting; the
+                // iced runtime polls `update` again on the next frame, so
+                // chaining Command::none here yields control to the runtime.
+                let drained = try_drain(&mut self.msg_rx);
+                for m in drained {
+                    self.apply_connection_msg(m);
+                }
+                Command::none()
+            }
         }
     }
 
-    fn apply_response(&mut self, resp: bee_control::raft::AdminResponse) {
-        use bee_control::raft::AdminResponse;
-        match resp {
-            AdminResponse::ClusterMetrics(detail) => {
-                self.dashboard.cluster = Some(detail);
-            }
-            AdminResponse::JobList(jobs) => {
-                self.dashboard.jobs = jobs;
-            }
-            _ => {}
-        }
-    }
-
-    pub fn view(&self) -> Element<'_, Message> {
+    fn view(&self) -> Element<'_, Self::Message, Self::Theme, iced::Renderer> {
         let tabs_row = Row::new()
-            .push(tab_button("Dashboard", Tab::Dashboard, icons::GAUGE, &self.tab))
+            .push(tab_button(
+                "Dashboard",
+                Tab::Dashboard,
+                icons::GAUGE,
+                &self.tab,
+            ))
             .push(tab_button(
                 "数据管理",
                 Tab::DataMgmt,
@@ -108,7 +137,7 @@ impl App {
         )))
         .padding([theme::SPACE_1, theme::SPACE_4]);
 
-        let main: Element<Message> = match self.tab {
+        let main: Element<Self::Message, Self::Theme, iced::Renderer> = match self.tab {
             Tab::Dashboard => dashboard::view(&self.dashboard, &self.conn, &self.log)
                 .map(Message::Dashboard),
             Tab::DataMgmt => placeholder::view("数据管理", "S-2", icons::DATABASE),
@@ -139,11 +168,50 @@ impl App {
         .into()
     }
 
-    pub fn subscription(&self) -> Subscription<Message> {
-        // S-1a: no continuous subscription; the connection thread's mpsc is
-        // drained via Task::perform from main(). S-1b can wire a real
-        // Subscription if streaming updates become a requirement.
+    fn subscription(&self) -> Subscription<Self::Message> {
+        // The connection thread is drained by the recurring
+        // `Command::perform(PumpTick)` cycle kicked off in `new`. S-1b can
+        // upgrade this to a real `Subscription` for streaming updates.
         Subscription::none()
+    }
+}
+
+impl App {
+    fn apply_connection_msg(&mut self, m: ConnectionMsg) {
+        match m {
+            ConnectionMsg::StateChanged(s) => {
+                self.log.push(
+                    crate::log_panel::LogLevel::Info,
+                    format!("state -> {:?}", s),
+                );
+            }
+            ConnectionMsg::CallResult { result, .. } => match result {
+                Ok(resp) => {
+                    self.log.push(
+                        crate::log_panel::LogLevel::Info,
+                        format!("rpc ok: {:?}", resp),
+                    );
+                    self.apply_response(resp);
+                }
+                Err(e) => {
+                    self.log.push(crate::log_panel::LogLevel::Error, e.to_string());
+                    self.dashboard.last_error = Some(e.to_string());
+                }
+            },
+        }
+    }
+
+    fn apply_response(&mut self, resp: bee_control::raft::AdminResponse) {
+        use bee_control::raft::AdminResponse;
+        match resp {
+            AdminResponse::ClusterMetrics(detail) => {
+                self.dashboard.cluster = Some(detail);
+            }
+            AdminResponse::JobList(jobs) => {
+                self.dashboard.jobs = jobs;
+            }
+            _ => {}
+        }
     }
 }
 
@@ -152,7 +220,7 @@ fn tab_button<'a>(
     tab: Tab,
     icon: &'a [u8],
     current: &'a Tab,
-) -> Element<'a, Message> {
+) -> Element<'a, Message, Theme, iced::Renderer> {
     let active = current == &tab;
     let icon_color = if active {
         iced::Color::from_rgb(0.0, 0.478, 1.0)
@@ -171,9 +239,11 @@ fn tab_button<'a>(
     btn.into()
 }
 
-fn connection_dot_static(_state: &ConnectionState) -> Element<'static, Message> {
-    Container::new(iced::widget::Text::new("●"))
-        .width(iced::Length::Fixed(14.0))
-        .height(iced::Length::Fixed(14.0))
+fn connection_dot_static(
+    _state: &ConnectionState,
+) -> Element<'static, Message, Theme, iced::Renderer> {
+    Container::new(Text::new("●"))
+        .width(Length::Fixed(14.0))
+        .height(Length::Fixed(14.0))
         .into()
 }
