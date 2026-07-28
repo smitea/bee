@@ -27,6 +27,13 @@ anyhow = "1"
 thiserror = "1"
 iced = { version = "0.12", features = ["svg"] }
 
+[dev-dependencies]
+# S-1c: integration tests in tests/ boot a 3-node
+# in-memory cluster via bee_control::test_utils::TestCluster.
+# The harness is gated behind the `test-utils` feature;
+# enable it for the test profile.
+bee-control = { path = "../bee-control", features = ["test-utils"] }
+
 [lints]
 workspace = true
 

@@ -1,22 +1,14 @@
 use std::time::Duration;
 
 use bee_control::raft::Role;
-use bee_control::{Cluster, ClusterConfig, Op};
-
-fn test_config() -> ClusterConfig {
-    ClusterConfig {
-        n: 3,
-        base_election_timeout: Duration::from_millis(800),
-        heartbeat_interval: Duration::from_millis(100),
-        nodes: Vec::new(), // in-memory default
-        plugin_manager: None,
-        log_path: None,
-    }
-}
+use bee_control::test_utils::TestCluster;
+use bee_control::Op;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn three_node_cluster_elects_exactly_one_leader() {
-    let cluster = Cluster::new(test_config()).await;
+    let tc = TestCluster::boot_3_node_with_admin().await;
+    let cluster = tc.cluster.clone();
+    let _keep_alive = tc; // shut down admin_servers on drop
     let leader = cluster
         .wait_for_leader(Duration::from_secs(3))
         .await
@@ -45,7 +37,9 @@ async fn three_node_cluster_elects_exactly_one_leader() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn kill_leader_triggers_reelection_within_2s() {
-    let mut cluster = Cluster::new(test_config()).await;
+    let tc = TestCluster::boot_3_node_with_admin().await;
+    let cluster = tc.cluster.clone();
+    let _keep_alive = tc;
     let old_leader = cluster
         .wait_for_leader(Duration::from_secs(3))
         .await
@@ -62,7 +56,9 @@ async fn kill_leader_triggers_reelection_within_2s() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn submitted_put_replicates_to_all_nodes() {
-    let cluster = Cluster::new(test_config()).await;
+    let tc = TestCluster::boot_3_node_with_admin().await;
+    let cluster = tc.cluster.clone();
+    let _keep_alive = tc;
     let leader = cluster
         .wait_for_leader(Duration::from_secs(3))
         .await
@@ -92,7 +88,9 @@ async fn submitted_put_replicates_to_all_nodes() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn submit_to_non_leader_returns_error() {
-    let cluster = Cluster::new(test_config()).await;
+    let tc = TestCluster::boot_3_node_with_admin().await;
+    let cluster = tc.cluster.clone();
+    let _keep_alive = tc;
     let leader = cluster
         .wait_for_leader(Duration::from_secs(3))
         .await

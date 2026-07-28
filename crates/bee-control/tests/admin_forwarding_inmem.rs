@@ -38,79 +38,29 @@ use std::time::Duration;
 use bee_control::raft::admin_client::AdminClient;
 use bee_control::raft::admin_protocol::{AdminRequest, AdminResponse};
 use bee_control::raft::admin_server::AdminServer;
-use bee_control::raft::cluster::{Cluster, ClusterConfig, NodeSpec};
-use bee_control::raft::node::NodeConfig;
+use bee_control::test_utils::TestCluster;
 use tokio::time::timeout;
-
-async fn boot_3_node_inmem() -> Cluster {
-    let config = ClusterConfig {
-        n: 3,
-        base_election_timeout: Duration::from_millis(500),
-        heartbeat_interval: Duration::from_millis(50),
-        plugin_manager: None,
-        log_path: None,
-        nodes: (0..3)
-            .map(|i| {
-                let id = (i + 1) as u32;
-                NodeSpec {
-                    id,
-                    transport: None,
-                    node_config: Some(NodeConfig {
-                        base_election_timeout: Duration::from_millis(500),
-                        heartbeat_interval: Duration::from_millis(50),
-                        node_offset_ms: (i as u64) * 50,
-                    }),
-                }
-            })
-            .collect(),
-    };
-    Cluster::new_with_specs(config).await
-}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn admin_forwarding_inmem() {
-    let cluster = boot_3_node_inmem().await;
+    // S-1c: the 3-node cluster + per-node AdminServer
+    // wiring lives in the public `test_utils::TestCluster`
+    // harness now; this test just consumes the
+    // pre-bootstrapped `cluster` and `admin_addrs`.
+    let tc = TestCluster::boot_3_node_with_admin().await;
+    let cluster = tc.cluster.clone();
+    let admin_addrs = tc.admin_addrs.clone();
+    // `tc` is held to the end of the function via its
+    // Clone (Arc-shared AdminServers); Drop at scope
+    // exit shuts them down.
+    let _keep_alive = tc;
+
     // Wait for leader election.
     let leader = cluster
         .wait_for_leader(Duration::from_secs(5))
         .await
         .expect("leader should be elected within 5s");
     assert!(cluster.is_alive(leader));
-
-    // For every node, wire an AdminServer bound
-    // to a random port, with `register_reply`
-    // pointing at the live Node's
-    // `pending_replies` handle.
-    let mut admin_addrs = std::collections::HashMap::new();
-    let mut admin_servers = Vec::new();
-    for i in 1..=3u32 {
-        let node = cluster.node(i).expect("node handle");
-        let kv = node.kv.clone();
-        let cp = node.cp.clone();
-        let state = node.state.clone();
-        let pending_replies = node.pending_replies.clone();
-        let node_transport = node.node_transport.clone();
-        let register_reply: bee_control::raft::node::AdminReplyRegistrar =
-            Arc::new(move || {
-                let pr = pending_replies.clone();
-                Box::pin(async move { pr.register().await })
-            });
-        let mut admin = AdminServer::start(
-            "127.0.0.1:0".parse().unwrap(),
-            kv,
-            cp,
-            state,
-            None,
-            Some(node_transport),
-            Some(register_reply),
-            None,  // plugin_manager (S33.5.2)
-        )
-        .await
-        .expect("AdminServer::start");
-        let addr = admin.local_addr();
-        admin_addrs.insert(i, addr);
-        admin_servers.push(admin);
-    }
 
     // Connect to the LEADER's admin port. The
     // leader's `dispatch(Forward)` arm reads
@@ -261,9 +211,10 @@ async fn admin_forwarding_inmem() {
         ),
     }
 
-    for mut a in admin_servers {
-        a.shutdown();
-    }
+    // The owned `TestCluster` (`tc`) is dropped at
+    // scope exit, which calls `AdminServer::shutdown`
+    // on every listener (via the Drop impl). No
+    // manual cleanup needed here.
     let _ = client; // suppress unused
 }
 

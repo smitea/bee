@@ -24,6 +24,14 @@ pub mod signature;
 pub mod worker;
 pub mod work_stealing;
 
+// S-1c: test-only harness (3-node Cluster + per-node AdminServer).
+// Gated so production binaries do not pull in the wiring. Tests
+// inside this crate pick it up via `cfg(test)`; downstream test
+// crates (e.g. bee-gui) opt in via the `test-utils` feature in
+// their dev-dependencies.
+#[cfg(any(test, feature = "test-utils"))]
+pub mod test_utils;
+
 pub use bee_types::JobLifecycleState;
 
 pub use builtin_handlers::{LogSink, StartedHandler, TerminalHandler};

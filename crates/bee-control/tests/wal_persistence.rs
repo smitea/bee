@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use bee_control::kv::Op;
-use bee_control::raft::cluster::{Cluster, ClusterConfig};
+use bee_control::test_utils::TestCluster;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn wal_persists_log_and_term_across_process_restart() {
@@ -10,15 +10,9 @@ async fn wal_persists_log_and_term_across_process_restart() {
     let log_path: PathBuf = tempdir.path().to_path_buf();
 
     let leader_first_run = {
-        let cluster = Cluster::new(ClusterConfig {
-            n: 3,
-            base_election_timeout: Duration::from_millis(800),
-            heartbeat_interval: Duration::from_millis(100),
-            nodes: Vec::new(),
-            plugin_manager: None,
-            log_path: Some(log_path.clone()),
-        })
-        .await;
+        let tc = TestCluster::boot_3_node_with_wal(&log_path).await;
+        let cluster = tc.cluster.clone();
+        let _keep_alive = tc;
 
         let leader = cluster
             .wait_for_leader(Duration::from_secs(5))
@@ -54,15 +48,12 @@ async fn wal_persists_log_and_term_across_process_restart() {
         leader
     };
 
-    let restored = Cluster::new(ClusterConfig {
-        n: 3,
-        base_election_timeout: Duration::from_millis(800),
-        heartbeat_interval: Duration::from_millis(100),
-        nodes: Vec::new(),
-        plugin_manager: None,
-        log_path: Some(log_path.clone()),
-    })
-    .await;
+    // S-1c: rebuild the cluster from the same WAL dir.
+    // TestCluster::boot_3_node_with_wal wraps the same
+    // Cluster::new(ClusterConfig { log_path }) call.
+    let tc = TestCluster::boot_3_node_with_wal(&log_path).await;
+    let restored = tc.cluster.clone();
+    let _keep_alive = tc;
 
     let leader_handle = restored.node(leader_first_run).expect("leader handle");
     let restored_state = leader_handle.state.lock().await;
