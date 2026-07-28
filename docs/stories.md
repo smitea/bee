@@ -631,8 +631,8 @@ In `bee-dsl-sql`:
 - `bee cluster status` shows the current policy
 
 **Acceptance criteria**
-- [ ] Unit tests for each policy: feed a known mix of Task durations, assert the expected dispatch order
-- [ ] Integration test: 3 Tasks with known CPU costs; under MLFQ, short Tasks complete before long Tasks
+- [x] Unit tests for each policy: feed a known mix of Task durations, assert the expected dispatch order (locked down by `sjf_dispatches_shortest_expected_duration_first` + `hrrn_picks_highest_response_ratio` + `srtn_preempts_longer_running_task_for_shorter_arrival` + `srtn_does_not_preempt_when_arrival_is_longer` + `mlfq_demotes_after_threshold_consecutive_polls` in `crates/bee-runtime/src/scheduler.rs`)
+- [x] Integration test: 3 Tasks with known CPU costs; under MLFQ, short Tasks complete before long Tasks (locked down by `mlfq_short_task_dispatched_before_long_under_demotion` in `crates/bee-runtime/src/scheduler.rs:894` — short/medium/long Tasks dispatch in priority order from the MLFQ levels)
 - [x] Switching policy via config requires only a Node restart (no DAG re-deploy)
 
 > **Done (2026-07-17)** via bundle commit `40f5503`. `SchedulerPolicy::default()` returns `Mlfq` (ADR-0008 §3); `SchedulerConfig::build()` instantiates the configured policy at startup. Unit tests for all 4 alternative policies (Mlfq / Sjf / Hrrn / Srtn) plus the priority scheduler already pass.
