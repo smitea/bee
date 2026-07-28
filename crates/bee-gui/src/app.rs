@@ -396,14 +396,24 @@ fn tab_button<'a>(
         .padding([theme::SPACE_2, theme::SPACE_2])
         .align_items(iced::alignment::Alignment::Center);
 
+    let tooltip_label = tooltip_label_for_tab(tab.clone());
     let btn = iced::widget::Button::new(row).on_press(Message::TabSelected(tab));
-    btn.into()
+    let tooltip_content: Element<'_, Message, Theme, iced::Renderer> =
+        Container::new(Text::new(tooltip_label).size(11))
+            .padding([theme::SPACE_1, theme::SPACE_2])
+            .style(iced::theme::Container::Box)
+            .into();
+    iced::widget::Tooltip::new(
+        btn,
+        tooltip_content,
+        iced::widget::tooltip::Position::Bottom,
+    )
+    .into()
 }
 
 fn theme_toggle_button(theme_kind: ThemeKind) -> Element<'static, Message, Theme, iced::Renderer> {
     // Show the icon for the OPPOSITE theme (the action that will be taken
-    // when clicked). Mouse-over tooltip is OS-native in S-1b; the self-drawn
-    // tooltip ships in S-1c.
+    // when clicked). S-1c: self-drawn tooltip wraps the button.
     let (icon, label) = match theme_kind {
         ThemeKind::Light => (icons::MOON, "Dark"),
         ThemeKind::Dark => (icons::SUN, "Light"),
@@ -417,18 +427,91 @@ fn theme_toggle_button(theme_kind: ThemeKind) -> Element<'static, Message, Theme
         .push(iced::widget::Space::with_width(theme::SPACE_1))
         .push(Text::new(label).size(11))
         .align_items(iced::alignment::Alignment::Center);
-    iced::widget::Button::new(row)
+    let btn = iced::widget::Button::new(row)
         .on_press(Message::CycleTheme)
-        .padding([theme::SPACE_1, theme::SPACE_2])
-        .into()
+        .padding([theme::SPACE_1, theme::SPACE_2]);
+    let tooltip_label = match theme_kind {
+        ThemeKind::Light => "Switch to Dark theme",
+        ThemeKind::Dark => "Switch to Light theme",
+    };
+    let tooltip_content: Element<'_, Message, Theme, iced::Renderer> =
+        Container::new(Text::new(tooltip_label).size(11))
+            .padding([theme::SPACE_1, theme::SPACE_2])
+            .style(iced::theme::Container::Box)
+            .into();
+    iced::widget::Tooltip::new(
+        btn,
+        tooltip_content,
+        iced::widget::tooltip::Position::Bottom,
+    )
+    .into()
 }
 
 fn connection_dot_static(
-    _state: &ConnectionState,
+    state: &ConnectionState,
 ) -> Element<'static, Message, Theme, iced::Renderer> {
-    Container::new(Text::new("●"))
+    let tooltip_label: &'static str = match state {
+        ConnectionState::Connected => "Connected to AdminServer",
+        ConnectionState::Connecting => "Connecting…",
+        ConnectionState::Error(_) => "Connection error (click Retry in tab)",
+        ConnectionState::Disconnected => "Disconnected",
+    };
+    let dot = Container::new(Text::new("●"))
         .width(Length::Fixed(14.0))
-        .height(Length::Fixed(14.0))
-        .into()
+        .height(Length::Fixed(14.0));
+    let tooltip_content: Element<'_, Message, Theme, iced::Renderer> =
+        Container::new(Text::new(tooltip_label).size(11))
+            .padding([theme::SPACE_1, theme::SPACE_2])
+            .style(iced::theme::Container::Box)
+            .into();
+    iced::widget::Tooltip::new(
+        dot,
+        tooltip_content,
+        iced::widget::tooltip::Position::Bottom,
+    )
+    .into()
+}
+
+pub fn tooltip_label_for_tab(tab: Tab) -> &'static str {
+    match tab {
+        Tab::Dashboard => "Live cluster + job status (S-1a)",
+        Tab::DataMgmt => "Datasource CRUD (S-2)",
+        Tab::Pipelines => "Job list + inspect (S-3/4)",
+        Tab::Settings => "Theme, log level, diagnostics (S-5)",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// S-1c: tab tooltip labels must be non-empty + unique per tab so
+    /// the user gets a meaningful hover on every tab button.
+    #[test]
+    fn tab_tooltip_labels_are_unique() {
+        let labels = [
+            tooltip_label_for_tab(Tab::Dashboard),
+            tooltip_label_for_tab(Tab::DataMgmt),
+            tooltip_label_for_tab(Tab::Pipelines),
+            tooltip_label_for_tab(Tab::Settings),
+        ];
+        for l in &labels {
+            assert!(!l.is_empty());
+        }
+        let mut sorted = labels.to_vec();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), 4, "labels must be distinct: {:?}", labels);
+    }
+
+    #[test]
+    fn tab_tooltip_labels_mention_story_id() {
+        // Each label should reference the story that delivered the tab
+        // so the user has a clear pointer to the source spec / status.
+        assert!(tooltip_label_for_tab(Tab::Dashboard).contains("S-1a"));
+        assert!(tooltip_label_for_tab(Tab::DataMgmt).contains("S-2"));
+        assert!(tooltip_label_for_tab(Tab::Pipelines).contains("S-3"));
+        assert!(tooltip_label_for_tab(Tab::Settings).contains("S-5"));
+    }
 }
 
