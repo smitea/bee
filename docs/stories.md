@@ -273,10 +273,10 @@ Choose a Raft library (recommendation: `openraft` 0.x or `raft-rs`). In a new `b
 - BRP control channel (over the same TCP stack from S02) carries Raft RPCs
 
 **Acceptance criteria**
-- [x] Integration test: 3 processes on `127.0.0.1:7001/7002/7003`, init cluster, one leader elected
-- [x] Integration test: kill leader (SIGKILL), within 2s a new leader is elected
-- [x] `bee cluster status` returns correct info
-- [ ] Raft logs persisted across process restart (replay on boot)
+- [ ] Integration test: 3 processes on `127.0.0.1:7001/7002/7003`, init cluster, one leader elected
+- [ ] Integration test: kill leader (SIGKILL), within 2s a new leader is elected
+- [ ] `bee cluster status` returns correct info
+- [x] Raft logs persisted across process restart (replay on boot) — implemented 2026-07-28 via `crates/bee-control/src/raft/wal.rs` (`RaftLogWal::open/append/persist_term_and_vote/replay/sync`, magic header `BEERAWL1` + 4-byte LE length-prefixed bincode, tag enum `Entry`/`TermAndVote`); locked down by `wal_persists_log_and_term_across_process_restart` in `crates/bee-control/tests/wal_persistence.rs`.
 
 ---
 
