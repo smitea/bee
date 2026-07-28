@@ -110,7 +110,7 @@ pub fn view<'a>(
 
 fn header<'a>() -> Element<'a, DataMsg> {
     Row::new()
-        .push(Text::new("数据管理").size(20))
+        .push(Text::new("Data Sources").size(20))
         .push(iced::widget::Space::with_width(Length::Fill))
         .push(Text::new("Datasource Registry").size(11))
         .align_items(iced::alignment::Alignment::Center)

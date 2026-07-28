@@ -78,7 +78,7 @@ pub fn view(
 
 fn header() -> Element<'static, SettingsMsg> {
     Row::new()
-        .push(Text::new("设置").size(20))
+        .push(Text::new("Settings").size(20))
         .push(iced::widget::Space::with_width(Length::Fill))
         .push(Text::new("Settings").size(11))
         .align_items(iced::alignment::Alignment::Center)
