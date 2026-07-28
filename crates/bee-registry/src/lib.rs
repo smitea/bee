@@ -96,10 +96,16 @@ impl PluginManager {
     /// S20: check a manifest's `abi_version` against the configured
     /// range. Returns `Ok(())` on match, `Err(AbiMismatch)` on
     /// mismatch, `Err(InvalidAbiVersion)` on parse failure.
-    fn check_abi(&self, hash: &PluginId, manifest: &PluginManifest) -> bee_plugin_sdk::PluginResult<()> {
+    fn check_abi(
+        &self,
+        path: &std::path::Path,
+        hash: &PluginId,
+        manifest: &PluginManifest,
+    ) -> bee_plugin_sdk::PluginResult<()> {
         let abi = AbiVersion::parse(&manifest.abi_version)?;
         if !abi.matches_major(&self.expected_abi_majors) {
             return Err(PluginError::AbiMismatch {
+                path: path.to_path_buf(),
                 hash: hash.to_string(),
                 claimed: manifest.abi_version.clone(),
                 expected: self.expected_abi_majors.clone(),
@@ -121,7 +127,7 @@ impl PluginManager {
         manifest: PluginManifest,
     ) -> bee_plugin_sdk::PluginResult<PluginId> {
         let id = compute_plugin_id(content);
-        self.check_abi(&id, &manifest)?;
+        self.check_abi(std::path::Path::new("<in-process>"), &id, &manifest)?;
         self.plugins.entry(id.clone()).or_insert_with(|| {
             // Construct a minimal handle for the registered manifest.
             // Real plugin init is wired in the libloading follow-up.
@@ -151,7 +157,7 @@ impl PluginManager {
     ) -> bee_plugin_sdk::PluginResult<PluginId> {
         let id = compute_plugin_id(plugin.plugin_content());
         let manifest = plugin.manifest();
-        self.check_abi(&id, &manifest)?;
+        self.check_abi(std::path::Path::new("<in-process>"), &id, &manifest)?;
         let handle = plugin.init()?;
         let manifest = handle.manifest.clone();
         self.plugins.entry(id.clone()).or_insert(RegisteredPlugin {
@@ -172,9 +178,10 @@ impl PluginManager {
         &mut self,
         path: P,
     ) -> bee_plugin_sdk::PluginResult<PluginId> {
+        let path = path.as_ref();
         let loaded = crate::loader::load_library(path)?;
         let id = loaded.id.clone();
-        self.check_abi(&id, &loaded.handle.manifest)?;
+        self.check_abi(path, &id, &loaded.handle.manifest)?;
         let manifest = loaded.handle.manifest.clone();
         self.plugins.entry(id.clone()).or_insert(RegisteredPlugin {
             manifest,
@@ -607,10 +614,12 @@ mod tests {
                 claimed,
                 expected,
                 migration_link,
+                path,
             }) => {
                 assert_eq!(hash.len(), PluginId::HEX_LEN);
                 assert_eq!(claimed, "v2.0");
                 assert_eq!(expected, vec![1]);
+                assert_eq!(path, std::path::PathBuf::from("<in-process>"));
                 assert!(
                     migration_link.contains("0009-plugin-multiversion"),
                     "expected migration link, got: {migration_link}"
@@ -630,6 +639,10 @@ mod tests {
         let msg = format!("{err}");
         // Per S20 acceptance: hash, claimed abi_version, expected
         // range, link to migration docs.
+        assert!(
+            msg.contains("path=\"<in-process>\""),
+            "missing path field:\n{msg}"
+        );
         assert!(msg.contains("hash="), "missing hash field:\n{msg}");
         assert!(msg.contains("claimed_abi=3.0"), "missing claimed:\n{msg}");
         assert!(msg.contains("expected_majors=[1]"), "missing expected:\n{msg}");

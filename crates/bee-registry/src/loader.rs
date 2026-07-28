@@ -328,6 +328,7 @@ pub fn check_abi(
     let abi = AbiVersion::parse(&manifest.abi_version)?;
     if !abi.matches_major(accepted_majors) {
         return Err(PluginError::AbiMismatch {
+            path: std::path::PathBuf::from("<unknown — pre-load>"),
             hash: "(unknown — pre-load)".into(),
             claimed: manifest.abi_version.clone(),
             expected: accepted_majors.to_vec(),
