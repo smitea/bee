@@ -116,11 +116,11 @@ crates/bee-control     crates/bee-registry   crates/bee-dsl-sql   (binary: bin/b
 Each crate has a minimal `lib.rs` (or `main.rs` for `bee`) with a placeholder type, plus `Cargo.toml` declaring its dependencies. The `bee` binary prints `bee <version>` and exits.
 
 **Acceptance criteria**
-- [ ] `cargo build --workspace` succeeds
-- [ ] `cargo run -p bee -- --version` prints `bee 0.1.0` (or similar)
-- [ ] `cargo test --workspace` runs (no tests yet, but the harness works)
-- [ ] `git init` + first commit captured
-- [ ] `.gitignore` excludes `target/`, `Cargo.lock` for binaries (include for libraries)
+- [x] `cargo build --workspace` succeeds
+- [x] `cargo run -p bee -- --version` prints `bee 0.1.0` (or similar)
+- [x] `cargo test --workspace` runs (no tests yet, but the harness works)
+- [x] `git init` + first commit captured
+- [x] `.gitignore` excludes `target/`, `Cargo.lock` for binaries (include for libraries)
 
 ---
 
@@ -139,9 +139,9 @@ In `bee-codec`:
 - Magic bytes: `[0x42, 0x45]` (ASCII "BE")
 
 **Acceptance criteria**
-- [ ] Unit tests cover: encode round-trip, decode round-trip, magic mismatch, body length mismatch, partial buffer (less than 15 bytes), message-type parsing
-- [ ] `cargo test -p bee-codec` shows all green
-- [ ] No external runtime dependencies added (bincode allowed per ADR-0001)
+- [x] Unit tests cover: encode round-trip, decode round-trip, magic mismatch, body length mismatch, partial buffer (less than 15 bytes), message-type parsing
+- [x] `cargo test -p bee-codec` shows all green
+- [x] No external runtime dependencies added (bincode allowed per ADR-0001)
 
 ---
 
@@ -162,9 +162,9 @@ In `bee` binary:
 - `bee echo <addr>` subcommand: connects to `<addr>`, sends a Heartbeat Frame, reads back the echoed Frame, prints "ok" or the echoed body, exits
 
 **Acceptance criteria**
-- [ ] Integration test: spawn a local listener on `127.0.0.1:0`, connect, send a Frame, read it back
-- [ ] Integration test: handle partial reads (send 5 bytes, then 10 more — receiver reconstructs the full Frame)
-- [ ] `cargo run -p bee -- echo 127.0.0.1:<port>` round-trips a Heartbeat Frame end-to-end
+- [x] Integration test: spawn a local listener on `127.0.0.1:0`, connect, send a Frame, read it back
+- [x] Integration test: handle partial reads (send 5 bytes, then 10 more — receiver reconstructs the full Frame)
+- [x] `cargo run -p bee -- echo 127.0.0.1:<port>` round-trips a Heartbeat Frame end-to-end
 - [ ] Backpressure: sender pauses when local send buffer is full (deferred to S09 cross-Node Phase flow; for now, `tokio::sync::mpsc` between user code and Connection is sufficient)
 
 ---
@@ -187,8 +187,8 @@ In `bee-runtime`:
 - One example built-in `Handler`: `PassthroughHandler` that just forwards input to output (for testing)
 
 **Acceptance criteria**
-- [ ] Unit test: instantiate a 1-Phase DAG with `PassthroughHandler`, feed one input, assert one output
-- [ ] `Dag` exposes `vertices() -> &[Phase]` and `edges() -> &[(PhaseId, PhaseId)]`
+- [x] Unit test: instantiate a 1-Phase DAG with `PassthroughHandler`, feed one input, assert one output
+- [x] `Dag` exposes `vertices() -> &[Phase]` and `edges() -> &[(PhaseId, PhaseId)]`
 - [ ] No SQL / no Raft / no plugin loading in this slice (deferred)
 
 ---
@@ -208,9 +208,9 @@ In `bee-runtime`:
 - `Runtime` reads input from a user-provided `mpsc::Receiver<Event>`, sinks output to a user-provided `mpsc::Sender<Event>`
 
 **Acceptance criteria**
-- [ ] Integration test: 2-Phase chain (A → B), A uses `MapHandler(x => x+1)`, B uses `FilterHandler(x => x > 5)`, feed [1..10], assert output [6,7,8,9,10]
-- [ ] Runtime cleanly shuts down when input channel closes
-- [ ] No network, no Raft, no cross-Node edges in this slice
+- [x] Integration test: 2-Phase chain (A → B), A uses `MapHandler(x => x+1)`, B uses `FilterHandler(x => x > 5)`, feed [1..10], assert output [6,7,8,9,10]
+- [x] Runtime cleanly shuts down when input channel closes
+- [x] No network, no Raft, no cross-Node edges in this slice
 
 ---
 
@@ -227,9 +227,9 @@ Extend `Dag` and `Runtime`:
 - Add a test DAG: Source → [BranchA, BranchB] → Sink (where Sink merges two streams)
 
 **Acceptance criteria**
-- [ ] Integration test: fork DAG, each branch produces N events, sink receives 2N events
-- [ ] Topological order: when 3 Phases A, B, C where A → B, A → C, B and C can run in parallel
-- [ ] DAG cycle detection at construction time (return error if cycle present)
+- [x] Integration test: fork DAG, each branch produces N events, sink receives 2N events
+- [x] Topological order: when 3 Phases A, B, C where A → B, A → C, B and C can run in parallel
+- [x] DAG cycle detection at construction time (return error if cycle present)
 
 ---
 
@@ -252,10 +252,10 @@ Choose a Raft library (recommendation: `openraft` 0.x or `raft-rs`). In a new `b
 - Namespace convention documented: `state/task/{TaskId}/...` (per [CONTEXT.md](../CONTEXT.md))
 
 **Acceptance criteria**
-- [ ] Unit test: single-node Raft loop applies a put, subsequent get returns the value
-- [ ] Unit test: `cas` rejects mismatched `expected`
-- [ ] Unit test: `txn` either applies all ops or none
-- [ ] Smoke test: `bee-kv-test` binary spins up the single-node raft, runs 100 put/get round-trips, prints "ok"
+- [x] Unit test: single-node Raft loop applies a put, subsequent get returns the value
+- [x] Unit test: `cas` rejects mismatched `expected`
+- [x] Unit test: `txn` either applies all ops or none
+- [x] Smoke test: `bee-kv-test` binary spins up the single-node raft, runs 100 put/get round-trips, prints "ok"
 
 ---
 
@@ -273,9 +273,9 @@ Choose a Raft library (recommendation: `openraft` 0.x or `raft-rs`). In a new `b
 - BRP control channel (over the same TCP stack from S02) carries Raft RPCs
 
 **Acceptance criteria**
-- [ ] Integration test: 3 processes on `127.0.0.1:7001/7002/7003`, init cluster, one leader elected
-- [ ] Integration test: kill leader (SIGKILL), within 2s a new leader is elected
-- [ ] `bee cluster status` returns correct info
+- [x] Integration test: 3 processes on `127.0.0.1:7001/7002/7003`, init cluster, one leader elected
+- [x] Integration test: kill leader (SIGKILL), within 2s a new leader is elected
+- [x] `bee cluster status` returns correct info
 - [ ] Raft logs persisted across process restart (replay on boot)
 
 ---
@@ -296,9 +296,9 @@ In `bee-control`, add a second logical state machine on the same Raft group:
 - `bee jobs list` CLI subcommand: reads from any Raft node, returns all `RegisterJob` entries
 
 **Acceptance criteria**
-- [ ] Integration test: 3-node cluster, submit a job on node 1, query `bee jobs list` from node 2 — returns the job
-- [ ] Task status transitions are linearizable (read on any node returns the latest committed state)
-- [ ] KV SM (S06) and ControlPlane SM coexist on the same Raft group without interference
+- [x] Integration test: 3-node cluster, submit a job on node 1, query `bee jobs list` from node 2 — returns the job
+- [x] Task status transitions are linearizable (read on any node returns the latest committed state)
+- [x] KV SM (S06) and ControlPlane SM coexist on the same Raft group without interference
 
 ---
 
@@ -318,9 +318,9 @@ In `bee-control`, add a second logical state machine on the same Raft group:
 - Receiving Node spawns the Task locally (re-uses S04 Runtime) and starts processing
 
 **Acceptance criteria**
-- [ ] Integration test: 3 nodes, deploy a 3-Task DAG (one Task per node), all Tasks start, each emits "started" log line
-- [ ] Cross-Node edge: Task on node A emits to Task on node B — verified by a test that asserts the BRP data channel carries events
-- [ ] `bee jobs inspect <JobId>` shows Task → Node mapping
+- [x] Integration test: 3 nodes, deploy a 3-Task DAG (one Task per node), all Tasks start, each emits "started" log line
+- [x] Cross-Node edge: Task on node A emits to Task on node B — verified by a test that asserts the BRP data channel carries events
+- [x] `bee jobs inspect <JobId>` shows Task → Node mapping
 
 ---
 
@@ -337,9 +337,9 @@ In `bee-control`, add a second logical state machine on the same Raft group:
 - Replace the "round-robin" placement in S09 with the real Scheduler
 
 **Acceptance criteria**
-- [ ] Unit test: 3 Tasks each requesting 500m CPU, 3 Nodes each with 1000m available — packing fits 2 on node 1, 1 on node 2
-- [ ] Integration test: deploy 5 Tasks to 3 Nodes; verify the placement respects capacity
-- [ ] Scheduler is pluggable: can be replaced with a different strategy (e.g., for S25 rebalance)
+- [x] Unit test: 3 Tasks each requesting 500m CPU, 3 Nodes each with 1000m available — packing fits 2 on node 1, 1 on node 2
+- [x] Integration test: deploy 5 Tasks to 3 Nodes; verify the placement respects capacity
+- [x] Scheduler is pluggable: can be replaced with a different strategy (e.g., for S25 rebalance)
 
 ---
 
@@ -360,9 +360,9 @@ In `bee-control`, add a second logical state machine on the same Raft group:
 - `bee jobs list` shows `Orphaned` Tasks distinctly (CLI: `STATUS: orphaned (was on node 2)`)
 
 **Acceptance criteria**
-- [ ] Integration test: 3-node cluster, kill node 2 (SIGKILL), within 35s node 2's Tasks show `Orphaned` on `bee jobs list`
-- [ ] Heartbeat is high-priority (per ADR-0007): uses a dedicated channel, not contended with worker data flow
-- [ ] Heartbeat interval and orphan threshold are configurable
+- [x] Integration test: 3-node cluster, kill node 2 (SIGKILL), within 35s node 2's Tasks show `Orphaned` on `bee jobs list`
+- [x] Heartbeat is high-priority (per ADR-0007): uses a dedicated channel, not contended with worker data flow
+- [x] Heartbeat interval and orphan threshold are configurable
 
 ---
 
@@ -408,8 +408,8 @@ In `bee-dsl-sql`:
 - Test: parse `SELECT a + 1 FROM stream WHERE a > 0` — assert it produces a valid LogicalPlan
 
 **Acceptance criteria**
-- [ ] Unit test: a few representative SQL statements parse and analyze without error
-- [ ] No Bee-level extensions yet (ASOF JOIN, EMIT INTO) — those are in S14 / S15
+- [x] Unit test: a few representative SQL statements parse and analyze without error
+- [x] No Bee-level extensions yet (ASOF JOIN, EMIT INTO) — those are in S14 / S15
 
 ---
 
@@ -428,9 +428,9 @@ In `bee-dsl-sql`:
 - `compile_to_dag(plan: LogicalPlan) -> Result<Dag>`
 
 **Acceptance criteria**
-- [ ] Unit test: `SELECT a + 1 AS b FROM stream WHERE a > 0` → DAG with [DatasourcePhase → FilterPhase → ProjectionPhase]
-- [ ] DAG is executable by S04 Runtime (after S15 wires the executor)
-- [ ] Schema is preserved across Phase boundaries
+- [x] Unit test: `SELECT a + 1 AS b FROM stream WHERE a > 0` → DAG with [DatasourcePhase → FilterPhase → ProjectionPhase]
+- [x] DAG is executable by S04 Runtime (after S15 wires the executor)
+- [x] Schema is preserved across Phase boundaries
 
 ---
 
@@ -447,9 +447,9 @@ In `bee-dsl-sql`:
 - For MVP, the input is a mock "stream" (e.g., a CSV file read once and replayed)
 
 **Acceptance criteria**
-- [ ] `bee run tests/data/simple_select.sql` (test fixture with a small CSV) prints the projection output
-- [ ] Micro-batch window is configurable
-- [ ] Output schema matches the SQL projection
+- [x] `bee run tests/data/simple_select.sql` (test fixture with a small CSV) prints the projection output
+- [x] Micro-batch window is configurable
+- [x] Output schema matches the SQL projection
 
 ---
 
@@ -472,10 +472,10 @@ In `bee-dsl-sql`:
 - Adapter discovery mechanism: Adapters are looked up by name in the Plugin Manager (S19). Built-in Adapters for the runtime are **limited to the trait implementations themselves**; concrete business Adapters (binance, etc.) are **plugins**.
 
 **Acceptance criteria**
-- [ ] `MockInputAdapter` produces exactly N events then returns `Ok(None)` (deterministic, testable)
-- [ ] No domain-specific Datasource implementation in `bee-runtime` or any other Bee core crate
-- [ ] The `binance` / `coingecko` / `influxdb` examples used elsewhere in this doc are clearly labeled as **external plugins** (not built-in) — see S19
-- [ ] A test Pipeline using `MockInputAdapter` (registered via S29's Datasource mechanism with `--adapter mock_input`) runs end-to-end and emits events
+- [x] `MockInputAdapter` produces exactly N events then returns `Ok(None)` (deterministic, testable)
+- [x] No domain-specific Datasource implementation in `bee-runtime` or any other Bee core crate
+- [x] The `binance` / `coingecko` / `influxdb` examples used elsewhere in this doc are clearly labeled as **external plugins** (not built-in) — see S19
+- [x] A test Pipeline using `MockInputAdapter` (registered via S29's Datasource mechanism with `--adapter mock_input`) runs end-to-end and emits events
 
 ---
 
@@ -542,8 +542,8 @@ In `bee-dsl-sql`:
 
 **Acceptance criteria**
 - [ ] Integration test: drop a sample `libbee_plugin_fake.so` into the plugin dir, see it appear in `bee plugin list` with its hash
-- [ ] ABI mismatched plugin: rejected with clear error log (precise error format in S20)
-- [ ] `bee plugin list` output format documented
+- [x] ABI mismatched plugin: rejected with clear error log (precise error format in S20)
+- [x] `bee plugin list` output format documented
 
 ---
 
@@ -560,7 +560,7 @@ In `bee-dsl-sql`:
 - The plugin's `.so` remains on disk for inspection; it is not deleted
 
 **Acceptance criteria**
-- [ ] Integration test: plugin with `abi_version = "2.0"` is rejected when Bee expects `1.x`
+- [x] Integration test: plugin with `abi_version = "2.0"` is rejected when Bee expects `1.x`
 - [ ] Error log format includes: plugin path, computed hash, claimed `abi_version`, expected range, link to migration docs
 - [ ] `bee plugin inspect <path>` shows the would-be hash + claimed `abi_version` (useful for debugging before placing the plugin)
 
