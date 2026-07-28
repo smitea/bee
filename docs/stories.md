@@ -607,7 +607,7 @@ In `bee-dsl-sql`:
 - `bee.runtime.scheduler_policy` config (in MVP, only "priority" matters; MLFQ etc. are in S23)
 
 **Acceptance criteria**
-- [ ] Integration test: 3 Tasks with priorities [high, medium, low]; instrument which Task is polled in which order; assert high comes first more often
+- [x] Integration test: 3 Tasks with priorities [high, medium, low]; instrument which Task is polled in which order; assert high comes first more often (locked down by `priority_scheduler_three_tasks_with_different_priorities_s22_acceptance` in `crates/bee-runtime/src/scheduler.rs:837` — high is dispatched first deterministically)
 - [x] No measurable throughput regression vs. the S10 baseline scheduler
 - [x] The scheduler is opt-in: `bee.runtime.scheduler_policy = "tokio-default"` falls back to S10 behavior
 
