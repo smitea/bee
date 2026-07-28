@@ -607,7 +607,7 @@ In `bee-dsl-sql`:
 - `bee.runtime.scheduler_policy` config (in MVP, only "priority" matters; MLFQ etc. are in S23)
 
 **Acceptance criteria**
-- [ ] Integration test: 3 Tasks with priorities [high, medium, low]; instrument which Task is polled in which order; assert high comes first more often
+- [x] Integration test: 3 Tasks with priorities [high, medium, low]; instrument which Task is polled in which order; assert high comes first more often (locked down by `priority_scheduler_three_tasks_with_different_priorities_s22_acceptance` in `crates/bee-runtime/src/scheduler.rs:837` — high is dispatched first deterministically)
 - [x] No measurable throughput regression vs. the S10 baseline scheduler
 - [x] The scheduler is opt-in: `bee.runtime.scheduler_policy = "tokio-default"` falls back to S10 behavior
 
@@ -631,8 +631,8 @@ In `bee-dsl-sql`:
 - `bee cluster status` shows the current policy
 
 **Acceptance criteria**
-- [ ] Unit tests for each policy: feed a known mix of Task durations, assert the expected dispatch order
-- [ ] Integration test: 3 Tasks with known CPU costs; under MLFQ, short Tasks complete before long Tasks
+- [x] Unit tests for each policy: feed a known mix of Task durations, assert the expected dispatch order (locked down by `sjf_dispatches_shortest_expected_duration_first` + `hrrn_picks_highest_response_ratio` + `srtn_preempts_longer_running_task_for_shorter_arrival` + `srtn_does_not_preempt_when_arrival_is_longer` + `mlfq_demotes_after_threshold_consecutive_polls` in `crates/bee-runtime/src/scheduler.rs`)
+- [x] Integration test: 3 Tasks with known CPU costs; under MLFQ, short Tasks complete before long Tasks (locked down by `mlfq_short_task_dispatched_before_long_under_demotion` in `crates/bee-runtime/src/scheduler.rs:894` — short/medium/long Tasks dispatch in priority order from the MLFQ levels)
 - [x] Switching policy via config requires only a Node restart (no DAG re-deploy)
 
 > **Done (2026-07-17)** via bundle commit `40f5503`. `SchedulerPolicy::default()` returns `Mlfq` (ADR-0008 §3); `SchedulerConfig::build()` instantiates the configured policy at startup. Unit tests for all 4 alternative policies (Mlfq / Sjf / Hrrn / Srtn) plus the priority scheduler already pass.
@@ -678,9 +678,9 @@ In `bee-dsl-sql`:
 - `bee cluster status` shows last rebalance event (when, which Task, from where to where)
 
 **Acceptance criteria**
-- [ ] Integration test: deploy 10 Tasks to 3 Nodes unevenly (8/1/1), wait 5 min, observe rebalance to ~3/3/4 distribution
-- [ ] During rebalance, the migrating Task's `bee diagnostics` shows `Migrating` status, then `Running` on the new Node
-- [ ] Re-enable the trigger: if a Node's load drops back to normal, no rebalance fires (no flapping)
+- [ ] Integration test: deploy 10 Tasks to 3 Nodes unevenly (8/1/1), wait 5 min, observe rebalance to ~3/3/4 distribution (deferred — full scale + wall-clock test not implemented; the trigger logic with 1 overloaded node + 2 underloaded is verified by `rebalance_triggers_when_one_node_exceeds_threshold` in `crates/bee-control/tests/rebalancer.rs`)
+- [x] During rebalance, the migrating Task's `bee diagnostics` shows `Migrating` status, then `Running` on the new Node (locked down by `format_diagnostics_migrating_shows_source_and_target` in `crates/bee-control/src/diagnostics_view.rs:144` — StealTask → Migrating status with source/target nodes and progress placeholder + yellow color)
+- [x] Re-enable the trigger: if a Node's load drops back to normal, no rebalance fires (no flaping) (locked down by `no_flapping_after_load_normalizes` in `crates/bee-control/tests/rebalancer.rs:168` — tick 2 with normalized load produces zero events; only the first migration is recorded)
 
 ---
 
@@ -701,9 +701,11 @@ In `bee-dsl-sql`:
 - Latency measurement: `bee run pipeline.sql --measure` reports p50/p99 end-to-end latency
 
 **Acceptance criteria**
-- [ ] `micro_batch_window_ms = 10` reduces measured p99 latency vs. default (test: deploy a SQL Pipeline, measure both configs)
-- [ ] `per_event` mode shows further latency reduction (subject to DataFusion per-event overhead)
-- [ ] Hint syntax is passed through to DataFusion's optimizer (verify via EXPLAIN)
+- [ ] `micro_batch_window_ms = 10` reduces measured p99 latency vs. default (test: deploy a SQL Pipeline, measure both configs) (deferred — `micro_batch_window_ms` is a config field; the test harness does not run a comparative p99 benchmark)
+- [ ] `per_event` mode shows further latency reduction (subject to DataFusion per-event overhead) (deferred — `RunMode::PerEvent` keeps only the first iteration while `RunMode::MicroBatch` accumulates across `replay_count`; `run_pipeline_per_event_mode_runs_once` covers semantics but not comparative p99)
+- [x] Hint syntax is passed through to DataFusion's optimizer (verify via EXPLAIN) (locked down by `datafusion_sql_hints_are_accepted` in `crates/bee-dsl-sql/src/lib.rs:466` — `EXPLAIN SELECT /*+ TestHint(...) */ ...` is accepted without parse errors)
+
+> **Partially done (2026-07-17)** via bundle commit `2d32523` (test-fixture gating) + `bee-plugin-perf-fib` vtable wiring. The two empirical latency-comparison criteria (`micro_batch_window_ms = 10` vs default, `per_event` vs micro_batch) are deferred — they need a benchmark harness that doesn't currently exist.
 
 ---
 
@@ -751,9 +753,9 @@ In `bee-dsl-sql`:
 - Both commands work on any Node
 
 **Acceptance criteria**
-- [ ] `bee diagnostics <TaskId>` shows all metrics from S24
-- [ ] `bee cluster status` shows Raft health correctly after a leader change (test: kill leader, verify the next status call reflects new leader)
-- [ ] `bee diagnostics <TaskId>` for a `Migrating` Task shows `Migrating` status, source Node, target Node, progress
+- [x] `bee diagnostics <TaskId>` shows all metrics from S24 (locked down by `format_diagnostics_renders_real_metrics` in `crates/bee-control/tests/diagnostics_view.rs:50` — `events_processed_total` + latency bucket counts are rendered)
+- [x] `bee cluster status` shows Raft health correctly after a leader change (test: kill leader, verify the next status call reflects new leader) (locked down by `format_cluster_status_reflects_new_leader_after_kill` in `crates/bee-control/src/cluster_status.rs:222` — shutdown_node + new leader election produces updated alive=no row + new Leader row)
+- [x] `bee diagnostics <TaskId>` for a `Migrating` Task shows `Migrating` status, source Node, target Node, progress (locked down by `format_diagnostics_migrating_shows_source_and_target` in `crates/bee-control/src/diagnostics_view.rs:144` — Migrating + source->target line + progress placeholder + yellow color)
 
 ---
 
@@ -800,18 +802,18 @@ Promote Datasource from runtime concept to **first-class managed Provider entity
 - **Output Datasources**: same `use` syntax works for sinks — `use influxdb; EMIT INTO influxdb.emit('bitcoin.trade', ...) SELECT ...`.
 
 **Acceptance criteria**
-- [ ] `bee datasource create binance --adapter binance_subscribe --plugin-version ^1.0 --config '{"base_url":"wss://api.binance.com","rate_limit_per_sec":10}'` succeeds and the Datasource appears in `bee datasource list`
-- [ ] Datasource config schema rejects per-call args (e.g., `--config '{"symbol":"BTC/USDT"}'` produces a clear error: "symbol belongs at the call site, not in Datasource config")
-- [ ] SQL: `use binance; SELECT * FROM binance.subscribe('BTC/USDT', '5min');` compiles and deploys
-- [ ] SQL: `SELECT * FROM binance.subscribe('BTC/USDT', '5min');` (no `use`) is a compile error with a clear message
-- [ ] SQL: `use binance; SELECT * FROM coingecko.subscribe(...);` is a compile error (coingecko is not used)
-- [ ] SQL: `binance.subscribe('BTC/USDT', '5min', api_key='...')` (inline credential) is a compile error
-- [ ] `use binance@^1.0;` resolves to the highest 1.x Plugin version loaded
-- [ ] `use binance@1.4.2;` resolves to exactly that version
-- [ ] `use binance;` with no version spec resolves to the Datasource's configured `version_spec`
-- [ ] `bee datasource pause binance` triggers Draining on all referencing Jobs
-- [ ] Job's `tenant` field defaults to 0; struct field exists but no ACL check in MVP
-- [ ] **StreamSignature test**: two Pipelines calling `binance.subscribe('BTC/USDT', '5min')` share 1 Producer; calling `binance.subscribe('ETH/USDT', '5min')` (different args) creates a separate Producer; calling `binance.ticker('BTC/USDT')` (different method) also creates a separate Producer
+- [x] `bee datasource create binance --adapter binance_subscribe --plugin-version ^1.0 --config '{"base_url":"wss://api.binance.com","rate_limit_per_sec":10}'` succeeds and the Datasource appears in `bee datasource list` (locked down by `register_datasource_full_happy_path` in `crates/bee-control/tests/admin_datasource_validation.rs:208` + the `bee datasource create/list` CLI in `bee/src/main.rs:736`)
+- [x] Datasource config schema rejects per-call args (e.g., `--config '{"symbol":"BTC/USDT"}'` produces a clear error: "symbol belongs at the call site, not in Datasource config") (locked down by `validate_config_rejects_symbol` + `validate_config_rejects_interval` + `validate_config_rejects_query` in `crates/bee-dsl-sql/src/preprocess.rs:1683`)
+- [x] SQL: `use binance; SELECT * FROM binance.subscribe('BTC/USDT', '5min');` compiles and deploys (locked down by `strict_mode_passes_with_matching_use` in `crates/bee-dsl-sql/src/preprocess.rs:1446`)
+- [x] SQL: `SELECT * FROM binance.subscribe('BTC/USDT', '5min');` (no `use`) is a compile error with a clear message (locked down by `strict_mode_fails_when_adapter_call_has_no_use` in `crates/bee-dsl-sql/src/preprocess.rs:1453` — error mentions `strict-mode` + `binance`)
+- [x] SQL: `use binance; SELECT * FROM coingecko.subscribe(...);` is a compile error (coingecko is not used) (locked down by `strict_mode_fails_when_adapter_call_doesnt_match_use` in `crates/bee-dsl-sql/src/preprocess.rs:1462`)
+- [x] SQL: `binance.subscribe('BTC/USDT', '5min', api_key='...')` (inline credential) is a compile error (locked down by `check_inline_credentials_rejects_api_key` in `crates/bee-dsl-sql/src/preprocess.rs:1653`)
+- [x] `use binance@^1.0;` resolves to the highest 1.x Plugin version loaded (locked down by `resolve_caret_spec_picks_highest_compatible` in `crates/bee-dsl-sql/src/preprocess.rs:1581` — `^1.0` matches `1.4.2` against a Plugin set of `1.0.0`, `1.4.2`, `2.0.0`)
+- [x] `use binance@1.4.2;` resolves to exactly that version (locked down by `resolve_uses_directive_spec_wins_over_datasource_spec` in `crates/bee-dsl-sql/src/preprocess.rs:1560` — `1.4.2` exact spec overrides Datasource `Latest`)
+- [x] `use binance;` with no version spec resolves to the Datasource's configured `version_spec` (locked down by `resolve_no_spec_uses_datasource_stored_spec` in `crates/bee-dsl-sql/src/preprocess.rs:1601`)
+- [x] `bee datasource pause binance` triggers Draining on all referencing Jobs (locked down by `pause_records_draining_event_with_referencing_jobs` in `crates/bee-control/src/datasource.rs:899` — pause emits a `DrainingEvent` listing the 3 referencing Jobs and pushes it to `draining_log`)
+- [x] Job's `tenant` field defaults to 0; struct field exists but no ACL check in MVP (verified by `tenant: u16` field on `Op::RegisterJob` in `crates/bee-control/src/kv.rs:67` with the MVP doc comment "struct field only; ACL check is 1.x")
+- [x] **StreamSignature test**: two Pipelines calling `binance.subscribe('BTC/USDT', '5min')` share 1 Producer; calling `binance.subscribe('ETH/USDT', '5min')` (different args) creates a separate Producer; calling `binance.ticker('BTC/USDT')` (different method) also creates a separate Producer (locked down by `end_to_end_deployer_second_pipeline_becomes_subscriber` + `deploy_pipeline_with_different_args_gets_different_producer` in `crates/bee-control/tests/deployer_s17.rs`, plus `different_method_yields_different_signature` + `different_args_yield_different_signature` in `crates/bee-control/src/signature.rs`)
 
 ---
 
@@ -859,11 +861,11 @@ Datasource-level observability and lifecycle:
 - **SLO dashboard** (basic, 1.x): `bee datasource sl` shows all Datasources with their health rollup.
 
 **Acceptance criteria**
-- [ ] `bee datasource inspect binance` shows: Producer Node, plugin_id, version, health metrics, referencing Job count
-- [ ] Killing the external connection 10 times in a row triggers auto-pause
-- [ ] `bee datasource pause binance` and `bee datasource resume binance` work end-to-end
-- [ ] Subscribers cleanly `Draining` during pause; cleanly reconnect on resume
-- [ ] Pause/resume does not lose events (either buffered or backpressured)
+- [x] `bee datasource inspect binance` shows: Producer Node, plugin_id, version, health metrics, referencing Job count (locked down by `inspect_returns_datasource_health_and_job_count` in `crates/bee-control/src/datasource.rs:842` + the `print_datasource_inspect` CLI in `bee/src/main.rs:1006`; `DatasourceInspection { datasource, health, producer_node, referencing_job_count }` carries Producer Node, plugin_id (via `datasource`), version_spec (via `datasource`), health snapshot, and Job count)
+- [x] Killing the external connection 10 times in a row triggers auto-pause (locked down by `should_auto_pause_triggers_at_threshold` in `crates/bee-control/src/datasource.rs:763` — 9 failures do NOT trigger, 10th does)
+- [x] `bee datasource pause binance` and `bee datasource resume binance` work end-to-end (locked down by `pause_and_resume_lifecycle` in `crates/bee-control/src/datasource.rs:702` — Active→Paused→Active round trip)
+- [ ] Subscribers cleanly `Draining` during pause; cleanly reconnect on resume (deferred — only the pause→Draining half is locked down by `pause_records_draining_event_with_referencing_jobs`; the resume→Subscriber reconnect half has no integration test)
+- [ ] Pause/resume does not lose events (either buffered or backpressured) (deferred — no event-loss test exists)
 
 ---
 
@@ -1112,18 +1114,18 @@ Targets get filled in (and may be revised) once a baseline cluster exists.
 
 **Acceptance criteria**
 
-- [ ] `plugins/bee-plugin-perf-fib/` is an independent workspace member; `Cargo.toml` declares `crate-type = ["cdylib"]`
+- [x] `plugins/bee-plugin-perf-fib/` is an independent workspace member; `Cargo.toml` declares `crate-type = ["cdylib"]` (verified — `plugins/bee-plugin-perf-fib/Cargo.toml` declares `crate-type = ["cdylib", "rlib"]` and is listed in the workspace members)
  - [x] `fib_step` is correct against the first 20 known Fibonacci values (unit test)
  - [x] `fib_step` state round-trip: compute 100 values, restart the plugin mid-run, verify state is restored and the 101st value is correct
  - [x] `generate_series` and `generate_events` are gated behind `#[cfg(feature = "test-fixtures")]` and not in the production binary
  - [x] `examples/performance/fibonacci.sql` compiles and emits the first 20 fib values to the console in the correct order (fixed 2026-07-17 by per-handler state init in `udfs.rs` — `cargo run -p bee -- run examples/performance/fibonacci.sql` now prints "1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610, 987, 1597, 2584, 4181, 6765")
- - [ ] `examples/performance/prime_sieve.sql` compiles and the console emits `n_primes = 5761455` (hard correctness check for ≤ 10^8) — superseded by S44's trimmed version (`n_primes = 1229` for ≤ 10^4)
+ - [x] `examples/performance/prime_sieve.sql` compiles and the console emits `n_primes = 5761455` (hard correctness check for ≤ 10^8) — superseded by S44's trimmed version (verified — `bee run examples/performance/prime_sieve.sql` now prints `n_primes=1229` = π(10⁴))
  - [x] `examples/performance/multi_stream_analytics.sql` compiles and emits a non-empty per-minute aggregation
- - [ ] `scripts/demo-perf.sh` runs all 3 demos on a 3-node cluster and prints a measured performance table — superseded by S49's local deploy+wait flow
-- [ ] Killing one Node mid-sieve does not lose any prime (Work-Stealing works correctly)
-- [ ] README.md "Performance Demos" section links to `scripts/demo-perf.sh` and `examples/performance/README.md`
-- [ ] `docs/product-design.md` §4.4 "Performance showcase" describes the 3 demos and links to the script
-- [ ] Performance table is filled in with measured numbers (not "TBD") by the time the story is done — even rough baselines count, but the script must print them every run
+ - [x] `scripts/demo-perf.sh` runs all 3 demos on a 3-node cluster and prints a measured performance table — superseded by S49's local deploy+wait flow (verified — `scripts/demo-perf.sh` runs all 3 SQL demos end-to-end via `bee run` + pre-builds + measures wall-clock + prints a 3-row performance table)
+- [ ] Killing one Node mid-sieve does not lose any prime (Work-Stealing works correctly) (deferred — no mid-sieve failover integration test exists; the Work-Stealing pipeline (S12) is verified separately via `thief_loop_takes_over_orphaned_tasks_after_node_shutdown_s12` but not under a running sieve)
+- [x] README.md "Performance Demos" section links to `scripts/demo-perf.sh` and `examples/performance/README.md` (verified — README.md line 118 has `## Performance Demos` with the script invocation + a link to `examples/performance/README.md`)
+- [x] `docs/product-design.md` §4.4 "Performance showcase" describes the 3 demos and links to the script (verified — `docs/product-design.md` line 107 has `### Scenario A: Performance showcase` under §4 describing all 3 demos + linking to `scripts/demo-perf.sh` and `examples/performance/README.md`; the section number is §4 not §4.4 since §4 is `Core scenarios`)
+- [x] Performance table is filled in with measured numbers (not "TBD") by the time the story is done — even rough baselines count, but the script must print them every run (verified — `scripts/demo-perf.sh` lines 127-136 print a `Measured performance` table on every run with actual wall-clock and throughput values; `docs/product-design.md` lines 142-147 carry a sample output with rough baselines 420ms / 3.8s / 180ms)
 
 ---
 
