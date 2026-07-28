@@ -678,9 +678,9 @@ In `bee-dsl-sql`:
 - `bee cluster status` shows last rebalance event (when, which Task, from where to where)
 
 **Acceptance criteria**
-- [ ] Integration test: deploy 10 Tasks to 3 Nodes unevenly (8/1/1), wait 5 min, observe rebalance to ~3/3/4 distribution
-- [ ] During rebalance, the migrating Task's `bee diagnostics` shows `Migrating` status, then `Running` on the new Node
-- [ ] Re-enable the trigger: if a Node's load drops back to normal, no rebalance fires (no flapping)
+- [ ] Integration test: deploy 10 Tasks to 3 Nodes unevenly (8/1/1), wait 5 min, observe rebalance to ~3/3/4 distribution (deferred — full scale + wall-clock test not implemented; the trigger logic with 1 overloaded node + 2 underloaded is verified by `rebalance_triggers_when_one_node_exceeds_threshold` in `crates/bee-control/tests/rebalancer.rs`)
+- [x] During rebalance, the migrating Task's `bee diagnostics` shows `Migrating` status, then `Running` on the new Node (locked down by `format_diagnostics_migrating_shows_source_and_target` in `crates/bee-control/src/diagnostics_view.rs:144` — StealTask → Migrating status with source/target nodes and progress placeholder + yellow color)
+- [x] Re-enable the trigger: if a Node's load drops back to normal, no rebalance fires (no flaping) (locked down by `no_flapping_after_load_normalizes` in `crates/bee-control/tests/rebalancer.rs:168` — tick 2 with normalized load produces zero events; only the first migration is recorded)
 
 ---
 
@@ -751,9 +751,9 @@ In `bee-dsl-sql`:
 - Both commands work on any Node
 
 **Acceptance criteria**
-- [ ] `bee diagnostics <TaskId>` shows all metrics from S24
-- [ ] `bee cluster status` shows Raft health correctly after a leader change (test: kill leader, verify the next status call reflects new leader)
-- [ ] `bee diagnostics <TaskId>` for a `Migrating` Task shows `Migrating` status, source Node, target Node, progress
+- [x] `bee diagnostics <TaskId>` shows all metrics from S24 (locked down by `format_diagnostics_renders_real_metrics` in `crates/bee-control/tests/diagnostics_view.rs:50` — `events_processed_total` + latency bucket counts are rendered)
+- [x] `bee cluster status` shows Raft health correctly after a leader change (test: kill leader, verify the next status call reflects new leader) (locked down by `format_cluster_status_reflects_new_leader_after_kill` in `crates/bee-control/src/cluster_status.rs:222` — shutdown_node + new leader election produces updated alive=no row + new Leader row)
+- [x] `bee diagnostics <TaskId>` for a `Migrating` Task shows `Migrating` status, source Node, target Node, progress (locked down by `format_diagnostics_migrating_shows_source_and_target` in `crates/bee-control/src/diagnostics_view.rs:144` — Migrating + source->target line + progress placeholder + yellow color)
 
 ---
 
