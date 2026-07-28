@@ -5,10 +5,10 @@ use std::net::SocketAddr;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
-use bee_gui::app::{App, Flags};
-use iced::Application;
+use bee_gui::app::{App, Flags, ThemeKind};
 use bee_gui::connection::spawn;
 use bee_gui::log_panel::LogRing;
+use iced::Application;
 
 #[derive(Parser, Debug)]
 #[command(name = "bee-gui", version, about = "Bee cluster management GUI")]
@@ -17,6 +17,8 @@ struct Cli {
     connect: String,
     #[arg(long, default_value = "info")]
     log_level: String,
+    #[arg(long, default_value = "light", value_parser = ["light", "dark"])]
+    theme: String,
     #[arg(long)]
     no_window_decorations: bool,
 }
@@ -30,9 +32,18 @@ fn main() -> anyhow::Result<()> {
         .parse()
         .map_err(|e| anyhow::anyhow!("invalid --connect addr '{}': {}", cli.connect, e))?;
 
+    let theme_kind = match cli.theme.as_str() {
+        "dark" => ThemeKind::Dark,
+        _ => ThemeKind::Light,
+    };
+
     let bundle = spawn(addr);
     let log = LogRing::new();
-    let flags = Flags { bundle, log };
+    let flags = Flags {
+        bundle,
+        log,
+        theme_kind,
+    };
 
     let settings = iced::Settings::<Flags> {
         id: None,

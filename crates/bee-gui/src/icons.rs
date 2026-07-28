@@ -35,6 +35,8 @@ pub const TERMINAL: &[u8] = include_bytes!("../icons/terminal.svg");
 pub const HISTORY: &[u8] = include_bytes!("../icons/history.svg");
 pub const BAR_CHART_3: &[u8] = include_bytes!("../icons/bar-chart-3.svg");
 pub const COPY: &[u8] = include_bytes!("../icons/copy.svg");
+pub const SUN: &[u8] = include_bytes!("../icons/sun.svg");
+pub const MOON: &[u8] = include_bytes!("../icons/moon.svg");
 
 /// Render an icon SVG at the given pixel size.
 ///
@@ -83,11 +85,13 @@ mod tests {
         ("history", HISTORY),
         ("bar-chart-3", BAR_CHART_3),
         ("copy", COPY),
+        ("sun", SUN),
+        ("moon", MOON),
     ];
 
     #[test]
     fn lucide_icon_loads() {
-        assert_eq!(ALL.len(), 29);
+        assert_eq!(ALL.len(), 31);
         for (name, bytes) in ALL {
             assert!(!bytes.is_empty(), "icon {} is 0 bytes", name);
             let s = std::str::from_utf8(bytes).expect("UTF-8");

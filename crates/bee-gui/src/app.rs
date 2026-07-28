@@ -29,10 +29,34 @@ pub enum Tab {
     Settings,
 }
 
+/// S-1b: 3-way theme selector. `System` follows the OS preference
+/// (light by default in MVP — the OS signal hookup is a 1.x concern).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThemeKind {
+    Light,
+    Dark,
+}
+
+impl ThemeKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Light => "Light",
+            Self::Dark => "Dark",
+        }
+    }
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::Light => Self::Dark,
+            Self::Dark => Self::Light,
+        }
+    }
+}
+
 /// Flags passed to `App::new` via `iced::Settings::with_flags`.
 pub struct Flags {
     pub bundle: ConnectionBundle,
     pub log: LogRing,
+    pub theme_kind: ThemeKind,
 }
 
 pub struct App {
@@ -41,12 +65,14 @@ pub struct App {
     pub msg_rx: tokio::sync::mpsc::Receiver<ConnectionMsg>,
     pub log: LogRing,
     pub dashboard: DashboardData,
+    pub theme_kind: ThemeKind,
 }
 
 #[derive(Debug, Clone)]
 pub enum Message {
     TabSelected(Tab),
     Dashboard(DashboardMsg),
+    CycleTheme,
     PumpTick,
 }
 
@@ -66,6 +92,7 @@ impl Application for App {
             msg_rx,
             log: flags.log,
             dashboard: DashboardData::default(),
+            theme_kind: flags.theme_kind,
         };
         // Kick the first Refresh so the dashboard has data on launch.
         dashboard::trigger_refresh(&app.conn);
@@ -88,16 +115,29 @@ impl Application for App {
                     Command::perform(async {}, |_| Message::PumpTick)
                 }
             },
+            Message::CycleTheme => {
+                let prev = self.theme_kind;
+                self.theme_kind = self.theme_kind.cycle();
+                self.log.push(
+                    crate::log_panel::LogLevel::Info,
+                    format!("theme: {} → {}", prev.as_str(), self.theme_kind.as_str()),
+                );
+                Command::none()
+            }
             Message::PumpTick => {
-                // Drain any pending ConnectionMsg without awaiting; the
-                // iced runtime polls `update` again on the next frame, so
-                // chaining Command::none here yields control to the runtime.
                 let drained = try_drain(&mut self.msg_rx);
                 for m in drained {
                     self.apply_connection_msg(m);
                 }
                 Command::none()
             }
+        }
+    }
+
+    fn theme(&self) -> Self::Theme {
+        match self.theme_kind {
+            ThemeKind::Light => Theme::Light,
+            ThemeKind::Dark => Theme::Dark,
         }
     }
 
@@ -108,32 +148,37 @@ impl Application for App {
                 Tab::Dashboard,
                 icons::GAUGE,
                 &self.tab,
+                self.theme_kind,
             ))
             .push(tab_button(
                 "数据管理",
                 Tab::DataMgmt,
                 icons::DATABASE,
                 &self.tab,
+                self.theme_kind,
             ))
             .push(tab_button(
                 "Pipelines",
                 Tab::Pipelines,
                 icons::WORKFLOW,
                 &self.tab,
+                self.theme_kind,
             ))
             .push(tab_button(
                 "设置",
                 Tab::Settings,
                 icons::SETTINGS,
                 &self.tab,
+                self.theme_kind,
             ))
             .spacing(theme::SPACE_4)
             .padding([theme::SPACE_2, theme::SPACE_4]);
 
         let status_bar = Container::new(Text::new(format!(
-            "bee-gui v0.1.0  ·  {}  ·  state: {}",
+            "bee-gui v0.1.0  ·  {}  ·  state: {}  ·  theme: {}",
             self.conn.addr(),
             self.conn.state().as_str(),
+            self.theme_kind.as_str(),
         )))
         .padding([theme::SPACE_1, theme::SPACE_4]);
 
@@ -148,6 +193,8 @@ impl Application for App {
         let conn_state = self.conn.state();
         let connection_dot = connection_dot_static(&conn_state);
 
+        let theme_button = theme_toggle_button(self.theme_kind);
+
         let app_bar = Container::new(
             Row::new()
                 .push(connection_dot)
@@ -155,6 +202,8 @@ impl Application for App {
                 .push(Text::new(self.conn.addr().to_string()).size(13))
                 .push(iced::widget::Space::with_width(theme::SPACE_4))
                 .push(tabs_row)
+                .push(iced::widget::Space::with_width(Length::Fill))
+                .push(theme_button)
                 .align_items(iced::alignment::Alignment::Center),
         )
         .padding([theme::SPACE_2, theme::SPACE_4]);
@@ -169,9 +218,6 @@ impl Application for App {
     }
 
     fn subscription(&self) -> Subscription<Self::Message> {
-        // The connection thread is drained by the recurring
-        // `Command::perform(PumpTick)` cycle kicked off in `new`. S-1b can
-        // upgrade this to a real `Subscription` for streaming updates.
         Subscription::none()
     }
 }
@@ -220,12 +266,21 @@ fn tab_button<'a>(
     tab: Tab,
     icon: &'a [u8],
     current: &'a Tab,
+    theme_kind: ThemeKind,
 ) -> Element<'a, Message, Theme, iced::Renderer> {
     let active = current == &tab;
     let icon_color = if active {
-        iced::Color::from_rgb(0.0, 0.478, 1.0)
+        // accent blue in light, slightly lighter in dark
+        match theme_kind {
+            ThemeKind::Light => iced::Color::from_rgb(0.0, 0.478, 1.0),
+            ThemeKind::Dark => iced::Color::from_rgb(0.32, 0.62, 1.0),
+        }
     } else {
-        iced::Color::BLACK
+        // Tab labels use the theme's primary text color
+        match theme_kind {
+            ThemeKind::Light => iced::Color::from_rgb(0.04, 0.04, 0.04),
+            ThemeKind::Dark => iced::Color::from_rgb(0.961, 0.961, 0.969),
+        }
     };
     let row = Row::new()
         .push(icons::render(icon, 20, icon_color))
@@ -239,6 +294,29 @@ fn tab_button<'a>(
     btn.into()
 }
 
+fn theme_toggle_button(theme_kind: ThemeKind) -> Element<'static, Message, Theme, iced::Renderer> {
+    // Show the icon for the OPPOSITE theme (the action that will be taken
+    // when clicked). Mouse-over tooltip is OS-native in S-1b; the self-drawn
+    // tooltip ships in S-1c.
+    let (icon, label) = match theme_kind {
+        ThemeKind::Light => (icons::MOON, "Dark"),
+        ThemeKind::Dark => (icons::SUN, "Light"),
+    };
+    let icon_color = match theme_kind {
+        ThemeKind::Light => iced::Color::from_rgb(0.04, 0.04, 0.04),
+        ThemeKind::Dark => iced::Color::from_rgb(0.961, 0.961, 0.969),
+    };
+    let row = Row::new()
+        .push(icons::render(icon, 16, icon_color))
+        .push(iced::widget::Space::with_width(theme::SPACE_1))
+        .push(Text::new(label).size(11))
+        .align_items(iced::alignment::Alignment::Center);
+    iced::widget::Button::new(row)
+        .on_press(Message::CycleTheme)
+        .padding([theme::SPACE_1, theme::SPACE_2])
+        .into()
+}
+
 fn connection_dot_static(
     _state: &ConnectionState,
 ) -> Element<'static, Message, Theme, iced::Renderer> {
@@ -247,3 +325,4 @@ fn connection_dot_static(
         .height(Length::Fixed(14.0))
         .into()
 }
+
