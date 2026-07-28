@@ -252,10 +252,10 @@ Choose a Raft library (recommendation: `openraft` 0.x or `raft-rs`). In a new `b
 - Namespace convention documented: `state/task/{TaskId}/...` (per [CONTEXT.md](../CONTEXT.md))
 
 **Acceptance criteria**
-- [ ] Unit test: single-node Raft loop applies a put, subsequent get returns the value
-- [ ] Unit test: `cas` rejects mismatched `expected`
-- [ ] Unit test: `txn` either applies all ops or none
-- [ ] Smoke test: `bee-kv-test` binary spins up the single-node raft, runs 100 put/get round-trips, prints "ok"
+- [x] Unit test: single-node Raft loop applies a put, subsequent get returns the value
+- [x] Unit test: `cas` rejects mismatched `expected`
+- [x] Unit test: `txn` either applies all ops or none
+- [x] Smoke test: `bee-kv-test` binary spins up the single-node raft, runs 100 put/get round-trips, prints "ok"
 
 ---
 
@@ -273,9 +273,9 @@ Choose a Raft library (recommendation: `openraft` 0.x or `raft-rs`). In a new `b
 - BRP control channel (over the same TCP stack from S02) carries Raft RPCs
 
 **Acceptance criteria**
-- [ ] Integration test: 3 processes on `127.0.0.1:7001/7002/7003`, init cluster, one leader elected
-- [ ] Integration test: kill leader (SIGKILL), within 2s a new leader is elected
-- [ ] `bee cluster status` returns correct info
+- [x] Integration test: 3 processes on `127.0.0.1:7001/7002/7003`, init cluster, one leader elected
+- [x] Integration test: kill leader (SIGKILL), within 2s a new leader is elected
+- [x] `bee cluster status` returns correct info
 - [ ] Raft logs persisted across process restart (replay on boot)
 
 ---
@@ -296,9 +296,9 @@ In `bee-control`, add a second logical state machine on the same Raft group:
 - `bee jobs list` CLI subcommand: reads from any Raft node, returns all `RegisterJob` entries
 
 **Acceptance criteria**
-- [ ] Integration test: 3-node cluster, submit a job on node 1, query `bee jobs list` from node 2 — returns the job
-- [ ] Task status transitions are linearizable (read on any node returns the latest committed state)
-- [ ] KV SM (S06) and ControlPlane SM coexist on the same Raft group without interference
+- [x] Integration test: 3-node cluster, submit a job on node 1, query `bee jobs list` from node 2 — returns the job
+- [x] Task status transitions are linearizable (read on any node returns the latest committed state)
+- [x] KV SM (S06) and ControlPlane SM coexist on the same Raft group without interference
 
 ---
 
@@ -318,9 +318,9 @@ In `bee-control`, add a second logical state machine on the same Raft group:
 - Receiving Node spawns the Task locally (re-uses S04 Runtime) and starts processing
 
 **Acceptance criteria**
-- [ ] Integration test: 3 nodes, deploy a 3-Task DAG (one Task per node), all Tasks start, each emits "started" log line
-- [ ] Cross-Node edge: Task on node A emits to Task on node B — verified by a test that asserts the BRP data channel carries events
-- [ ] `bee jobs inspect <JobId>` shows Task → Node mapping
+- [x] Integration test: 3 nodes, deploy a 3-Task DAG (one Task per node), all Tasks start, each emits "started" log line
+- [x] Cross-Node edge: Task on node A emits to Task on node B — verified by a test that asserts the BRP data channel carries events
+- [x] `bee jobs inspect <JobId>` shows Task → Node mapping
 
 ---
 
@@ -337,9 +337,9 @@ In `bee-control`, add a second logical state machine on the same Raft group:
 - Replace the "round-robin" placement in S09 with the real Scheduler
 
 **Acceptance criteria**
-- [ ] Unit test: 3 Tasks each requesting 500m CPU, 3 Nodes each with 1000m available — packing fits 2 on node 1, 1 on node 2
-- [ ] Integration test: deploy 5 Tasks to 3 Nodes; verify the placement respects capacity
-- [ ] Scheduler is pluggable: can be replaced with a different strategy (e.g., for S25 rebalance)
+- [x] Unit test: 3 Tasks each requesting 500m CPU, 3 Nodes each with 1000m available — packing fits 2 on node 1, 1 on node 2
+- [x] Integration test: deploy 5 Tasks to 3 Nodes; verify the placement respects capacity
+- [x] Scheduler is pluggable: can be replaced with a different strategy (e.g., for S25 rebalance)
 
 ---
 
@@ -360,9 +360,9 @@ In `bee-control`, add a second logical state machine on the same Raft group:
 - `bee jobs list` shows `Orphaned` Tasks distinctly (CLI: `STATUS: orphaned (was on node 2)`)
 
 **Acceptance criteria**
-- [ ] Integration test: 3-node cluster, kill node 2 (SIGKILL), within 35s node 2's Tasks show `Orphaned` on `bee jobs list`
-- [ ] Heartbeat is high-priority (per ADR-0007): uses a dedicated channel, not contended with worker data flow
-- [ ] Heartbeat interval and orphan threshold are configurable
+- [x] Integration test: 3-node cluster, kill node 2 (SIGKILL), within 35s node 2's Tasks show `Orphaned` on `bee jobs list`
+- [x] Heartbeat is high-priority (per ADR-0007): uses a dedicated channel, not contended with worker data flow
+- [x] Heartbeat interval and orphan threshold are configurable
 
 ---
 
