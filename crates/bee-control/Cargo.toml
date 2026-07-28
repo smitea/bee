@@ -28,6 +28,14 @@ tracing = "0.1"
 [lints]
 workspace = true
 
+[features]
+# S-1c: re-exports the `test_utils::TestCluster` harness for use
+# by integration tests in this crate AND downstream crates
+# (e.g. `bee-gui`). Production binaries must NOT enable this
+# feature (no admin-server wiring, no test-timeout knobs).
+default = []
+test-utils = []
+
 [dev-dependencies]
 tempfile = "3"
 
