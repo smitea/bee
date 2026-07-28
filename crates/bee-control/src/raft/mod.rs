@@ -15,6 +15,14 @@
 //!   in-process mpsc; S07+ would replace the transport trait impl
 //!   with a BRP-over-TCP version reusing bee-transport from S02
 //!
+//! ## S07-x (this slice) — snapshot + log truncation
+//! - `snapshot::SnapshotStore` writes `snap-<index>.bin` files
+//!   capturing `(current_term, voted_for, log[..=last_included_index])`.
+//! - `wal::RaftLogWal::truncate_before(keep_from_index)` rewrites
+//!   the WAL with only entries past the snapshot point.
+//! - `NodeState::last_snapshot_index` lets boot replay compose
+//!   `snapshot.log ++ wal_tail` into a complete log.
+//!
 //! ## Deferred
 //! - Real BRP transport (S07+)
 //! - Persistent log (S07+ would add a `LogStore`; S06's KV state
@@ -27,6 +35,7 @@ pub mod admin_protocol;
 pub mod admin_server;
 pub mod cluster;
 pub mod node;
+pub mod snapshot;
 pub mod tcp;
 pub mod tick_metrics;
 pub mod transport;
@@ -42,7 +51,9 @@ pub use admin_protocol::{
 };
 pub use cluster::{Cluster, ClusterConfig, ClusterNodeHandle, NodeMetrics, NodeSpec, NodeTransportSpec};
 pub use node::{Node, NodeConfig, NodeState};
+pub use snapshot::{Snapshot, SnapshotStore};
 pub use tcp::TcpTransport;
 pub use tick_metrics::TickMetrics;
 pub use transport::{InMemoryTransport, NodeTransport, Router, TransportError};
 pub use types::{LogEntry, NodeCommand, NodeId, RpcMessage, Role, Term, LogIndex};
+pub use wal::{RaftLogWal, WalEntry, WalReplay};

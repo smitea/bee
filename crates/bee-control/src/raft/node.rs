@@ -8,6 +8,7 @@ use crate::control_plane::ControlPlaneStateMachine;
 use crate::kv::{KVStateMachine, Op, TxnError};
 
 use super::admin_protocol::{AdminRequest, AdminResponse, TaskRuntimeStats};
+use super::snapshot::SnapshotStore;
 use super::transport::{InMemoryTransport, NodeTransport};
 use super::types::{LogEntry, NodeCommand, NodeId, RpcMessage, Role, Term, LogIndex};
 use super::wal::RaftLogWal;
@@ -150,6 +151,27 @@ pub struct NodeState {
     pub next_index: HashMap<NodeId, LogIndex>,
     pub match_index: HashMap<NodeId, LogIndex>,
     pub wal: Option<Arc<std::sync::Mutex<RaftLogWal>>>,
+    /// S07-x: the global Raft log index of the
+    /// last entry included in the most recent
+    /// snapshot (0 if no snapshot has been
+    /// written yet). `state.log[i]` corresponds
+    /// to global index
+    /// `last_snapshot_index + 1 + i`.
+    pub last_snapshot_index: LogIndex,
+    pub last_snapshot_term: Term,
+    /// S07-x: optional snapshot store. When set,
+    /// snapshots are written here and the WAL
+    /// is truncated to keep only entries past
+    /// `last_snapshot_index`.
+    pub snapshot_store: Option<Arc<std::sync::Mutex<SnapshotStore>>>,
+    /// S07-x: timestamp of the last snapshot
+    /// write. Used by the time-based trigger.
+    pub last_snapshot_at: Instant,
+    /// S07-x: per-node snapshot trigger knobs.
+    /// `(0, Duration::ZERO)` disables both
+    /// triggers (the leader never snaps).
+    pub snapshot_threshold: u64,
+    pub snapshot_interval: Duration,
 }
 
 impl Default for NodeState {
@@ -173,20 +195,54 @@ impl NodeState {
             next_index: HashMap::new(),
             match_index: HashMap::new(),
             wal: None,
+            last_snapshot_index: 0,
+            last_snapshot_term: 0,
+            snapshot_store: None,
+            last_snapshot_at: Instant::now(),
+            snapshot_threshold: 0,
+            snapshot_interval: Duration::ZERO,
         }
     }
 
     pub fn new_from_wal(wal: Arc<std::sync::Mutex<RaftLogWal>>) -> std::io::Result<Self> {
         let replay = {
             let wal = wal.lock().expect("Raft WAL mutex poisoned");
-            RaftLogWal::replay(wal.path())?
+            RaftLogWal::replay(wal.path(), 0)?
         };
-        let log_len = replay.entries.len() as LogIndex;
-        Ok(Self {
+        Self::from_wal_replay(wal, replay)
+    }
+
+    /// S07-x: like `new_from_wal`, but seeds the
+    /// log from a snapshot + WAL tail replay. The
+    /// snapshot's `log` becomes the base of
+    /// `state.log`; WAL entries (which all have
+    /// `index > last_snapshot_index`) are appended
+    /// on top in index order. `applied_index` is
+    /// reset to 0 so `apply_committed_current`
+    /// re-applies the merged log into the fresh KV
+    /// state machine on boot.
+    pub fn new_from_snapshot_and_wal(
+        wal: Arc<std::sync::Mutex<RaftLogWal>>,
+        snapshot: super::snapshot::Snapshot,
+        snapshot_store: Arc<std::sync::Mutex<SnapshotStore>>,
+        snapshot_threshold: u64,
+        snapshot_interval: Duration,
+    ) -> std::io::Result<Self> {
+        let (wal_entries, term, voted_for) = {
+            let wal = wal.lock().expect("Raft WAL mutex poisoned");
+            let replay = RaftLogWal::replay(wal.path(), snapshot.last_included_index)?;
+            (replay.entries, replay.term, replay.voted_for)
+        };
+        let mut log = snapshot.log;
+        for we in wal_entries {
+            log.push(we.entry);
+        }
+        let log_len = log.len() as LogIndex;
+        let mut state = Self {
             role: Role::Follower,
-            current_term: replay.term,
-            voted_for: replay.voted_for,
-            log: replay.entries,
+            current_term: snapshot.current_term,
+            voted_for: snapshot.voted_for,
+            log,
             commit_index: log_len,
             applied_index: 0,
             last_heartbeat: Instant::now(),
@@ -195,14 +251,71 @@ impl NodeState {
             next_index: HashMap::new(),
             match_index: HashMap::new(),
             wal: Some(wal),
+            last_snapshot_index: snapshot.last_included_index,
+            last_snapshot_term: snapshot.last_included_term,
+            snapshot_store: Some(snapshot_store),
+            last_snapshot_at: Instant::now(),
+            snapshot_threshold,
+            snapshot_interval,
+        };
+        // If the snapshot's term/vote was already
+        // superseded by a TermAndVote in the WAL
+        // tail (rare: snapshot was written just
+        // before a vote), prefer the WAL's version.
+        // (Same precedence as `new_from_wal`.)
+        if term > state.current_term {
+            state.current_term = term;
+            state.voted_for = voted_for;
+        }
+        Ok(state)
+    }
+
+    fn from_wal_replay(
+        wal: Arc<std::sync::Mutex<RaftLogWal>>,
+        replay: super::wal::WalReplay,
+    ) -> std::io::Result<Self> {
+        // Entries come back in WAL-write order,
+        // which already matches Raft log order
+        // (the WAL never reorders). Drop the
+        // index field — `state.log` is
+        // position-based and the global index
+        // is `position + 1` (positions are
+        // 0-based; the Raft log starts at index 1).
+        let log: Vec<LogEntry> =
+            replay.entries.into_iter().map(|we| we.entry).collect();
+        let log_len = log.len() as LogIndex;
+        Ok(Self {
+            role: Role::Follower,
+            current_term: replay.term,
+            voted_for: replay.voted_for,
+            log,
+            commit_index: log_len,
+            applied_index: 0,
+            last_heartbeat: Instant::now(),
+            leader_id: None,
+            votes_received: 0,
+            next_index: HashMap::new(),
+            match_index: HashMap::new(),
+            wal: Some(wal),
+            last_snapshot_index: 0,
+            last_snapshot_term: 0,
+            snapshot_store: None,
+            last_snapshot_at: Instant::now(),
+            snapshot_threshold: 0,
+            snapshot_interval: Duration::ZERO,
         })
     }
 
     fn append_to_log(&mut self, entry: LogEntry) {
+        // 1-based global index: position is
+        // `state.log.len()` (0-based), so the
+        // entry being appended is at
+        // `state.log.len() + 1`.
+        let global_index = self.log.len() as LogIndex + 1;
         if let Some(wal) = &self.wal {
             wal.lock()
                 .expect("Raft WAL mutex poisoned")
-                .append(&entry)
+                .append(global_index, &entry)
                 .expect("persist Raft log entry");
         }
         self.log.push(entry);
@@ -224,6 +337,10 @@ impl NodeState {
     }
 
     fn last_log_index(&self) -> LogIndex {
+        // Case A: state.log retains ALL entries
+        // (snapshot prefix + post-snapshot
+        // entries). Position i corresponds to
+        // global index i+1.
         self.log.len() as LogIndex
     }
 
@@ -236,6 +353,80 @@ impl NodeState {
         let my_last_index = self.last_log_index();
         last_term > my_last_term
             || (last_term == my_last_term && last_index >= my_last_index)
+    }
+
+    /// S07-x: write a snapshot of
+    /// `(current_term, voted_for, log[..commit_index])`
+    /// to the snapshot store and truncate the WAL to
+    /// drop everything `<= commit_index`. Returns
+    /// `true` if a snapshot was written, `false` if
+    /// the trigger conditions are not met or no
+    /// snapshot store is configured.
+    ///
+    /// Trigger: either `(commit_index -
+    /// last_snapshot_index) >= snapshot_threshold`,
+    /// OR `now - last_snapshot_at >=
+    /// snapshot_interval` (with at least one new
+    /// committed entry to snapshot).
+    pub fn maybe_snapshot(&mut self) -> bool {
+        let Some(store) = self.snapshot_store.as_ref() else {
+            return false;
+        };
+        if self.snapshot_threshold == 0 && self.snapshot_interval.is_zero() {
+            return false;
+        }
+        if self.commit_index <= self.last_snapshot_index {
+            return false;
+        }
+        let size_trigger = self.snapshot_threshold > 0
+            && (self.commit_index - self.last_snapshot_index)
+                >= self.snapshot_threshold;
+        let time_trigger = !self.snapshot_interval.is_zero()
+            && self.last_snapshot_at.elapsed() >= self.snapshot_interval;
+        if !size_trigger && !time_trigger {
+            return false;
+        }
+        // Snap a prefix of state.log up to
+        // commit_index. state.log[i] has global
+        // index i+1, so commit_index corresponds
+        // to position `commit_index - 1` (0-based).
+        let snap_len = self.commit_index as usize;
+        let snap_log: Vec<LogEntry> =
+            self.log.iter().take(snap_len).cloned().collect();
+        let last_included_index = self.commit_index;
+        let last_included_term = snap_log
+            .last()
+            .map(|e| e.term)
+            .unwrap_or(self.last_snapshot_term);
+        let snap = super::snapshot::Snapshot {
+            last_included_index,
+            last_included_term,
+            current_term: self.current_term,
+            voted_for: self.voted_for,
+            log: snap_log,
+        };
+        store
+            .lock()
+            .expect("snapshot store poisoned")
+            .write(&snap)
+            .expect("snapshot write");
+        // Truncate the WAL: keep entries with
+        // global index > last_included_index.
+        if let Some(wal) = &self.wal {
+            wal.lock()
+                .expect("WAL mutex poisoned")
+                .truncate_before(last_included_index + 1)
+                .expect("WAL truncate");
+        }
+        // state.log is NOT drained — Case A
+        // keeps all entries in memory so the
+        // global index = position + 1 mapping
+        // stays correct. The WAL is the only
+        // structure that gets compacted here.
+        self.last_snapshot_index = last_included_index;
+        self.last_snapshot_term = last_included_term;
+        self.last_snapshot_at = Instant::now();
+        true
     }
 }
 
@@ -681,6 +872,12 @@ impl Node {
             }
             to_apply = state.log[start..end].to_vec();
             state.applied_index = up_to;
+            // S07-x: snapshot trigger fires after
+            // committing entries. Done while we
+            // hold the state lock so it sees a
+            // consistent view of commit_index +
+            // log + last_snapshot_index.
+            state.maybe_snapshot();
         }
         let mut kv = self.kv.lock().await;
         let mut cp = self.cp.lock().await;
