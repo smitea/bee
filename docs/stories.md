@@ -1114,18 +1114,18 @@ Targets get filled in (and may be revised) once a baseline cluster exists.
 
 **Acceptance criteria**
 
-- [ ] `plugins/bee-plugin-perf-fib/` is an independent workspace member; `Cargo.toml` declares `crate-type = ["cdylib"]`
+- [x] `plugins/bee-plugin-perf-fib/` is an independent workspace member; `Cargo.toml` declares `crate-type = ["cdylib"]` (verified — `plugins/bee-plugin-perf-fib/Cargo.toml` declares `crate-type = ["cdylib", "rlib"]` and is listed in the workspace members)
  - [x] `fib_step` is correct against the first 20 known Fibonacci values (unit test)
  - [x] `fib_step` state round-trip: compute 100 values, restart the plugin mid-run, verify state is restored and the 101st value is correct
  - [x] `generate_series` and `generate_events` are gated behind `#[cfg(feature = "test-fixtures")]` and not in the production binary
  - [x] `examples/performance/fibonacci.sql` compiles and emits the first 20 fib values to the console in the correct order (fixed 2026-07-17 by per-handler state init in `udfs.rs` — `cargo run -p bee -- run examples/performance/fibonacci.sql` now prints "1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610, 987, 1597, 2584, 4181, 6765")
- - [ ] `examples/performance/prime_sieve.sql` compiles and the console emits `n_primes = 5761455` (hard correctness check for ≤ 10^8) — superseded by S44's trimmed version (`n_primes = 1229` for ≤ 10^4)
+ - [x] `examples/performance/prime_sieve.sql` compiles and the console emits `n_primes = 5761455` (hard correctness check for ≤ 10^8) — superseded by S44's trimmed version (verified — `bee run examples/performance/prime_sieve.sql` now prints `n_primes=1229` = π(10⁴))
  - [x] `examples/performance/multi_stream_analytics.sql` compiles and emits a non-empty per-minute aggregation
- - [ ] `scripts/demo-perf.sh` runs all 3 demos on a 3-node cluster and prints a measured performance table — superseded by S49's local deploy+wait flow
-- [ ] Killing one Node mid-sieve does not lose any prime (Work-Stealing works correctly)
-- [ ] README.md "Performance Demos" section links to `scripts/demo-perf.sh` and `examples/performance/README.md`
-- [ ] `docs/product-design.md` §4.4 "Performance showcase" describes the 3 demos and links to the script
-- [ ] Performance table is filled in with measured numbers (not "TBD") by the time the story is done — even rough baselines count, but the script must print them every run
+ - [x] `scripts/demo-perf.sh` runs all 3 demos on a 3-node cluster and prints a measured performance table — superseded by S49's local deploy+wait flow (verified — `scripts/demo-perf.sh` runs all 3 SQL demos end-to-end via `bee run` + pre-builds + measures wall-clock + prints a 3-row performance table)
+- [ ] Killing one Node mid-sieve does not lose any prime (Work-Stealing works correctly) (deferred — no mid-sieve failover integration test exists; the Work-Stealing pipeline (S12) is verified separately via `thief_loop_takes_over_orphaned_tasks_after_node_shutdown_s12` but not under a running sieve)
+- [x] README.md "Performance Demos" section links to `scripts/demo-perf.sh` and `examples/performance/README.md` (verified — README.md line 118 has `## Performance Demos` with the script invocation + a link to `examples/performance/README.md`)
+- [x] `docs/product-design.md` §4.4 "Performance showcase" describes the 3 demos and links to the script (verified — `docs/product-design.md` line 107 has `### Scenario A: Performance showcase` under §4 describing all 3 demos + linking to `scripts/demo-perf.sh` and `examples/performance/README.md`; the section number is §4 not §4.4 since §4 is `Core scenarios`)
+- [x] Performance table is filled in with measured numbers (not "TBD") by the time the story is done — even rough baselines count, but the script must print them every run (verified — `scripts/demo-perf.sh` lines 127-136 print a `Measured performance` table on every run with actual wall-clock and throughput values; `docs/product-design.md` lines 142-147 carry a sample output with rough baselines 420ms / 3.8s / 180ms)
 
 ---
 
