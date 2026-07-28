@@ -277,6 +277,7 @@ Choose a Raft library (recommendation: `openraft` 0.x or `raft-rs`). In a new `b
 - [x] Integration test: kill leader (SIGKILL), within 2s a new leader is elected
 - [x] `bee cluster status` returns correct info
 - [x] Raft logs persisted across process restart (replay on boot) — implemented 2026-07-28 via `crates/bee-control/src/raft/wal.rs` (`RaftLogWal::open/append/persist_term_and_vote/replay/sync`, magic header `BEERAWL1` + 4-byte LE length-prefixed bincode, tag enum `Entry`/`TermAndVote`); locked down by `wal_persists_log_and_term_across_process_restart` in `crates/bee-control/tests/wal_persistence.rs`.
+- [x] Raft snapshot + WAL truncation — implemented 2026-07-28 via `crates/bee-control/src/raft/snapshot.rs` (`SnapshotStore::open/latest/write/list/read`, magic header `BEERSNP1`, atomic `snap-<idx>.bin` writes) + `RaftLogWal::truncate_before(keep_from_index)` (rewrites WAL with entries `index >= keep_from_index`) + WAL `Entry { index, entry }` record (BREAKING — pre-ship WAL replaced) + `NodeState::maybe_snapshot` triggered on `(commit_index - last_snapshot_index) >= snapshot_threshold` OR `last_snapshot_at.elapsed() >= snapshot_interval`; locked down by `snapshot_then_restart_preserves_kv_state` in `crates/bee-control/tests/snapshot_persistence.rs` (10 Puts → ≥2 snapshots → drop → reboot from snapshot+WAL tail → all 10 keys restored, WAL measurably compacted).
 
 ---
 
