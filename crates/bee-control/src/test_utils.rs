@@ -218,6 +218,16 @@ impl TestCluster {
         self.cluster.leader().await
     }
 
+    /// Poll until a leader is elected or `timeout`
+    /// elapses. Convenience wrapper around
+    /// `Cluster::wait_for_leader`.
+    pub async fn wait_for_leader(
+        &self,
+        timeout: Duration,
+    ) -> Option<NodeId> {
+        self.cluster.wait_for_leader(timeout).await
+    }
+
     /// Submit a KV op to the leader. Resolves to
     /// the leader's apply result.
     ///
@@ -244,12 +254,36 @@ impl TestCluster {
             })?
     }
 
-    /// Shut down a node. Used by the
-    /// `connection_lost_recovery` GUI test to
-    /// provoke an `Io` error from the AdminClient
-    /// after the test has already connected.
+    /// Shut down a node AND its AdminServer. Used
+    /// by the `connection_lost_recovery` GUI test
+    /// to provoke an `Io` error from the AdminClient
+    /// after the test has already connected: the
+    /// AdminServer listener is torn down so the
+    /// client's next read returns a transport-layer
+    /// error rather than a synthetic Pong.
+    ///
+    /// The Node's Raft loop is also stopped via
+    /// `Cluster::shutdown_node`, which is what the
+    /// heartbeat / re-election paths observe.
     pub async fn shutdown_node(&self, id: NodeId) {
         self.cluster.shutdown_node(id).await;
+        if let Ok(mut guard) = self.admin_servers.lock() {
+            // The AdminServers are stored in
+            // NodeId-order (1, 2, 3); `id - 1`
+            // is the index. We swap-remove so the
+            // Drop impl skips the already-shut-down
+            // server when the TestCluster is finally
+            // dropped.
+            let idx = (id as usize) - 1;
+            if idx < guard.len() {
+                let mut srv = guard.remove(idx);
+                srv.shutdown();
+            }
+        }
+        // Remove the address from the public map so
+        // callers can't pick a dead node.
+        // (Caller cloned the map before calling
+        // shutdown_node, so this is best-effort.)
     }
 }
 
