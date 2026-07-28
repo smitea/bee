@@ -15,8 +15,10 @@ use iced::{
 use crate::connection::{
     try_drain, ConnectionBundle, ConnectionHandle, ConnectionMsg, ConnectionState,
 };
+use crate::datasource_registry::DataMgmtState;
 use crate::icons;
 use crate::log_panel::LogRing;
+use crate::pages::data_mgmt::{self, DataFormState, DataMsg};
 use crate::pages::dashboard::{self, DashboardData, DashboardMsg};
 use crate::pages::placeholder;
 use crate::theme;
@@ -66,12 +68,15 @@ pub struct App {
     pub log: LogRing,
     pub dashboard: DashboardData,
     pub theme_kind: ThemeKind,
+    pub dm: DataMgmtState,
+    pub dm_form: DataFormState,
 }
 
 #[derive(Debug, Clone)]
 pub enum Message {
     TabSelected(Tab),
     Dashboard(DashboardMsg),
+    Data(DataMsg),
     CycleTheme,
     PumpTick,
 }
@@ -93,6 +98,8 @@ impl Application for App {
             log: flags.log,
             dashboard: DashboardData::default(),
             theme_kind: flags.theme_kind,
+            dm: DataMgmtState::new(),
+            dm_form: DataFormState::default(),
         };
         // Kick the first Refresh so the dashboard has data on launch.
         dashboard::trigger_refresh(&app.conn);
@@ -122,6 +129,10 @@ impl Application for App {
                     crate::log_panel::LogLevel::Info,
                     format!("theme: {} → {}", prev.as_str(), self.theme_kind.as_str()),
                 );
+                Command::none()
+            }
+            Message::Data(msg) => {
+                data_mgmt::handle(&mut self.dm_form, &self.dm, &mut self.log, msg);
                 Command::none()
             }
             Message::PumpTick => {
@@ -185,7 +196,7 @@ impl Application for App {
         let main: Element<Self::Message, Self::Theme, iced::Renderer> = match self.tab {
             Tab::Dashboard => dashboard::view(&self.dashboard, &self.conn, &self.log)
                 .map(Message::Dashboard),
-            Tab::DataMgmt => placeholder::view("数据管理", "S-2", icons::DATABASE),
+            Tab::DataMgmt => data_mgmt::view(&self.dm_form, &self.dm).map(Message::Data),
             Tab::Pipelines => placeholder::view("Pipelines", "S-3 / S-4", icons::WORKFLOW),
             Tab::Settings => placeholder::view("设置", "S-5", icons::SETTINGS),
         };

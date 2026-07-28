@@ -16,6 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 bee-control = { path = "../bee-control" }
+bee-plugin-sdk = { path = "../bee-plugin-sdk" }
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
