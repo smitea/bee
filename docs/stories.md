@@ -802,18 +802,18 @@ Promote Datasource from runtime concept to **first-class managed Provider entity
 - **Output Datasources**: same `use` syntax works for sinks — `use influxdb; EMIT INTO influxdb.emit('bitcoin.trade', ...) SELECT ...`.
 
 **Acceptance criteria**
-- [ ] `bee datasource create binance --adapter binance_subscribe --plugin-version ^1.0 --config '{"base_url":"wss://api.binance.com","rate_limit_per_sec":10}'` succeeds and the Datasource appears in `bee datasource list`
-- [ ] Datasource config schema rejects per-call args (e.g., `--config '{"symbol":"BTC/USDT"}'` produces a clear error: "symbol belongs at the call site, not in Datasource config")
-- [ ] SQL: `use binance; SELECT * FROM binance.subscribe('BTC/USDT', '5min');` compiles and deploys
-- [ ] SQL: `SELECT * FROM binance.subscribe('BTC/USDT', '5min');` (no `use`) is a compile error with a clear message
-- [ ] SQL: `use binance; SELECT * FROM coingecko.subscribe(...);` is a compile error (coingecko is not used)
-- [ ] SQL: `binance.subscribe('BTC/USDT', '5min', api_key='...')` (inline credential) is a compile error
-- [ ] `use binance@^1.0;` resolves to the highest 1.x Plugin version loaded
-- [ ] `use binance@1.4.2;` resolves to exactly that version
-- [ ] `use binance;` with no version spec resolves to the Datasource's configured `version_spec`
-- [ ] `bee datasource pause binance` triggers Draining on all referencing Jobs
-- [ ] Job's `tenant` field defaults to 0; struct field exists but no ACL check in MVP
-- [ ] **StreamSignature test**: two Pipelines calling `binance.subscribe('BTC/USDT', '5min')` share 1 Producer; calling `binance.subscribe('ETH/USDT', '5min')` (different args) creates a separate Producer; calling `binance.ticker('BTC/USDT')` (different method) also creates a separate Producer
+- [x] `bee datasource create binance --adapter binance_subscribe --plugin-version ^1.0 --config '{"base_url":"wss://api.binance.com","rate_limit_per_sec":10}'` succeeds and the Datasource appears in `bee datasource list` (locked down by `register_datasource_full_happy_path` in `crates/bee-control/tests/admin_datasource_validation.rs:208` + the `bee datasource create/list` CLI in `bee/src/main.rs:736`)
+- [x] Datasource config schema rejects per-call args (e.g., `--config '{"symbol":"BTC/USDT"}'` produces a clear error: "symbol belongs at the call site, not in Datasource config") (locked down by `validate_config_rejects_symbol` + `validate_config_rejects_interval` + `validate_config_rejects_query` in `crates/bee-dsl-sql/src/preprocess.rs:1683`)
+- [x] SQL: `use binance; SELECT * FROM binance.subscribe('BTC/USDT', '5min');` compiles and deploys (locked down by `strict_mode_passes_with_matching_use` in `crates/bee-dsl-sql/src/preprocess.rs:1446`)
+- [x] SQL: `SELECT * FROM binance.subscribe('BTC/USDT', '5min');` (no `use`) is a compile error with a clear message (locked down by `strict_mode_fails_when_adapter_call_has_no_use` in `crates/bee-dsl-sql/src/preprocess.rs:1453` — error mentions `strict-mode` + `binance`)
+- [x] SQL: `use binance; SELECT * FROM coingecko.subscribe(...);` is a compile error (coingecko is not used) (locked down by `strict_mode_fails_when_adapter_call_doesnt_match_use` in `crates/bee-dsl-sql/src/preprocess.rs:1462`)
+- [x] SQL: `binance.subscribe('BTC/USDT', '5min', api_key='...')` (inline credential) is a compile error (locked down by `check_inline_credentials_rejects_api_key` in `crates/bee-dsl-sql/src/preprocess.rs:1653`)
+- [x] `use binance@^1.0;` resolves to the highest 1.x Plugin version loaded (locked down by `resolve_caret_spec_picks_highest_compatible` in `crates/bee-dsl-sql/src/preprocess.rs:1581` — `^1.0` matches `1.4.2` against a Plugin set of `1.0.0`, `1.4.2`, `2.0.0`)
+- [x] `use binance@1.4.2;` resolves to exactly that version (locked down by `resolve_uses_directive_spec_wins_over_datasource_spec` in `crates/bee-dsl-sql/src/preprocess.rs:1560` — `1.4.2` exact spec overrides Datasource `Latest`)
+- [x] `use binance;` with no version spec resolves to the Datasource's configured `version_spec` (locked down by `resolve_no_spec_uses_datasource_stored_spec` in `crates/bee-dsl-sql/src/preprocess.rs:1601`)
+- [x] `bee datasource pause binance` triggers Draining on all referencing Jobs (locked down by `pause_records_draining_event_with_referencing_jobs` in `crates/bee-control/src/datasource.rs:899` — pause emits a `DrainingEvent` listing the 3 referencing Jobs and pushes it to `draining_log`)
+- [x] Job's `tenant` field defaults to 0; struct field exists but no ACL check in MVP (verified by `tenant: u16` field on `Op::RegisterJob` in `crates/bee-control/src/kv.rs:67` with the MVP doc comment "struct field only; ACL check is 1.x")
+- [x] **StreamSignature test**: two Pipelines calling `binance.subscribe('BTC/USDT', '5min')` share 1 Producer; calling `binance.subscribe('ETH/USDT', '5min')` (different args) creates a separate Producer; calling `binance.ticker('BTC/USDT')` (different method) also creates a separate Producer (locked down by `end_to_end_deployer_second_pipeline_becomes_subscriber` + `deploy_pipeline_with_different_args_gets_different_producer` in `crates/bee-control/tests/deployer_s17.rs`, plus `different_method_yields_different_signature` + `different_args_yield_different_signature` in `crates/bee-control/src/signature.rs`)
 
 ---
 
