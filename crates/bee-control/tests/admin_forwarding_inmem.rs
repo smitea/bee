@@ -48,6 +48,7 @@ async fn boot_3_node_inmem() -> Cluster {
         base_election_timeout: Duration::from_millis(500),
         heartbeat_interval: Duration::from_millis(50),
         plugin_manager: None,
+        log_path: None,
         nodes: (0..3)
             .map(|i| {
                 let id = (i + 1) as u32;

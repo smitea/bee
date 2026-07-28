@@ -31,6 +31,7 @@ pub mod tcp;
 pub mod tick_metrics;
 pub mod transport;
 pub mod types;
+pub mod wal;
 
 #[cfg(test)]
 mod cluster_tcp_integration;

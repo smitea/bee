@@ -10,6 +10,7 @@ use crate::kv::{KVStateMachine, Op, TxnError};
 use super::admin_protocol::{AdminRequest, AdminResponse, TaskRuntimeStats};
 use super::transport::{InMemoryTransport, NodeTransport};
 use super::types::{LogEntry, NodeCommand, NodeId, RpcMessage, Role, Term, LogIndex};
+use super::wal::RaftLogWal;
 
 /// S33.2 type alias: a `TaskId` is the same as
 /// `NodeId`/`u32` historically. We use `u32`
@@ -148,6 +149,7 @@ pub struct NodeState {
     pub votes_received: u32,
     pub next_index: HashMap<NodeId, LogIndex>,
     pub match_index: HashMap<NodeId, LogIndex>,
+    pub wal: Option<Arc<std::sync::Mutex<RaftLogWal>>>,
 }
 
 impl Default for NodeState {
@@ -157,7 +159,7 @@ impl Default for NodeState {
 }
 
 impl NodeState {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             role: Role::Follower,
             current_term: 0,
@@ -170,7 +172,55 @@ impl NodeState {
             votes_received: 0,
             next_index: HashMap::new(),
             match_index: HashMap::new(),
+            wal: None,
         }
+    }
+
+    pub fn new_from_wal(wal: Arc<std::sync::Mutex<RaftLogWal>>) -> std::io::Result<Self> {
+        let replay = {
+            let wal = wal.lock().expect("Raft WAL mutex poisoned");
+            RaftLogWal::replay(wal.path())?
+        };
+        let log_len = replay.entries.len() as LogIndex;
+        Ok(Self {
+            role: Role::Follower,
+            current_term: replay.term,
+            voted_for: replay.voted_for,
+            log: replay.entries,
+            commit_index: log_len,
+            applied_index: 0,
+            last_heartbeat: Instant::now(),
+            leader_id: None,
+            votes_received: 0,
+            next_index: HashMap::new(),
+            match_index: HashMap::new(),
+            wal: Some(wal),
+        })
+    }
+
+    fn append_to_log(&mut self, entry: LogEntry) {
+        if let Some(wal) = &self.wal {
+            wal.lock()
+                .expect("Raft WAL mutex poisoned")
+                .append(&entry)
+                .expect("persist Raft log entry");
+        }
+        self.log.push(entry);
+    }
+
+    fn set_term_and_vote(&mut self, term: Term, voted_for: Option<NodeId>) {
+        if let Some(wal) = &self.wal {
+            wal.lock()
+                .expect("Raft WAL mutex poisoned")
+                .persist_term_and_vote(term, voted_for)
+                .expect("persist Raft term and vote");
+        }
+        self.current_term = term;
+        self.voted_for = voted_for;
+    }
+
+    fn set_voted_for(&mut self, voted_for: Option<NodeId>) {
+        self.set_term_and_vote(self.current_term, voted_for);
     }
 
     fn last_log_index(&self) -> LogIndex {
@@ -254,11 +304,31 @@ impl Node {
         cp: Arc<Mutex<ControlPlaneStateMachine>>,
         config: NodeConfig,
     ) -> Self {
+        Self::new_with_state(
+            self_id,
+            peer_ids,
+            transport,
+            kv,
+            cp,
+            config,
+            NodeState::new(),
+        )
+    }
+
+    pub fn new_with_state(
+        self_id: NodeId,
+        peer_ids: Vec<NodeId>,
+        transport: Arc<dyn NodeTransport>,
+        kv: Arc<Mutex<KVStateMachine>>,
+        cp: Arc<Mutex<ControlPlaneStateMachine>>,
+        config: NodeConfig,
+        state: NodeState,
+    ) -> Self {
         Self {
             self_id,
             peer_ids,
             transport,
-            state: Arc::new(Mutex::new(NodeState::new())),
+            state: Arc::new(Mutex::new(state)),
             kv,
             cp,
             stats: Arc::new(Mutex::new(HashMap::new())),
@@ -500,6 +570,7 @@ impl Node {
     }
 
     pub async fn run(self) {
+        self.apply_committed_current().await;
         let election_timeout = self.config.election_timeout();
         let mut next_election = Instant::now() + election_timeout;
         let mut next_heartbeat = Instant::now() + Duration::from_secs(3600);
@@ -562,7 +633,7 @@ impl Node {
         let entry_index;
         {
             let mut state = self.state.lock().await;
-            state.log.push(entry);
+            state.append_to_log(entry);
             entry_index = state.log.len() as LogIndex;
             state.match_index.insert(self.self_id, entry_index);
         }
@@ -738,9 +809,8 @@ impl Node {
         let (vote_granted, current_term) = {
             let mut state = self.state.lock().await;
             if term > state.current_term {
-                state.current_term = term;
+                state.set_term_and_vote(term, None);
                 state.role = Role::Follower;
-                state.voted_for = None;
                 state.leader_id = None;
             }
             if term < state.current_term {
@@ -750,7 +820,7 @@ impl Node {
                 let already_voted =
                     state.voted_for.is_some() && state.voted_for != Some(candidate_id);
                 if log_ok && !already_voted {
-                    state.voted_for = Some(candidate_id);
+                    state.set_voted_for(Some(candidate_id));
                     (true, state.current_term)
                 } else {
                     (false, state.current_term)
@@ -773,9 +843,8 @@ impl Node {
     async fn handle_request_vote_reply(&self, term: Term, vote_granted: bool) {
         let mut state = self.state.lock().await;
         if term > state.current_term {
-            state.current_term = term;
+            state.set_term_and_vote(term, None);
             state.role = Role::Follower;
-            state.voted_for = None;
             state.leader_id = None;
             return;
         }
@@ -805,9 +874,8 @@ impl Node {
     async fn handle_heartbeat(&self, term: Term, leader_id: NodeId) {
         let mut state = self.state.lock().await;
         if term > state.current_term {
-            state.current_term = term;
+            state.set_term_and_vote(term, None);
             state.role = Role::Follower;
-            state.voted_for = None;
         }
         if term >= state.current_term {
             state.leader_id = Some(leader_id);
@@ -828,9 +896,8 @@ impl Node {
         let (success, current_term, match_index) = {
             let mut state = self.state.lock().await;
             if term > state.current_term {
-                state.current_term = term;
+                state.set_term_and_vote(term, None);
                 state.role = Role::Follower;
-                state.voted_for = None;
             }
             if term < state.current_term {
                 (false, state.current_term, 0)
@@ -854,10 +921,10 @@ impl Node {
                         if let Some(existing) = state.log.get(idx) {
                             if existing.term != entry.term {
                                 state.log.truncate(idx);
-                                state.log.push(entry);
+                                state.append_to_log(entry);
                             }
                         } else {
-                            state.log.push(entry);
+                            state.append_to_log(entry);
                         }
                     }
                     if leader_commit > state.commit_index {
@@ -904,9 +971,8 @@ impl Node {
         let should_advance = {
             let mut state = self.state.lock().await;
             if term > state.current_term {
-                state.current_term = term;
+                state.set_term_and_vote(term, None);
                 state.role = Role::Follower;
-                state.voted_for = None;
                 state.leader_id = None;
                 return;
             }
@@ -949,9 +1015,9 @@ impl Node {
     async fn start_election(&self) {
         let (term, last_index, last_term) = {
             let mut state = self.state.lock().await;
-            state.current_term += 1;
+            let next_term = state.current_term + 1;
+            state.set_term_and_vote(next_term, Some(self.self_id));
             state.role = Role::Candidate;
-            state.voted_for = Some(self.self_id);
             state.votes_received = 1;
             state.leader_id = None;
             (
