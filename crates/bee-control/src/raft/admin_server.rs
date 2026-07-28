@@ -195,6 +195,10 @@ async fn handle_admin_connection(
         let request: AdminRequest = match bincode::deserialize(&frame.body) {
             Ok(r) => r,
             Err(e) => {
+                tracing::error!(
+                    target: "bee.admin",
+                    "AdminRequest dispatch failed: bincode deserialize: {e}"
+                );
                 let resp = AdminResponse::Error(format!("bincode: {e}"));
                 send_response(&mut conn, &resp).await;
                 continue;
@@ -329,7 +333,22 @@ async fn validate_register_datasource(
     // that don't exercise plugin-existence.
     plugin_manager: Option<&PluginManager>,
 ) -> AdminResponse {
-    match req {
+    // S-1a: log every error reply with full context before returning.
+    // Wrap the match in a small helper so each `AdminResponse::Error(msg)`
+    // site can log via `err!(...)` without changing the wire format.
+    let req_kind = match &req {
+        AdminRequest::ListJobs => "ListJobs",
+        AdminRequest::JobInspect(_) => "JobInspect",
+        AdminRequest::TaskDiagnostics(_) => "TaskDiagnostics",
+        AdminRequest::ClusterStatus => "ClusterStatus",
+        AdminRequest::Ping => "Ping",
+        AdminRequest::ListKv { .. } => "ListKv",
+        AdminRequest::KvPut { .. } => "KvPut",
+        AdminRequest::Deploy { .. } => "Deploy",
+        AdminRequest::RegisterDatasource { .. } => "RegisterDatasource",
+        AdminRequest::Forward { .. } => "Forward",
+    };
+    let resp = match req {
         AdminRequest::KvPut { key, value } => {
             let op = crate::kv::Op::Put { key, value };
             submit_and_await(transport, op).await
@@ -528,11 +547,26 @@ async fn validate_register_datasource(
         | AdminRequest::TaskDiagnostics(_)
         | AdminRequest::ClusterStatus
         | AdminRequest::ListKv { .. }
-        | AdminRequest::Forward { .. } => AdminResponse::Error(
+        | AdminRequest::Forward { .. } => {
+            tracing::error!(
+                target: "bee.admin",
+                request_kind = req_kind,
+                "AdminRequest dispatch failed: read-only arm routed to dispatch_with_apply (S33.5 bug)"
+            );
+            AdminResponse::Error(
             "read-only arm routed to dispatch_with_apply (S33.5 bug)"
                 .to_string(),
-        ),
+        )
+        }
+    };
+    if let AdminResponse::Error(msg) = &resp {
+        tracing::error!(
+            target: "bee.admin",
+            request_kind = req_kind,
+            "AdminRequest dispatch failed: {msg}"
+        );
     }
+    resp
 }
 
 /// S33.5: helper. Build a
