@@ -13,6 +13,7 @@ members = [
     "crates/bee-adapter",
     "crates/bee-plugin-sdk",
     "crates/bee-kv-test",
+    "crates/bee-gui",
     "bee",
     "plugins/bee-plugin-perf-fib",
     "plugins/bee-plugin-onnx-ml",
