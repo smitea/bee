@@ -103,6 +103,9 @@ impl TestCluster {
             heartbeat_interval: FAST_HEARTBEAT_INTERVAL,
             plugin_manager: None,
             log_path: None,
+            snapshot_dir: None,
+            snapshot_threshold: 0,
+            snapshot_interval: Duration::ZERO,
             nodes: (0..3)
                 .map(|i| {
                     let id = (i + 1) as NodeId;
@@ -181,6 +184,9 @@ impl TestCluster {
             nodes: Vec::new(),
             plugin_manager: None,
             log_path: Some(dir.to_path_buf()),
+            snapshot_dir: None,
+            snapshot_threshold: 0,
+            snapshot_interval: Duration::ZERO,
         };
         let cluster = Cluster::new(config).await;
         Self {

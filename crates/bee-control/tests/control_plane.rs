@@ -13,6 +13,9 @@ fn test_config() -> ClusterConfig {
         nodes: Vec::new(), // in-memory default
         plugin_manager: None,
         log_path: None,
+        snapshot_dir: None,
+        snapshot_threshold: 0,
+        snapshot_interval: Duration::ZERO,
     }
 }
 

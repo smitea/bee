@@ -61,14 +61,17 @@ async fn boot_tcp_3_node() -> (Cluster, Vec<SocketAddr>) {
         });
     }
 
-    let config = ClusterConfig {
-        n: 3,
-        base_election_timeout: Duration::from_millis(500),
-        heartbeat_interval: Duration::from_millis(50),
-        nodes: specs,
-        plugin_manager: None,
-        log_path: None,
-    };
+let config = ClusterConfig {
+       n: 3,
+       base_election_timeout: Duration::from_millis(800),
+       heartbeat_interval: Duration::from_millis(100),
+       nodes: Vec::new(),
+       plugin_manager: None,
+       log_path: None,
+       snapshot_dir: None,
+       snapshot_threshold: 0,
+       snapshot_interval: Duration::ZERO,
+   };
     let cluster = Cluster::new_with_specs(config).await;
     (cluster, addrs)
 }

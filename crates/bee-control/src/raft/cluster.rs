@@ -10,6 +10,7 @@ use crate::control_plane::ControlPlaneStateMachine;
 use crate::kv::{KVStateMachine, Op, TxnError};
 
 use super::node::{Node, NodeConfig, NodeState};
+use super::snapshot::SnapshotStore;
 use super::tcp::TcpTransport;
 use super::transport::{InMemoryTransport, NodeTransport, Router};
 use super::types::{NodeCommand, NodeId, Role, RpcMessage, Term, LogIndex};
@@ -39,6 +40,20 @@ pub struct ClusterConfig {
     /// persistent state on boot. `None` (default) is the
     /// in-memory behavior (no persistence).
     pub log_path: Option<PathBuf>,
+    /// S07-x: directory for snapshot files. Each
+    /// node writes `snap-<last_included_index>.bin`
+    /// here. `None` disables snapshotting (the
+    /// WAL grows unboundedly — fine for tests).
+    pub snapshot_dir: Option<PathBuf>,
+    /// S07-x: take a snapshot after every
+    /// N committed log entries past the
+    /// previous snapshot. `0` disables the
+    /// size-based trigger.
+    pub snapshot_threshold: u64,
+    /// S07-x: take a snapshot at most every
+    /// `snapshot_interval`. `Duration::ZERO`
+    /// disables the time-based trigger.
+    pub snapshot_interval: Duration,
 }
 
 impl std::fmt::Debug for ClusterConfig {
@@ -50,6 +65,9 @@ impl std::fmt::Debug for ClusterConfig {
             .field("nodes", &self.nodes)
             .field("plugin_manager", &self.plugin_manager.as_ref().map(|_| "PluginManager"))
             .field("log_path", &self.log_path)
+            .field("snapshot_dir", &self.snapshot_dir)
+            .field("snapshot_threshold", &self.snapshot_threshold)
+            .field("snapshot_interval", &self.snapshot_interval)
             .finish()
     }
 }
@@ -63,6 +81,9 @@ impl Default for ClusterConfig {
             nodes: Vec::new(), // empty → in-memory default
             plugin_manager: None,
             log_path: None,
+            snapshot_dir: None,
+            snapshot_threshold: 0,
+            snapshot_interval: Duration::ZERO,
         }
     }
 }
@@ -101,6 +122,63 @@ impl Default for NodeSpec {
             transport: None,
             node_config: None,
         }
+    }
+}
+
+/// S07-x: build a fresh `NodeState` for one node,
+/// using the cluster's WAL + snapshot settings.
+/// Reads the latest snapshot from `snapshot_dir`
+/// (if any) and seeds `NodeState.log` from
+/// `snapshot.log + WAL_tail`. Returns a fresh
+/// in-memory `NodeState` when no `log_path` is
+/// configured.
+fn build_node_state(
+    config: &ClusterConfig,
+    node_id: NodeId,
+) -> NodeState {
+    let log_path = match &config.log_path {
+        Some(p) => p,
+        None => return NodeState::new(),
+    };
+    let wal_path = log_path.join(format!("node-{node_id}.wal"));
+    let wal = RaftLogWal::open(&wal_path).expect("RaftLogWal::open");
+    let wal = Arc::new(std::sync::Mutex::new(wal));
+    let snapshot_opt = match &config.snapshot_dir {
+        Some(snap_dir) => {
+            let store = SnapshotStore::open(snap_dir).expect("SnapshotStore::open");
+            let store = Arc::new(std::sync::Mutex::new(store));
+            let latest = store
+                .lock()
+                .expect("snapshot store poisoned")
+                .latest()
+                .expect("SnapshotStore::latest");
+            (latest, Some(store))
+        }
+        None => (None, None),
+    };
+    match snapshot_opt {
+        (Some(snap), Some(store)) => NodeState::new_from_snapshot_and_wal(
+            wal,
+            snap,
+            store,
+            config.snapshot_threshold,
+            config.snapshot_interval,
+        )
+        .expect("NodeState::new_from_snapshot_and_wal"),
+        (None, maybe_store) => {
+            let mut s = NodeState::new_from_wal(wal).expect("NodeState::new_from_wal");
+            // If a snapshot_dir was configured
+            // but no snapshot file existed, still
+            // wire up the snapshot store + triggers
+            // so future snapshots get written.
+            if let Some(store) = maybe_store {
+                s.snapshot_store = Some(store);
+                s.snapshot_threshold = config.snapshot_threshold;
+                s.snapshot_interval = config.snapshot_interval;
+            }
+            s
+        }
+        (Some(_), None) => unreachable!("snapshot_opt invariant violated"),
     }
 }
 
@@ -228,15 +306,7 @@ impl Cluster {
                 heartbeat_interval: config.heartbeat_interval,
                 node_offset_ms: (i as u64) * 100,
             };
-            let initial_state = if let Some(log_path) = &config.log_path {
-                let wal_path = log_path.join(format!("node-{id}.wal"));
-                let wal = RaftLogWal::open(&wal_path)
-                    .expect("RaftLogWal::open");
-                let wal = Arc::new(std::sync::Mutex::new(wal));
-                NodeState::new_from_wal(wal).expect("NodeState::new_from_wal")
-            } else {
-                NodeState::new()
-            };
+            let initial_state = build_node_state(&config, id);
             let node = Node::new_with_state(
                 id,
                 peer_ids,
@@ -404,15 +474,7 @@ impl Cluster {
             let kv = Arc::new(Mutex::new(KVStateMachine::new()));
             let cp = Arc::new(Mutex::new(ControlPlaneStateMachine::new(plugin_manager.clone())));
             let node_config = spec_to_node_node_config(&specs[&id], &config, i);
-            let initial_state = if let Some(log_path) = &config.log_path {
-                let wal_path = log_path.join(format!("node-{id}.wal"));
-                let wal = RaftLogWal::open(&wal_path)
-                    .expect("RaftLogWal::open");
-                let wal = Arc::new(std::sync::Mutex::new(wal));
-                NodeState::new_from_wal(wal).expect("NodeState::new_from_wal")
-            } else {
-                NodeState::new()
-            };
+            let initial_state = build_node_state(&config, id);
             let node = Node::new_with_state(
                 id,
                 peer_ids,
