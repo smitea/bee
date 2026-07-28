@@ -8,15 +8,67 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
 
 jobs:
   build:
-
+    name: build (release)
     runs-on: ubuntu-latest
-
     steps:
-    - uses: actions/checkout@v4
-    - name: Build
-      run: cargo build --verbose
-    - name: Run tests
-      run: cargo test --verbose
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            -> target
+            -> crates/*/target
+            -> bee/target
+            -> plugins/*/target
+            -> plugins/quant/*/target
+      - name: Build (release)
+        run: cargo build --workspace --release --verbose
+
+  test:
+    name: test (release)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            -> target
+            -> crates/*/target
+            -> bee/target
+            -> plugins/*/target
+            -> plugins/quant/*/target
+      - name: Test (release)
+        run: cargo test --workspace --release --verbose
+
+  gui-smoke:
+    name: bee-gui smoke launch (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            -> target
+            -> crates/*/target
+            -> bee/target
+      - name: Build bee-gui
+        run: cargo build --release -p bee-gui
+      - name: Smoke launch bee-gui (3s)
+        run: |
+          ./target/release/bee-gui --connect 127.0.0.1:9999 &
+          PID=$!
+          sleep 3
+          if kill -0 $PID 2>/dev/null; then
+            echo "bee-gui is running (PID $PID)"
+            kill $PID
+            exit 0
+          else
+            echo "bee-gui exited prematurely"
+            exit 1
+          fi
