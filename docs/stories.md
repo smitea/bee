@@ -408,8 +408,8 @@ In `bee-dsl-sql`:
 - Test: parse `SELECT a + 1 FROM stream WHERE a > 0` — assert it produces a valid LogicalPlan
 
 **Acceptance criteria**
-- [ ] Unit test: a few representative SQL statements parse and analyze without error
-- [ ] No Bee-level extensions yet (ASOF JOIN, EMIT INTO) — those are in S14 / S15
+- [x] Unit test: a few representative SQL statements parse and analyze without error
+- [x] No Bee-level extensions yet (ASOF JOIN, EMIT INTO) — those are in S14 / S15
 
 ---
 
@@ -428,9 +428,9 @@ In `bee-dsl-sql`:
 - `compile_to_dag(plan: LogicalPlan) -> Result<Dag>`
 
 **Acceptance criteria**
-- [ ] Unit test: `SELECT a + 1 AS b FROM stream WHERE a > 0` → DAG with [DatasourcePhase → FilterPhase → ProjectionPhase]
-- [ ] DAG is executable by S04 Runtime (after S15 wires the executor)
-- [ ] Schema is preserved across Phase boundaries
+- [x] Unit test: `SELECT a + 1 AS b FROM stream WHERE a > 0` → DAG with [DatasourcePhase → FilterPhase → ProjectionPhase]
+- [x] DAG is executable by S04 Runtime (after S15 wires the executor)
+- [x] Schema is preserved across Phase boundaries
 
 ---
 
@@ -447,9 +447,9 @@ In `bee-dsl-sql`:
 - For MVP, the input is a mock "stream" (e.g., a CSV file read once and replayed)
 
 **Acceptance criteria**
-- [ ] `bee run tests/data/simple_select.sql` (test fixture with a small CSV) prints the projection output
-- [ ] Micro-batch window is configurable
-- [ ] Output schema matches the SQL projection
+- [x] `bee run tests/data/simple_select.sql` (test fixture with a small CSV) prints the projection output
+- [x] Micro-batch window is configurable
+- [x] Output schema matches the SQL projection
 
 ---
 
@@ -472,10 +472,10 @@ In `bee-dsl-sql`:
 - Adapter discovery mechanism: Adapters are looked up by name in the Plugin Manager (S19). Built-in Adapters for the runtime are **limited to the trait implementations themselves**; concrete business Adapters (binance, etc.) are **plugins**.
 
 **Acceptance criteria**
-- [ ] `MockInputAdapter` produces exactly N events then returns `Ok(None)` (deterministic, testable)
-- [ ] No domain-specific Datasource implementation in `bee-runtime` or any other Bee core crate
-- [ ] The `binance` / `coingecko` / `influxdb` examples used elsewhere in this doc are clearly labeled as **external plugins** (not built-in) — see S19
-- [ ] A test Pipeline using `MockInputAdapter` (registered via S29's Datasource mechanism with `--adapter mock_input`) runs end-to-end and emits events
+- [x] `MockInputAdapter` produces exactly N events then returns `Ok(None)` (deterministic, testable)
+- [x] No domain-specific Datasource implementation in `bee-runtime` or any other Bee core crate
+- [x] The `binance` / `coingecko` / `influxdb` examples used elsewhere in this doc are clearly labeled as **external plugins** (not built-in) — see S19
+- [x] A test Pipeline using `MockInputAdapter` (registered via S29's Datasource mechanism with `--adapter mock_input`) runs end-to-end and emits events
 
 ---
 
