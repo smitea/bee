@@ -116,11 +116,11 @@ crates/bee-control     crates/bee-registry   crates/bee-dsl-sql   (binary: bin/b
 Each crate has a minimal `lib.rs` (or `main.rs` for `bee`) with a placeholder type, plus `Cargo.toml` declaring its dependencies. The `bee` binary prints `bee <version>` and exits.
 
 **Acceptance criteria**
-- [ ] `cargo build --workspace` succeeds
-- [ ] `cargo run -p bee -- --version` prints `bee 0.1.0` (or similar)
-- [ ] `cargo test --workspace` runs (no tests yet, but the harness works)
-- [ ] `git init` + first commit captured
-- [ ] `.gitignore` excludes `target/`, `Cargo.lock` for binaries (include for libraries)
+- [x] `cargo build --workspace` succeeds
+- [x] `cargo run -p bee -- --version` prints `bee 0.1.0` (or similar)
+- [x] `cargo test --workspace` runs (no tests yet, but the harness works)
+- [x] `git init` + first commit captured
+- [x] `.gitignore` excludes `target/`, `Cargo.lock` for binaries (include for libraries)
 
 ---
 
@@ -139,9 +139,9 @@ In `bee-codec`:
 - Magic bytes: `[0x42, 0x45]` (ASCII "BE")
 
 **Acceptance criteria**
-- [ ] Unit tests cover: encode round-trip, decode round-trip, magic mismatch, body length mismatch, partial buffer (less than 15 bytes), message-type parsing
-- [ ] `cargo test -p bee-codec` shows all green
-- [ ] No external runtime dependencies added (bincode allowed per ADR-0001)
+- [x] Unit tests cover: encode round-trip, decode round-trip, magic mismatch, body length mismatch, partial buffer (less than 15 bytes), message-type parsing
+- [x] `cargo test -p bee-codec` shows all green
+- [x] No external runtime dependencies added (bincode allowed per ADR-0001)
 
 ---
 
@@ -162,9 +162,9 @@ In `bee` binary:
 - `bee echo <addr>` subcommand: connects to `<addr>`, sends a Heartbeat Frame, reads back the echoed Frame, prints "ok" or the echoed body, exits
 
 **Acceptance criteria**
-- [ ] Integration test: spawn a local listener on `127.0.0.1:0`, connect, send a Frame, read it back
-- [ ] Integration test: handle partial reads (send 5 bytes, then 10 more — receiver reconstructs the full Frame)
-- [ ] `cargo run -p bee -- echo 127.0.0.1:<port>` round-trips a Heartbeat Frame end-to-end
+- [x] Integration test: spawn a local listener on `127.0.0.1:0`, connect, send a Frame, read it back
+- [x] Integration test: handle partial reads (send 5 bytes, then 10 more — receiver reconstructs the full Frame)
+- [x] `cargo run -p bee -- echo 127.0.0.1:<port>` round-trips a Heartbeat Frame end-to-end
 - [ ] Backpressure: sender pauses when local send buffer is full (deferred to S09 cross-Node Phase flow; for now, `tokio::sync::mpsc` between user code and Connection is sufficient)
 
 ---
@@ -187,8 +187,8 @@ In `bee-runtime`:
 - One example built-in `Handler`: `PassthroughHandler` that just forwards input to output (for testing)
 
 **Acceptance criteria**
-- [ ] Unit test: instantiate a 1-Phase DAG with `PassthroughHandler`, feed one input, assert one output
-- [ ] `Dag` exposes `vertices() -> &[Phase]` and `edges() -> &[(PhaseId, PhaseId)]`
+- [x] Unit test: instantiate a 1-Phase DAG with `PassthroughHandler`, feed one input, assert one output
+- [x] `Dag` exposes `vertices() -> &[Phase]` and `edges() -> &[(PhaseId, PhaseId)]`
 - [ ] No SQL / no Raft / no plugin loading in this slice (deferred)
 
 ---
@@ -208,9 +208,9 @@ In `bee-runtime`:
 - `Runtime` reads input from a user-provided `mpsc::Receiver<Event>`, sinks output to a user-provided `mpsc::Sender<Event>`
 
 **Acceptance criteria**
-- [ ] Integration test: 2-Phase chain (A → B), A uses `MapHandler(x => x+1)`, B uses `FilterHandler(x => x > 5)`, feed [1..10], assert output [6,7,8,9,10]
-- [ ] Runtime cleanly shuts down when input channel closes
-- [ ] No network, no Raft, no cross-Node edges in this slice
+- [x] Integration test: 2-Phase chain (A → B), A uses `MapHandler(x => x+1)`, B uses `FilterHandler(x => x > 5)`, feed [1..10], assert output [6,7,8,9,10]
+- [x] Runtime cleanly shuts down when input channel closes
+- [x] No network, no Raft, no cross-Node edges in this slice
 
 ---
 
@@ -227,9 +227,9 @@ Extend `Dag` and `Runtime`:
 - Add a test DAG: Source → [BranchA, BranchB] → Sink (where Sink merges two streams)
 
 **Acceptance criteria**
-- [ ] Integration test: fork DAG, each branch produces N events, sink receives 2N events
-- [ ] Topological order: when 3 Phases A, B, C where A → B, A → C, B and C can run in parallel
-- [ ] DAG cycle detection at construction time (return error if cycle present)
+- [x] Integration test: fork DAG, each branch produces N events, sink receives 2N events
+- [x] Topological order: when 3 Phases A, B, C where A → B, A → C, B and C can run in parallel
+- [x] DAG cycle detection at construction time (return error if cycle present)
 
 ---
 
