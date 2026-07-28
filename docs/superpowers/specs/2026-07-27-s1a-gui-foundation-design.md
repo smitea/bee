@@ -42,7 +42,7 @@
 - [x] `cargo deb` metadata in `crates/bee-gui/Cargo.toml`
 
 **Deferred to follow-ups** (not blocking):
-- Theme-switch UI button in AppBar (→ S-1b)
+- Theme-switch UI button in AppBar (→ S-1b) — implemented 2026-07-28: `ThemeKind {Light, Dark}` field + CycleTheme button in AppBar + `--theme <light|dark>` CLI flag. See commit `efa93b3`.
 - Multi-cluster comparison / live event stream (→ S-1c)
 - Integration test bodies (→ S-1c test-utils extraction)
 - Real GUI verified visually on a live cluster with a screen recording (manual)
