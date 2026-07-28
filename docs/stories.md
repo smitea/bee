@@ -541,7 +541,7 @@ In `bee-dsl-sql`:
 - `bee plugin list` CLI: shows all loaded plugins with their `PluginId` (full hash) and refcount
 
 **Acceptance criteria**
-- [ ] Integration test: drop a sample `libbee_plugin_fake.so` into the plugin dir, see it appear in `bee plugin list` with its hash
+- [x] Integration test: drop a sample `libbee_plugin_fake.so` into the plugin dir, see it appear in `bee plugin list` with its hash
 - [x] ABI mismatched plugin: rejected with clear error log (precise error format in S20)
 - [x] `bee plugin list` output format documented
 
@@ -561,8 +561,8 @@ In `bee-dsl-sql`:
 
 **Acceptance criteria**
 - [x] Integration test: plugin with `abi_version = "2.0"` is rejected when Bee expects `1.x`
-- [ ] Error log format includes: plugin path, computed hash, claimed `abi_version`, expected range, link to migration docs
-- [ ] `bee plugin inspect <path>` shows the would-be hash + claimed `abi_version` (useful for debugging before placing the plugin)
+- [x] Error log format includes: plugin path, computed hash, claimed `abi_version`, expected range, link to migration docs
+- [x] `bee plugin inspect <path>` shows the would-be hash + claimed `abi_version` (useful for debugging before placing the plugin)
 
 ---
 
