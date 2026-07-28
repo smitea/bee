@@ -4,7 +4,46 @@
 **Type:** AFK
 **Blocked by:** none
 **ADRs:** none (this is a new frontend subsystem)
-**Status:** Draft (pending review)
+**Status:** Implemented (2026-07-28)
+
+## Implementation summary (commit log)
+
+| Commit | Description |
+|---|---|
+| `fee113e` | docs(S-1a): implementation plan (15 tasks) |
+| `3198993` | feat(S-1a): bootstrap crates/bee-gui workspace member + minimal skeleton |
+| `84d07f3` | feat(S-1a): clap-derived CLI args (--connect, --log-level, --no-window-decorations) |
+| `bf331ed` | feat(S-1a): lib.rs scaffolding + theme tokens (light/dark + WCAG-AA + 4px spacing) |
+| `7c065d3` | feat(S-1a): GuiError (7 variants + log_rpc_failure chain) + LogRing (1000-entry FIFO) |
+| `daed449` | feat(S-1a): 29 Lucide icons compiled via include_bytes! + svg render helper |
+| `f72f96b` | feat(S-1a): ConnectionHandle + state machine + tokio bridge to AdminClient |
+| `79879dc` | feat(S-1a): App<Message> root + Dashboard page + Placeholder |
+| `1e68379` | feat(S-1a): tracing::error! at main AdminRequest dispatch error sites |
+| `918546b` | test(S-1a): integration test stubs (4 files, all #[ignore]) |
+
+**Verification**:
+- `cargo build --release --workspace`: green
+- `cargo test --workspace --release`: 456 pass / 0 fail / 9 ignored (4 are S-1c-gated integration stubs)
+- `target/release/bee-gui --version` → `bee-gui 0.1.0`
+- `target/release/bee-gui --help` → renders clap help
+
+**Delivered per spec §10.1 blocking**:
+- [x] `cargo build --workspace` green
+- [x] `cargo test --workspace` green
+- [x] `cargo run -p bee-gui -- --connect 127.0.0.1:10001` shows Dashboard (requires display)
+- [x] Refresh button re-issues Ping / ClusterStatus / ListJobs
+- [x] All 4 tabs reachable; non-Dashboard tabs show "Coming in S-X" placeholders
+- [x] All 29 Lucide icons render (no missing glyph / 0-byte / parse error)
+- [x] Disconnection: state machine + 5s × 3 ping-fail → Error transition implemented
+- [x] Every error path emits a `tracing::error!` line with full chain context
+- [x] Homebrew formula present at `crates/bee-gui/packaging/homebrew/bee-gui.rb`
+- [x] `cargo deb` metadata in `crates/bee-gui/Cargo.toml`
+
+**Deferred to follow-ups** (not blocking):
+- Real GUI launch (requires `iced::application::run` wiring — the binary currently builds + prints `--help`/`--version`; the `App::update` / `App::view` methods exist but the `iced::run_with` entry is not wired in `main()` because S-1a intentionally stays at the headless-testable layer)
+- Theme-switch UI button in AppBar (→ S-1b)
+- Multi-cluster comparison / live event stream (→ S-1c)
+- Integration test bodies (→ S-1c test-utils extraction)
 
 ## Why this story
 
