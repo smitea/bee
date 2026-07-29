@@ -8,6 +8,7 @@ export interface ConnectionStore {
   status: ConnStatus;
   hydrated: boolean;
   setAddr(addr: string): void;
+  setStatus(next: { addr: string; status: ConnStatus } | ConnStatus): void;
   refresh(addr: string): Promise<void>;
 }
 
@@ -25,6 +26,13 @@ export const useConnection = create<ConnectionStore>((set, get) => ({
   ...initial,
   setAddr(addr) {
     set({ addr });
+  },
+  setStatus(next) {
+    if ("kind" in next) {
+      set({ status: next });
+    } else {
+      set({ addr: next.addr, status: next.status });
+    }
   },
   async refresh(addr) {
     const target = addr ?? get().addr;

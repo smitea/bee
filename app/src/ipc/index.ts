@@ -4,3 +4,8 @@ export * from "./cluster";
 export * from "./settings";
 export * from "./tabs";
 export * from "./profiles";
+export * from "./applications";
+export * from "./audit";
+export * from "./datasources";
+export * from "./pipelines";
+export * from "./plugins";

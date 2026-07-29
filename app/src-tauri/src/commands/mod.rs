@@ -1,9 +1,14 @@
 pub mod cluster;
 pub mod connection;
 pub mod ping;
+pub mod plugins;
 pub mod profiles;
 pub mod settings;
 pub mod tabs;
+pub mod applications;
+pub mod audit;
+pub mod datasources;
+pub mod pipelines;
 
 use serde::Serialize;
 
