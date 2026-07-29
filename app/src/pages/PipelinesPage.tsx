@@ -114,15 +114,25 @@ export function PipelinesPage() {
     <div className="space-y-6">
       <header className="flex items-center justify-between">
         <h1 className="text-xl font-semibold">Pipelines</h1>
-        <button
-          type="button"
-          onClick={() => void onCreate()}
-          disabled={busy}
-          className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md bg-accent-blue text-white hover:bg-accent-blue/90 disabled:opacity-50"
-        >
-          <Plus size={14} />
-          Create pipeline
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => void openTab({ kind: "pipeline_editor", resourceId: null, title: "New Pipeline" })}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md border border-gray-200 dark:border-neutral-700 hover:bg-gray-50 dark:hover:bg-neutral-700"
+          >
+            <Plus size={14} />
+            New Pipeline
+          </button>
+          <button
+            type="button"
+            onClick={() => void onCreate()}
+            disabled={busy}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md bg-accent-blue text-white hover:bg-accent-blue/90 disabled:opacity-50"
+          >
+            <Plus size={14} />
+            Create pipeline
+          </button>
+        </div>
       </header>
 
       {(jobsQ.error || defsQ.error) && (

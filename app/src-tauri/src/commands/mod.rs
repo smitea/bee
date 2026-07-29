@@ -9,6 +9,7 @@ pub mod applications;
 pub mod audit;
 pub mod datasources;
 pub mod pipelines;
+pub mod search;
 
 use serde::Serialize;
 

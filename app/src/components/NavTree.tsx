@@ -1,9 +1,23 @@
 import { useEffect, useState } from "react";
-import { Hexagon, Plus, Search, ChevronRight, ChevronDown, LayoutDashboard, Workflow, Database, Trash2, Power, PowerOff } from "lucide-react";
+import {
+  Hexagon,
+  Plus,
+  ChevronRight,
+  ChevronDown,
+  LayoutDashboard,
+  Workflow,
+  Database,
+  Trash2,
+  Power,
+  PowerOff,
+} from "lucide-react";
 
 import { useApplications } from "../state/applicationsStore";
 import { useTabs } from "../state/tabsStore";
 import type { TabKind } from "../state/tabsStore";
+import { useConnection } from "../state/connectionStore";
+import { SearchBox } from "./SearchBox";
+import type { SearchHit } from "../ipc/search";
 
 function titleFor(kind: TabKind, resourceId: string | null): string {
   switch (kind) {
@@ -15,11 +29,20 @@ function titleFor(kind: TabKind, resourceId: string | null): string {
       return resourceId ? `${resourceId} · Pipelines` : "Pipelines";
     case "application_datasources":
       return resourceId ? `${resourceId} · Datasources` : "Datasources";
+    case "application_dashboard":
+      return resourceId ? `${resourceId} · Dashboard` : "Dashboard";
     case "pipeline":
       return resourceId ? `Pipeline ${resourceId}` : "Pipeline";
     case "datasource":
       return resourceId ? `Datasource ${resourceId}` : "Datasource";
+    case "pipeline_editor":
+      return "New Pipeline";
   }
+}
+
+function matchesQuery(text: string, q: string): boolean {
+  if (!q) return true;
+  return text.toLowerCase().includes(q.toLowerCase());
 }
 
 export function NavTree() {
@@ -35,8 +58,9 @@ export function NavTree() {
   const activeId = useTabs((s) => s.activeId);
   const close = useTabs((s) => s.close);
   const pin = useTabs((s) => s.pin);
+  const addr = useConnection((s) => s.addr);
 
-  const [search, setSearch] = useState("");
+  const [query, setQuery] = useState("");
   const [adding, setAdding] = useState(false);
   const [draftName, setDraftName] = useState("");
   const [expanded, setExpanded] = useState<Record<number, boolean>>({});
@@ -47,11 +71,47 @@ export function NavTree() {
     }
   }, [applicationsLoaded, refreshApps]);
 
-  const filtered = applications.filter((a) => {
-    if (!search) return true;
-    const q = search.toLowerCase();
-    return a.name.toLowerCase().includes(q);
-  });
+  const filtered = applications.filter((a) => matchesQuery(a.name, query));
+
+  const onPickHit = async (hit: SearchHit) => {
+    switch (hit.kind) {
+      case "Pipeline":
+        await openTab({
+          kind: "pipeline",
+          resourceId: hit.id,
+          title: hit.title,
+        });
+        return;
+      case "Datasource":
+        await openTab({
+          kind: "datasource",
+          resourceId: hit.id,
+          title: hit.title,
+        });
+        return;
+      case "Application":
+        await openTab({
+          kind: "application",
+          resourceId: hit.id,
+          title: hit.title,
+        });
+        return;
+      case "Dashboard":
+        await openTab({
+          kind: "application_dashboard",
+          resourceId: hit.id,
+          title: titleFor("application_dashboard", hit.id),
+        });
+        return;
+      case "ClusterNode":
+        await openTab({
+          kind: "cluster",
+          resourceId: null,
+          title: "Cluster",
+        });
+        return;
+    }
+  };
 
   const onCreate = async () => {
     const name = draftName.trim();
@@ -79,15 +139,7 @@ export function NavTree() {
       </div>
 
       <div className="px-2 pt-2">
-        <div className="relative">
-          <Search size={11} className="absolute left-2 top-1/2 -translate-y-1/2 text-gray-400" />
-          <input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search applications"
-            className="w-full pl-7 pr-2 py-1 text-xs bg-gray-100 dark:bg-neutral-700 rounded border-0 focus:outline-none focus:ring-1 focus:ring-accent-blue"
-          />
-        </div>
+        <SearchBox query={query} onQueryChange={setQuery} onPick={onPickHit} addr={addr} />
       </div>
 
       <nav className="flex-1 overflow-y-auto py-2 px-1 space-y-0.5 text-xs">
@@ -105,7 +157,7 @@ export function NavTree() {
         </button>
 
         <div className="px-2 pt-3 pb-1 flex items-center justify-between text-[10px] font-semibold uppercase tracking-wider text-gray-500 dark:text-neutral-400">
-          <span>Applications ({applications.length})</span>
+          <span>Applications ({filtered.length})</span>
         </div>
 
         {adding && (
@@ -129,7 +181,9 @@ export function NavTree() {
 
         {filtered.length === 0 && !adding && (
           <p className="px-2 py-3 text-[11px] text-gray-400">
-            {applications.length === 0 ? "No applications yet — click + to add" : "no matches"}
+            {applications.length === 0
+              ? "No applications yet — click + to add"
+              : "no matches"}
           </p>
         )}
 
@@ -154,12 +208,20 @@ export function NavTree() {
                   {isOpen ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
                 </button>
                 <button
-                  onClick={() => void openTab({ kind: "application", resourceId: String(app.id), title: app.name })}
+                  onClick={() =>
+                    void openTab({
+                      kind: "application",
+                      resourceId: String(app.id),
+                      title: app.name,
+                    })
+                  }
                   className="flex-1 text-left truncate"
                   title={app.name}
                 >
                   {app.name}
-                  {!app.enabled && <span className="ml-1 text-[9px] text-gray-400">·paused</span>}
+                  {!app.enabled && (
+                    <span className="ml-1 text-[9px] text-gray-400">·paused</span>
+                  )}
                 </button>
                 <button
                   aria-label={app.enabled ? "Disable" : "Enable"}
@@ -173,7 +235,8 @@ export function NavTree() {
                   aria-label="Delete application"
                   title="Delete application"
                   onClick={() => {
-                    if (confirm(`Delete application "${app.name}"?`)) void deleteApp(app.id);
+                    if (confirm(`Delete application "${app.name}"?`))
+                      void deleteApp(app.id);
                   }}
                   className="opacity-0 group-hover:opacity-100 p-0.5 text-gray-400 hover:text-accent-red"
                 >
@@ -185,19 +248,29 @@ export function NavTree() {
                   <ChildRow
                     icon={<LayoutDashboard size={10} />}
                     label="Dashboard"
-                    active={isActive(tabs, activeId, "application", String(app.id))}
+                    active={isActive(
+                      tabs,
+                      activeId,
+                      "application_dashboard",
+                      String(app.id),
+                    )}
                     onClick={() =>
                       void openTab({
-                        kind: "application",
+                        kind: "application_dashboard",
                         resourceId: String(app.id),
-                        title: app.name,
+                        title: titleFor("application_dashboard", String(app.id)),
                       })
                     }
                   />
                   <ChildRow
                     icon={<Workflow size={10} />}
                     label="Pipelines"
-                    active={isActive(tabs, activeId, "application_pipelines", String(app.id))}
+                    active={isActive(
+                      tabs,
+                      activeId,
+                      "application_pipelines",
+                      String(app.id),
+                    )}
                     onClick={() =>
                       void openTab({
                         kind: "application_pipelines",
@@ -209,7 +282,12 @@ export function NavTree() {
                   <ChildRow
                     icon={<Database size={10} />}
                     label="Datasources"
-                    active={isActive(tabs, activeId, "application_datasources", String(app.id))}
+                    active={isActive(
+                      tabs,
+                      activeId,
+                      "application_datasources",
+                      String(app.id),
+                    )}
                     onClick={() =>
                       void openTab({
                         kind: "application_datasources",

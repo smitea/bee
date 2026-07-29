@@ -9,3 +9,4 @@ export * from "./audit";
 export * from "./datasources";
 export * from "./pipelines";
 export * from "./plugins";
+export * from "./search";

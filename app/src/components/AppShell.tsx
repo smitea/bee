@@ -9,8 +9,10 @@ import { useApplications } from "../state/applicationsStore";
 import { ClusterDashboard } from "../pages/ClusterDashboard";
 import { PipelinesPage } from "../pages/PipelinesPage";
 import { PipelineDetail } from "../pages/PipelineDetail";
+import { PipelineEditor } from "../pages/PipelineEditor";
 import { DataSources } from "../pages/DataSources";
 import { ApplicationOverview } from "../pages/ApplicationOverview";
+import { DashboardPage } from "../pages/DashboardPage";
 import { X, Pin, PinOff } from "lucide-react";
 
 export function AppShell({ children }: { children?: ReactNode }) {
@@ -67,6 +69,13 @@ function PageTabs() {
         return <PipelinesPage />;
       case "application_datasources":
         return <DataSources />;
+      case "application_dashboard": {
+        const id = Number(active.resource_id);
+        if (!Number.isFinite(id)) {
+          return <p className="text-xs text-gray-400">invalid application id</p>;
+        }
+        return <DashboardPage applicationId={id} />;
+      }
       case "pipeline": {
         const id = Number(active.resource_id);
         if (!Number.isFinite(id)) {
@@ -74,6 +83,8 @@ function PageTabs() {
         }
         return <PipelineDetail pipelineId={id} />;
       }
+      case "pipeline_editor":
+        return <PipelineEditor />;
       case "datasource":
         return <p className="text-xs text-gray-400">datasource detail · coming in a later slice</p>;
     }

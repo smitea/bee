@@ -7,8 +7,10 @@ export type TabKind =
   | "application"
   | "application_pipelines"
   | "application_datasources"
+  | "application_dashboard"
   | "pipeline"
-  | "datasource";
+  | "datasource"
+  | "pipeline_editor";
 
 export interface TabRow {
   id: number;
@@ -36,8 +38,10 @@ function asKind(k: string): TabKind {
     case "application":
     case "application_pipelines":
     case "application_datasources":
+    case "application_dashboard":
     case "pipeline":
     case "datasource":
+    case "pipeline_editor":
       return k;
     default:
       return "cluster";
