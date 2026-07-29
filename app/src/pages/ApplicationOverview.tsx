@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { LayoutDashboard, Workflow, Database, Download, Upload } from "lucide-react";
 
 import { useApplications } from "../state/applicationsStore";
-import type { ApplicationView, ImportReportView } from "../ipc/applications";
+import type { ApplicationView, DisableReport, ImportReportView } from "../ipc/applications";
 import {
   applicationExport,
   applicationImport,
@@ -17,10 +17,18 @@ interface Props {
 export function ApplicationOverview({ applicationId }: Props) {
   const applications = useApplications((s) => s.items);
   const refresh = useApplications((s) => s.refresh);
-  const setEnabled = useApplications((s) => s.setEnabled);
+  const enableAction = useApplications((s) => s.enable);
+  const disableAction = useApplications((s) => s.disable);
   const app = applications.find((a) => a.id === applicationId);
 
   const [events, setEvents] = useState<AuditEventView[]>([]);
+  const [lifecycleState, setLifecycleState] = useState<
+    | { kind: "idle" }
+    | { kind: "busy" }
+    | { kind: "enabled" }
+    | { kind: "disabled"; report: DisableReport }
+    | { kind: "error"; message: string }
+  >({ kind: "idle" });
 
   const [exportPass, setExportPass] = useState("");
   const [exportPath, setExportPath] = useState("");
@@ -75,22 +83,73 @@ export function ApplicationOverview({ applicationId }: Props) {
     }
   };
 
+  const onEnable = async () => {
+    setLifecycleState({ kind: "busy" });
+    try {
+      await enableAction(app.id);
+      setLifecycleState({ kind: "enabled" });
+      await refresh();
+    } catch (e) {
+      setLifecycleState({ kind: "error", message: (e as Error).message });
+    }
+  };
+
+  const onDisable = async () => {
+    setLifecycleState({ kind: "busy" });
+    try {
+      const report = await disableAction(app.id);
+      setLifecycleState({ kind: "disabled", report });
+      await refresh();
+    } catch (e) {
+      setLifecycleState({ kind: "error", message: (e as Error).message });
+    }
+  };
+
   return (
     <div className="space-y-6">
       <header className="flex items-center justify-between">
         <h1 className="text-xl font-semibold">{app.name}</h1>
-        <button
-          onClick={() => void setEnabled(app.id, !app.enabled)}
-          className={[
-            "px-3 py-1 text-xs rounded border",
-            app.enabled
-              ? "border-gray-200 dark:border-neutral-700 hover:bg-gray-50 dark:hover:bg-neutral-700"
-              : "bg-accent-blue text-white border-transparent hover:bg-accent-blue/90",
-          ].join(" ")}
-        >
-          {app.enabled ? "Disable" : "Enable"}
-        </button>
+        <div className="flex items-center gap-2">
+          {app.enabled ? (
+            <button
+              data-testid="disable-app"
+              onClick={() => void onDisable()}
+              disabled={lifecycleState.kind === "busy"}
+              className="px-3 py-1 text-xs rounded border border-gray-200 dark:border-neutral-700 hover:bg-gray-50 dark:hover:bg-neutral-700 disabled:opacity-50"
+            >
+              Disable
+            </button>
+          ) : (
+            <button
+              data-testid="enable-app"
+              onClick={() => void onEnable()}
+              disabled={lifecycleState.kind === "busy"}
+              className="px-3 py-1 text-xs rounded bg-accent-blue text-white border-transparent hover:bg-accent-blue/90 disabled:opacity-50"
+            >
+              Enable
+            </button>
+          )}
+        </div>
       </header>
+
+      {lifecycleState.kind === "enabled" && (
+        <div data-testid="lifecycle-enabled" className="text-[11px] text-accent-green">
+          Application enabled
+        </div>
+      )}
+      {lifecycleState.kind === "disabled" && (
+        <div
+          data-testid="disable-summary"
+          className="text-[11px] text-gray-600 dark:text-neutral-300 bg-white dark:bg-neutral-800 border border-gray-200 dark:border-neutral-700 rounded-md p-2"
+        >
+          snapshot taken_at={lifecycleState.report.snapshot.taken_at} · pipelines:{" "}
+          {lifecycleState.report.pipelines.length} · datasources:{" "}
+          {lifecycleState.report.datasources.length}
+        </div>
+      )}
+      {lifecycleState.kind === "error" && (
+        <div className="text-[11px] text-accent-red">{lifecycleState.message}</div>
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
         <Tile icon={<LayoutDashboard size={14} />} label="Dashboard" sub="drag/resize grid · coming in a later slice" />

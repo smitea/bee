@@ -4,6 +4,8 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 const applicationsList = vi.fn();
 const applicationCreate = vi.fn();
 const applicationSetEnabled = vi.fn();
+const applicationEnable = vi.fn();
+const applicationDisable = vi.fn();
 const applicationDelete = vi.fn();
 const auditQuery = vi.fn();
 const applicationExport = vi.fn();
@@ -13,6 +15,8 @@ vi.mock("../../ipc/applications", () => ({
   applicationsList,
   applicationCreate,
   applicationSetEnabled,
+  applicationEnable,
+  applicationDisable,
   applicationDelete,
   applicationExport,
   applicationImport,
@@ -27,6 +31,8 @@ beforeEach(() => {
   applicationsList.mockReset();
   applicationCreate.mockReset();
   applicationSetEnabled.mockReset();
+  applicationEnable.mockReset();
+  applicationDisable.mockReset();
   applicationDelete.mockReset();
   applicationExport.mockReset();
   applicationImport.mockReset();
@@ -38,6 +44,29 @@ beforeEach(() => {
   auditQuery.mockResolvedValue([]);
   applicationExport.mockResolvedValue(undefined);
   applicationImport.mockResolvedValue({ created: ["alpha"], skipped: [] });
+  applicationEnable.mockImplementation(async (id: number) => ({
+    id,
+    name: "alpha",
+    enabled: true,
+    display_order: 1,
+    created_at: 0,
+  }));
+  applicationDisable.mockImplementation(async (id: number) => ({
+    application: {
+      id,
+      name: "alpha",
+      enabled: false,
+      display_order: 1,
+      created_at: 0,
+    },
+    snapshot: {
+      application_id: id,
+      taken_at: 0,
+      payload_json: "{}",
+    },
+    pipelines: [],
+    datasources: [],
+  }));
 });
 
 describe("<ApplicationOverview> import/export", () => {
@@ -130,5 +159,51 @@ describe("<ApplicationOverview> import/export", () => {
     const { ApplicationOverview } = await import("../../pages/ApplicationOverview");
     render(<ApplicationOverview applicationId={1} />);
     await waitFor(() => expect(auditQuery).toHaveBeenCalledWith(1, 25));
+  });
+
+  it("Disable button calls application_disable and shows snapshot summary", async () => {
+    applicationDisable.mockResolvedValueOnce({
+      application: {
+        id: 1,
+        name: "alpha",
+        enabled: false,
+        display_order: 1,
+        created_at: 0,
+      },
+      snapshot: {
+        application_id: 1,
+        taken_at: 12345,
+        payload_json: '{"pipelines":[],"datasources":[]}',
+      },
+      pipelines: ["p1", "p2"],
+      datasources: ["binance"],
+    });
+    const { ApplicationOverview } = await import("../../pages/ApplicationOverview");
+    render(<ApplicationOverview applicationId={1} />);
+    const disableBtn = await screen.findByTestId("disable-app");
+    fireEvent.click(disableBtn);
+    await waitFor(() => expect(applicationDisable).toHaveBeenCalledWith(1));
+    const summary = await screen.findByTestId("disable-summary");
+    expect(summary.textContent).toMatch(/pipelines: 2/);
+    expect(summary.textContent).toMatch(/datasources: 1/);
+  });
+
+  it("Enable button calls application_enable and shows success indicator", async () => {
+    applicationsList.mockResolvedValueOnce([
+      { id: 1, name: "alpha", enabled: false, display_order: 1, created_at: 0 },
+    ]);
+    applicationEnable.mockResolvedValueOnce({
+      id: 1,
+      name: "alpha",
+      enabled: true,
+      display_order: 1,
+      created_at: 0,
+    });
+    const { ApplicationOverview } = await import("../../pages/ApplicationOverview");
+    render(<ApplicationOverview applicationId={1} />);
+    const enableBtn = await screen.findByTestId("enable-app");
+    fireEvent.click(enableBtn);
+    await waitFor(() => expect(applicationEnable).toHaveBeenCalledWith(1));
+    expect(await screen.findByText(/enabled/i)).toBeInTheDocument();
   });
 });

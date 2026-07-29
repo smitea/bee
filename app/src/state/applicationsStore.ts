@@ -1,7 +1,7 @@
 import { create } from "zustand";
 
 import * as ipc from "../ipc/applications";
-import type { ApplicationView } from "../ipc/applications";
+import type { ApplicationView, DisableReport } from "../ipc/applications";
 
 export interface ApplicationsStore {
   items: ApplicationView[];
@@ -9,6 +9,8 @@ export interface ApplicationsStore {
   refresh(): Promise<void>;
   create(name: string): Promise<ApplicationView>;
   setEnabled(id: number, enabled: boolean): Promise<void>;
+  enable(id: number): Promise<ApplicationView>;
+  disable(id: number): Promise<DisableReport>;
   delete(id: number): Promise<void>;
 }
 
@@ -29,6 +31,20 @@ export const useApplications = create<ApplicationsStore>((set) => ({
     set((s) => ({
       items: s.items.map((a) => (a.id === id ? { ...a, enabled } : a)),
     }));
+  },
+  async enable(id) {
+    const updated = await ipc.applicationEnable(id);
+    set((s) => ({
+      items: s.items.map((a) => (a.id === id ? updated : a)),
+    }));
+    return updated;
+  },
+  async disable(id) {
+    const report = await ipc.applicationDisable(id);
+    set((s) => ({
+      items: s.items.map((a) => (a.id === id ? report.application : a)),
+    }));
+    return report;
   },
   async delete(id) {
     await ipc.applicationDelete(id);

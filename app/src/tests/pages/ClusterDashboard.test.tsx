@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, fireEvent, within } from "@testing-library/react";
+import { render, screen, fireEvent, within, waitFor } from "@testing-library/react";
 
 const mocks = vi.hoisted(() => ({
   clusterStatus: vi.fn(),
@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   setAddr: vi.fn(),
   testConnection: vi.fn(),
   ping: vi.fn(),
+  rollingRestartApply: vi.fn(),
 }));
 
 vi.mock("../../ipc", async () => {
@@ -19,6 +20,7 @@ vi.mock("../../ipc", async () => {
     setAddr: mocks.setAddr,
     testConnection: mocks.testConnection,
     ping: mocks.ping,
+    rollingRestartApply: mocks.rollingRestartApply,
   };
 });
 
@@ -29,6 +31,7 @@ beforeEach(() => {
   mocks.setAddr.mockReset();
   mocks.testConnection.mockReset();
   mocks.ping.mockReset();
+  mocks.rollingRestartApply.mockReset();
 
   mocks.clusterStatus.mockResolvedValue({
     nodes: [
@@ -41,6 +44,15 @@ beforeEach(() => {
     commit_index: 12,
   });
   mocks.listJobs.mockResolvedValue([]);
+  mocks.rollingRestartApply.mockResolvedValue({
+    nodes: [
+      { id: "n1", addr: "127.0.0.1:9001" },
+      { id: "n2", addr: "127.0.0.1:9002" },
+      { id: "n3", addr: "127.0.0.1:9003" },
+    ],
+    batch_size: 1,
+    health_timeout_ms: 30_000,
+  });
 });
 
 function withClient(node: React.ReactNode) {
@@ -115,13 +127,30 @@ describe("<ClusterDashboard>", () => {
     expect(screen.getByText(/active config/i)).toBeInTheDocument();
   });
 
-  it("Rolling restart button triggers a ping round-trip on click", async () => {
-    mocks.ping.mockResolvedValueOnce("pong");
+  it("Rolling restart button calls rolling_restart_apply and shows the plan dialog", async () => {
     const { ClusterDashboard } = await import("../../pages/ClusterDashboard");
     withClient(<ClusterDashboard />);
     const btn = await screen.findByTestId("rolling-restart");
     fireEvent.click(btn);
-    await new Promise((r) => setTimeout(r, 50));
-    expect(mocks.ping).toHaveBeenCalled();
+    await waitFor(() => expect(mocks.rollingRestartApply).toHaveBeenCalled());
+    const dialog = await screen.findByTestId("rolling-restart-plan");
+    expect(dialog).toBeInTheDocument();
+    expect(within(dialog).getByText("n1")).toBeInTheDocument();
+    expect(within(dialog).getByText("n2")).toBeInTheDocument();
+    expect(within(dialog).getByText("n3")).toBeInTheDocument();
+    expect(within(dialog).getByText(/batch=1/)).toBeInTheDocument();
+  });
+
+  it("Rolling restart plan dialog can be closed", async () => {
+    const { ClusterDashboard } = await import("../../pages/ClusterDashboard");
+    withClient(<ClusterDashboard />);
+    fireEvent.click(await screen.findByTestId("rolling-restart"));
+    const dialog = await screen.findByTestId("rolling-restart-plan");
+    const buttons = within(dialog).getAllByRole("button");
+    const footerClose = buttons.find((b) => b.textContent === "Close")!;
+    fireEvent.click(footerClose);
+    await waitFor(() => {
+      expect(screen.queryByTestId("rolling-restart-plan")).not.toBeInTheDocument();
+    });
   });
 });

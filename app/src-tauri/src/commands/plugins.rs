@@ -1,53 +1,37 @@
 use serde::Serialize;
 
-#[derive(Debug, Serialize, Clone)]
-pub struct PluginInfo {
-    pub name: String,
-    pub adapter: String,
-    pub kind: String,
-}
-
-#[derive(Debug, Serialize, Clone)]
-pub struct PluginFieldSchema {
-    pub name: String,
-    pub kind: String,
-    pub required: bool,
-    pub description: Option<String>,
-}
+use crate::plugin_registry::{self, PluginRegistry, PluginSummary};
 
 #[derive(Debug, Serialize, Clone)]
 pub struct PluginSchema {
     pub name: String,
-    pub fields: Vec<PluginFieldSchema>,
+    pub adapters: serde_json::Value,
 }
 
-pub fn list() -> Vec<PluginInfo> {
-    Vec::new()
+fn registry_static() -> &'static PluginRegistry {
+    static REG: std::sync::OnceLock<PluginRegistry> = std::sync::OnceLock::new();
+    REG.get_or_init(PluginRegistry::new)
 }
 
-pub fn schema(plugin: &str) -> PluginSchema {
+pub fn list_summaries() -> Vec<PluginSummary> {
+    registry_static().list_summaries()
+}
+
+pub fn schema(name: &str) -> PluginSchema {
+    let manifest = registry_static().manifest(name);
+    let adapters = match manifest {
+        Some(m) => plugin_registry::schema_for(&m),
+        None => plugin_registry::placeholder_schema(name),
+    };
     PluginSchema {
-        name: plugin.to_string(),
-        fields: vec![
-            PluginFieldSchema {
-                name: "url".into(),
-                kind: "string".into(),
-                required: true,
-                description: Some("endpoint URL".into()),
-            },
-            PluginFieldSchema {
-                name: "api_key".into(),
-                kind: "string".into(),
-                required: false,
-                description: Some("API key (optional)".into()),
-            },
-        ],
+        name: name.to_string(),
+        adapters,
     }
 }
 
 #[tauri::command]
-pub fn plugin_list() -> Vec<PluginInfo> {
-    list()
+pub fn plugin_list() -> Vec<PluginSummary> {
+    list_summaries()
 }
 
 #[tauri::command]
@@ -59,24 +43,70 @@ pub fn plugin_schema(plugin: String) -> PluginSchema {
 mod tests {
     use super::*;
 
-    #[test]
-    fn list_starts_empty() {
-        assert!(list().is_empty());
+    fn sample_registry() -> PluginRegistry {
+        let reg = PluginRegistry::new();
+        reg.insert_manifest(
+            "id-a".into(),
+            bee_plugin_sdk::PluginManifest {
+                name: bee_plugin_sdk::PluginName("binance".into()),
+                feature_version: "1.4.2".into(),
+                abi_version: "v1".into(),
+                adapters: vec![bee_plugin_sdk::AdapterDescriptor {
+                    name: "subscribe".into(),
+                    is_input: true,
+                }],
+                handlers: vec![bee_plugin_sdk::HandlerDescriptor {
+                    name: "fib".into(),
+                }],
+            },
+        );
+        reg
     }
 
     #[test]
-    fn schema_for_any_plugin_returns_static_fields() {
-        let s = schema("binance_subscribe");
-        assert_eq!(s.name, "binance_subscribe");
-        assert!(!s.fields.is_empty());
-        let names: Vec<&str> = s.fields.iter().map(|f| f.name.as_str()).collect();
-        assert!(names.contains(&"url"));
+    fn empty_registry_returns_empty_plugin_list() {
+        let reg = PluginRegistry::new();
+        let summaries = reg.list_summaries();
+        assert!(summaries.is_empty());
     }
 
     #[test]
-    fn schema_for_unknown_plugin_still_returns_static_fields() {
-        let s = schema("unknown");
-        assert_eq!(s.name, "unknown");
-        assert!(!s.fields.is_empty());
+    fn populated_registry_plugin_list_includes_all_summaries() {
+        let reg = sample_registry();
+        let summaries = reg.list_summaries();
+        assert_eq!(summaries.len(), 1);
+        let s = &summaries[0];
+        assert_eq!(s.id, "id-a");
+        assert_eq!(s.name, "binance");
+        assert_eq!(s.version, "1.4.2");
+        assert_eq!(s.adapters, vec!["subscribe".to_string()]);
+        assert_eq!(s.handlers, vec!["fib".to_string()]);
+    }
+
+    #[test]
+    fn schema_for_known_plugin_returns_connection_shape() {
+        let reg = sample_registry();
+        let s = PluginSchema {
+            name: "id-a".into(),
+            adapters: plugin_registry::schema_for(
+                &reg.manifest("id-a").expect("manifest"),
+            ),
+        };
+        let adapter = s.adapters.get("subscribe").expect("adapter");
+        let connection = adapter.get("connection").expect("connection");
+        assert!(connection.get("url").is_some());
+        assert!(connection.get("credentials").is_some());
+        assert!(connection.get("rate_limit").is_some());
+    }
+
+    #[test]
+    fn schema_for_unknown_plugin_returns_placeholder_with_requested_name() {
+        let s = schema("does_not_exist");
+        assert_eq!(s.name, "does_not_exist");
+        let adapter = s.adapters.get("does_not_exist").expect("adapter");
+        let connection = adapter.get("connection").expect("connection");
+        assert!(connection.get("url").is_some());
+        assert!(connection.get("credentials").is_some());
+        assert!(connection.get("rate_limit").is_some());
     }
 }

@@ -1,9 +1,17 @@
 import { invoke } from "@tauri-apps/api/core";
 
+export interface PluginSummary {
+  id: string;
+  name: string;
+  version: string;
+  adapters: string[];
+  handlers: string[];
+}
+
 export interface PluginInfo {
   name: string;
-  adapter: string;
-  kind: string;
+  adapter?: string;
+  kind?: string;
 }
 
 export interface PluginFieldSchema {
@@ -15,11 +23,12 @@ export interface PluginFieldSchema {
 
 export interface PluginSchema {
   name: string;
-  fields: PluginFieldSchema[];
+  adapters: Record<string, unknown>;
+  fields?: PluginFieldSchema[];
 }
 
-export async function pluginList(): Promise<PluginInfo[]> {
-  return invoke<PluginInfo[]>("plugin_list");
+export async function pluginList(): Promise<PluginSummary[]> {
+  return invoke<PluginSummary[]>("plugin_list");
 }
 
 export async function pluginSchema(plugin: string): Promise<PluginSchema> {

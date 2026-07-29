@@ -3,6 +3,7 @@ pub mod connection;
 pub mod ping;
 pub mod plugins;
 pub mod profiles;
+pub mod rolling_restart;
 pub mod settings;
 pub mod tabs;
 pub mod applications;

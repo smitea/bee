@@ -6,15 +6,17 @@ import {
   AlertTriangle,
   RefreshCw,
   RotateCw,
+  X,
 } from "lucide-react";
 
 import { useConnection } from "../state/connectionStore";
 import {
   clusterStatus,
   listJobs,
-  ping,
+  rollingRestartApply,
   type ClusterMetrics,
   type JobSummary,
+  type RollingRestartPlan,
 } from "../ipc";
 
 const REFRESH_MS = 5000;
@@ -86,11 +88,17 @@ export function ClusterDashboard() {
   const averageRuntimeLabel = "no data";
 
   const [restartState, setRestartState] = useState<"idle" | "running" | "done" | "error">("idle");
+  const [planDialog, setPlanDialog] = useState<RollingRestartPlan | null>(null);
 
   const onRollingRestart = async () => {
     setRestartState("running");
     try {
-      await ping(addr);
+      const nodeAddrs = (clusterQ.data?.nodes ?? []).map((n) => ({
+        id: `n${n.id}`,
+        addr: addr,
+      }));
+      const plan = await rollingRestartApply(addr, nodeAddrs);
+      setPlanDialog(plan);
       setRestartState("done");
     } catch {
       setRestartState("error");
@@ -308,14 +316,70 @@ export function ClusterDashboard() {
               ].join(" ")}
             >
               {restartState === "running"
-                ? "pinging…"
+                ? "planning…"
                 : restartState === "done"
-                  ? "ping ok"
-                  : "ping failed"}
+                  ? "plan ready"
+                  : "plan failed"}
             </div>
           )}
         </div>
       </section>
+
+      {planDialog && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Rolling restart plan"
+          data-testid="rolling-restart-plan"
+        >
+          <div className="bg-white dark:bg-neutral-800 rounded-lg shadow-xl w-[520px] max-w-[95vw] max-h-[90vh] flex flex-col">
+            <header className="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-neutral-700">
+              <h2 className="text-sm font-semibold">Rolling restart plan</h2>
+              <button
+                type="button"
+                onClick={() => setPlanDialog(null)}
+                aria-label="Close"
+                className="p-1 rounded text-gray-500 hover:bg-gray-100 dark:hover:bg-neutral-700"
+              >
+                <X size={14} />
+              </button>
+            </header>
+            <div className="p-4 space-y-3 text-xs">
+              <div className="text-gray-500 dark:text-neutral-400">
+                batch={planDialog.batch_size} · timeout_ms={planDialog.health_timeout_ms}
+              </div>
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="text-[10px] uppercase tracking-wider text-gray-500 dark:text-neutral-400">
+                    <th className="text-left font-medium pb-2">Order</th>
+                    <th className="text-left font-medium pb-2">Node</th>
+                    <th className="text-left font-medium pb-2">Address</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {planDialog.nodes.map((n, idx) => (
+                    <tr key={n.id} className="border-t border-gray-100 dark:border-neutral-800">
+                      <td className="py-2 font-mono">{idx + 1}</td>
+                      <td className="py-2 font-mono">{n.id}</td>
+                      <td className="py-2 font-mono">{n.addr}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <footer className="px-4 py-3 border-t border-gray-200 dark:border-neutral-700 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setPlanDialog(null)}
+                className="px-3 py-1 text-xs rounded border border-gray-200 dark:border-neutral-700 hover:bg-gray-50 dark:hover:bg-neutral-700"
+              >
+                Close
+              </button>
+            </footer>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
