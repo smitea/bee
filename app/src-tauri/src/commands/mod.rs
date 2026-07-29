@@ -1,4 +1,5 @@
 pub mod cluster;
+pub mod clusters;
 pub mod connection;
 pub mod ping;
 pub mod plugins;
@@ -6,6 +7,7 @@ pub mod profiles;
 pub mod rolling_restart;
 pub mod settings;
 pub mod tabs;
+pub mod tenant;
 pub mod applications;
 pub mod audit;
 pub mod datasources;

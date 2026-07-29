@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Database, Plus, Trash2, X, Check } from "lucide-react";
+import { Database, Plus, Trash2, X, Check, Plug } from "lucide-react";
 
 import {
   datasourceList,
@@ -25,6 +25,10 @@ export function DatasourcesPage() {
     queryFn: () => datasourceList(),
     refetchInterval: REFRESH_MS,
   });
+  const pluginsQ = useQuery<PluginInfo[]>({
+    queryKey: ["plugins-list"],
+    queryFn: () => pluginList(),
+  });
   const [showAdd, setShowAdd] = useState(false);
   const all = listQ.data ?? [];
 
@@ -37,7 +41,17 @@ export function DatasourcesPage() {
   return (
     <div className="space-y-6">
       <header className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold">Datasources</h1>
+        <div className="flex items-center gap-3">
+          <h1 className="text-xl font-semibold">Datasources</h1>
+          <span
+            data-testid="plugins-badge"
+            className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] rounded-full bg-gray-100 dark:bg-neutral-800 text-gray-600 dark:text-neutral-300 border border-gray-200 dark:border-neutral-700"
+            title="Plugins registered from bee_plugin_sdk"
+          >
+            <Plug size={10} />
+            Plugins registered: {pluginsQ.data?.length ?? 0}
+          </span>
+        </div>
         <button
           type="button"
           data-testid="add-datasource"

@@ -67,6 +67,28 @@ describe("<DatasourcesPage>", () => {
     expect(screen.getByText(/no datasources/i)).toBeInTheDocument();
   });
 
+  it("renders the plugins registered badge with count", async () => {
+    mocks.pluginList.mockReset();
+    mocks.pluginList.mockResolvedValue([
+      { name: "binance_subscribe", adapter: "binance_subscribe", kind: "input" },
+      { name: "kafka_emit", adapter: "kafka_emit", kind: "output" },
+    ]);
+    const { DatasourcesPage } = await import("../../pages/DatasourcesPage");
+    withClient(<DatasourcesPage />);
+    const badge = await screen.findByTestId("plugins-badge");
+    await waitFor(() =>
+      expect(badge.textContent).toMatch(/Plugins registered: 2/),
+    );
+  });
+
+  it("renders zero count when no plugins registered", async () => {
+    mocks.pluginList.mockResolvedValueOnce([]);
+    const { DatasourcesPage } = await import("../../pages/DatasourcesPage");
+    withClient(<DatasourcesPage />);
+    const badge = await screen.findByTestId("plugins-badge");
+    expect(badge.textContent).toMatch(/Plugins registered: 0/);
+  });
+
   it("renders the empty plugin list and shows the Add button", async () => {
     const { DatasourcesPage } = await import("../../pages/DatasourcesPage");
     withClient(<DatasourcesPage />);
@@ -87,7 +109,7 @@ describe("<DatasourcesPage>", () => {
   });
 
   it("Add button opens modal and renders schema fields when plugin is selected", async () => {
-    mocks.pluginList.mockResolvedValueOnce([
+    mocks.pluginList.mockResolvedValue([
       { name: "binance_subscribe", adapter: "binance_subscribe", kind: "input" },
     ]);
     const { DatasourcesPage } = await import("../../pages/DatasourcesPage");
@@ -108,7 +130,7 @@ describe("<DatasourcesPage>", () => {
   });
 
   it("Connect and Save calls datasource_create with name + plugin + config_json", async () => {
-    mocks.pluginList.mockResolvedValueOnce([
+    mocks.pluginList.mockResolvedValue([
       { name: "binance_subscribe", adapter: "binance_subscribe", kind: "input" },
     ]);
     const { DatasourcesPage } = await import("../../pages/DatasourcesPage");

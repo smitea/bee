@@ -16,7 +16,9 @@ import { useApplications } from "../state/applicationsStore";
 import { useTabs } from "../state/tabsStore";
 import type { TabKind } from "../state/tabsStore";
 import { useConnection } from "../state/connectionStore";
+import { useTenant } from "../state/tenantStore";
 import { SearchBox } from "./SearchBox";
+import { ClusterProfilesSidebar } from "./ClusterProfilesSidebar";
 import type { SearchHit } from "../ipc/search";
 
 function titleFor(kind: TabKind, resourceId: string | null): string {
@@ -63,13 +65,23 @@ export function NavTree() {
   const [query, setQuery] = useState("");
   const [adding, setAdding] = useState(false);
   const [draftName, setDraftName] = useState("");
+  const [draftTenant, setDraftTenant] = useState("");
   const [expanded, setExpanded] = useState<Record<number, boolean>>({});
+  const activeTenant = useTenant((s) => s.tenant);
+  const tenantHydrated = useTenant((s) => s.hydrated);
+  const refreshTenant = useTenant((s) => s.refresh);
 
   useEffect(() => {
     if (!applicationsLoaded) {
       void refreshApps();
     }
   }, [applicationsLoaded, refreshApps]);
+
+  useEffect(() => {
+    if (!tenantHydrated) {
+      void refreshTenant();
+    }
+  }, [tenantHydrated, refreshTenant]);
 
   const filtered = applications.filter((a) => matchesQuery(a.name, query));
 
@@ -116,8 +128,17 @@ export function NavTree() {
   const onCreate = async () => {
     const name = draftName.trim();
     if (!name) return;
-    await createApp(name);
+    const tenantRaw = draftTenant.trim();
+    const tenant = tenantRaw.length > 0 ? Number(tenantRaw) : activeTenant;
+    const tenantValid =
+      Number.isFinite(tenant) && tenant >= 0 && tenant <= 65535;
+    if (!tenantValid) {
+      alert("Tenant must be a number between 0 and 65535");
+      return;
+    }
+    await createApp(name, tenant);
     setDraftName("");
+    setDraftTenant("");
     setAdding(false);
   };
 
@@ -161,7 +182,7 @@ export function NavTree() {
         </div>
 
         {adding && (
-          <div className="px-2 pb-2">
+          <div className="px-2 pb-2 space-y-1">
             <input
               value={draftName}
               onChange={(e) => setDraftName(e.target.value)}
@@ -170,11 +191,27 @@ export function NavTree() {
                 if (e.key === "Escape") {
                   setAdding(false);
                   setDraftName("");
+                  setDraftTenant("");
                 }
               }}
               placeholder="Application name"
               className="w-full px-2 py-1 text-xs rounded border border-gray-200 dark:border-neutral-700 bg-white dark:bg-neutral-800"
               autoFocus
+            />
+            <input
+              aria-label="Application tenant"
+              value={draftTenant}
+              onChange={(e) => setDraftTenant(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void onCreate();
+                if (e.key === "Escape") {
+                  setAdding(false);
+                  setDraftName("");
+                  setDraftTenant("");
+                }
+              }}
+              placeholder={`tenant (0..65535, default ${activeTenant})`}
+              className="w-full px-2 py-1 text-xs rounded border border-gray-200 dark:border-neutral-700 bg-white dark:bg-neutral-800 font-mono"
             />
           </div>
         )}
@@ -321,6 +358,8 @@ export function NavTree() {
           Toggle pinned
         </button>
       </div>
+
+      <ClusterProfilesSidebar />
     </div>
   );
 }

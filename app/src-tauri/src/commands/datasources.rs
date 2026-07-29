@@ -50,15 +50,27 @@ pub fn datasource_create(
     config_json: String,
     tenant: i64,
 ) -> CmdResult<DatasourceView> {
+    let tenant_u16 = if tenant < 0 || tenant > u16::MAX as i64 {
+        return Err(CmdError {
+            message: crate::tenant::validate_tenant(0)
+                .err()
+                .unwrap_or_else(|| "datasource tenant out of range".into()),
+        });
+    } else {
+        tenant as u16
+    };
     let db = db_handle(&app)?;
     let conn = db.lock().map_err(CmdError::from)?;
-    let created = db::datasources::create(&conn, &name, &plugin, &config_json, tenant)
+    let created = db::datasources::create(&conn, &name, &plugin, &config_json, tenant_u16 as i64)
         .map_err(CmdError::from)?;
     let _ = db::audit::record(&conn, db::audit::NewAuditEvent {
         actor: "user",
         action: "datasource.create",
         result: "Success",
-        summary: &format!("Datasource \"{}\" created", created.name),
+        summary: &format!(
+            "Datasource \"{}\" created (tenant={})",
+            created.name, created.tenant
+        ),
         resource_kind: Some("datasource"),
         resource_id: Some(&created.name),
         application_id: None,

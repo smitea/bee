@@ -9,6 +9,7 @@ pub mod import_export;
 pub mod plugin_registry;
 pub mod rolling_restart;
 pub mod settings_io;
+pub mod tenant;
 
 fn db_file_path(app: &tauri::AppHandle) -> Option<PathBuf> {
     app.path()
@@ -92,6 +93,13 @@ pub fn run() {
             commands::profiles::profiles_list,
             commands::profiles::profile_save,
             commands::profiles::profile_remove,
+            commands::clusters::cluster_profile_list,
+            commands::clusters::cluster_profile_save,
+            commands::clusters::cluster_profile_remove,
+            commands::clusters::cluster_profile_activate,
+            commands::clusters::cluster_profile_migrate_legacy,
+            commands::tenant::tenant_get,
+            commands::tenant::tenant_set,
             commands::applications::applications_list,
             commands::applications::application_create,
             commands::applications::application_set_enabled,

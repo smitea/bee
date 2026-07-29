@@ -12,6 +12,7 @@ pub struct ApplicationView {
     pub name: String,
     pub enabled: bool,
     pub display_order: i64,
+    pub tenant: u16,
     pub created_at: i64,
 }
 
@@ -159,6 +160,7 @@ fn to_view(a: db::applications::Application) -> ApplicationView {
         name: a.name,
         enabled: a.enabled,
         display_order: a.display_order,
+        tenant: a.tenant,
         created_at: a.created_at,
     }
 }
@@ -282,15 +284,37 @@ pub fn applications_list(app: AppHandle) -> CmdResult<Vec<ApplicationView>> {
 }
 
 #[tauri::command]
-pub fn application_create(app: AppHandle, name: String) -> CmdResult<ApplicationView> {
+pub fn application_create(
+    app: AppHandle,
+    name: String,
+    tenant: Option<u16>,
+) -> CmdResult<ApplicationView> {
+    let tenant = match tenant {
+        Some(t) => crate::tenant::validate_tenant(t).map_err(CmdError::from)?,
+        None => {
+            let db = db_handle(&app)?;
+            let conn = db.lock().map_err(CmdError::from)?;
+            let raw = db::settings::get(&conn, "tenant").map_err(CmdError::from)?;
+            raw.as_deref()
+                .and_then(|s| s.parse::<u16>().ok())
+                .unwrap_or(0)
+        }
+    };
     let db = db_handle(&app)?;
     let conn = db.lock().map_err(CmdError::from)?;
-    let created = db::applications::create(&conn, &name).map_err(CmdError::from)?;
+    let created = if tenant == 0 {
+        db::applications::create(&conn, &name).map_err(CmdError::from)?
+    } else {
+        db::applications::create_with_tenant(&conn, &name, tenant).map_err(CmdError::from)?
+    };
     let _ = db::audit::record(&conn, db::audit::NewAuditEvent {
         actor: "user",
         action: "application.create",
         result: "Success",
-        summary: &format!("Application \"{}\" created", created.name),
+        summary: &format!(
+            "Application \"{}\" created (tenant={})",
+            created.name, created.tenant
+        ),
         resource_kind: Some("application"),
         resource_id: None,
         application_id: Some(created.id),

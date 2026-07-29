@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 
 import { useConnection } from "../state/connectionStore";
-import { setAddr, testConnection, settingsGet, settingsPut } from "../ipc";
+import { useTenant } from "../state/tenantStore";
+import { setAddr, testConnection, settingsGet, settingsPut, tenantGet, tenantSet } from "../ipc";
 
 interface Props {
   open: boolean;
@@ -18,6 +19,14 @@ export function SettingsModal({ open, onClose }: Props) {
   const [testState, setTestState] = useState<string>("");
   const [initial, setInitial] = useState(addr);
 
+  const [tenantDraft, setTenantDraft] = useState<string>("0");
+  const [tenantInitial, setTenantInitial] = useState<string>("0");
+  const [tenantSaveState, setTenantSaveState] = useState<"idle" | "Saving" | "Saved" | "Error">("idle");
+  const [tenantError, setTenantError] = useState<string>("");
+  const setStoreTenant = useTenant((s) => s.set);
+  const tenantHydrated = useTenant((s) => s.hydrated);
+  const refreshTenant = useTenant((s) => s.refresh);
+
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
@@ -26,6 +35,11 @@ export function SettingsModal({ open, onClose }: Props) {
       if (!cancelled && stored !== null) {
         setDraft(stored);
         setInitial(stored);
+      }
+      const t = await tenantGet();
+      if (!cancelled) {
+        setTenantDraft(String(t));
+        setTenantInitial(String(t));
       }
     })();
     return () => {
@@ -48,6 +62,31 @@ export function SettingsModal({ open, onClose }: Props) {
     }, DEBOUNCE_MS);
     return () => clearTimeout(t);
   }, [draft, open, initial]);
+
+  useEffect(() => {
+    if (!open) return;
+    if (tenantDraft === tenantInitial) return;
+    setTenantSaveState("Saving");
+    setTenantError("");
+    const parsed = Number(tenantDraft);
+    if (!Number.isFinite(parsed) || parsed < 0 || parsed > 65535) {
+      setTenantSaveState("Error");
+      setTenantError("tenant must be a number between 0 and 65535");
+      return;
+    }
+    const t = setTimeout(async () => {
+      try {
+        await tenantSet(parsed);
+        await setStoreTenant(parsed);
+        setTenantSaveState("Saved");
+        setTenantInitial(tenantDraft);
+      } catch (e) {
+        setTenantSaveState("Error");
+        setTenantError(String(e));
+      }
+    }, DEBOUNCE_MS);
+    return () => clearTimeout(t);
+  }, [tenantDraft, open, tenantInitial, setStoreTenant]);
 
   const onTest = async () => {
     setTestState("Testing…");
@@ -77,57 +116,102 @@ export function SettingsModal({ open, onClose }: Props) {
       aria-modal="true"
       aria-label="Settings"
     >
-      <div className="bg-white dark:bg-neutral-800 rounded-lg shadow-xl w-[640px] max-w-[95vw] h-[480px] flex">
+      <div className="bg-white dark:bg-neutral-800 rounded-lg shadow-xl w-[640px] max-w-[95vw] h-[520px] flex">
         <aside className="w-44 border-r border-gray-200 dark:border-neutral-700 p-3 text-xs">
           <h2 className="text-sm font-semibold mb-2">Settings</h2>
           <nav className="space-y-1">
             <Section active label="Connection" />
+            <Section label="Tenant" />
           </nav>
         </aside>
-        <main className="flex-1 p-4 flex flex-col">
-          <div className="flex items-center justify-between mb-3">
-            <h3 className="text-sm font-medium">Connection</h3>
-            <span
-              className={
-                saveState === "Saved"
-                  ? "text-[10px] text-accent-green"
-                  : saveState === "Error"
-                    ? "text-[10px] text-accent-red"
-                    : saveState === "Saving"
-                      ? "text-[10px] text-gray-500"
-                      : "text-[10px] text-transparent"
-              }
-              aria-live="polite"
-            >
-              {saveState === "idle" ? "·" : saveState}
-            </span>
-          </div>
-          <label className="text-xs text-gray-500 dark:text-neutral-400" htmlFor="addr">
-            AdminServer address
-          </label>
-          <input
-            id="addr"
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            placeholder="127.0.0.1:8702"
-            className="mt-1 px-2 py-1 text-xs font-mono rounded border border-gray-200 dark:border-neutral-700 bg-white dark:bg-neutral-900"
-          />
-          {testState && (
-            <p className="mt-2 text-[10px] text-gray-500 dark:text-neutral-400">{testState}</p>
-          )}
+        <main className="flex-1 p-4 flex flex-col gap-4 overflow-y-auto">
+          <section>
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-sm font-medium">Connection</h3>
+              <span
+                className={
+                  saveState === "Saved"
+                    ? "text-[10px] text-accent-green"
+                    : saveState === "Error"
+                      ? "text-[10px] text-accent-red"
+                      : saveState === "Saving"
+                        ? "text-[10px] text-gray-500"
+                        : "text-[10px] text-transparent"
+                }
+                aria-live="polite"
+              >
+                {saveState === "idle" ? "·" : saveState}
+              </span>
+            </div>
+            <label className="text-xs text-gray-500 dark:text-neutral-400" htmlFor="addr">
+              AdminServer address
+            </label>
+            <input
+              id="addr"
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              placeholder="127.0.0.1:8702"
+              className="mt-1 w-full px-2 py-1 text-xs font-mono rounded border border-gray-200 dark:border-neutral-700 bg-white dark:bg-neutral-900"
+            />
+            {testState && (
+              <p className="mt-2 text-[10px] text-gray-500 dark:text-neutral-400">{testState}</p>
+            )}
+            <div className="mt-3 flex items-center gap-2 justify-end">
+              <button
+                onClick={onTest}
+                className="px-3 py-1 text-xs rounded border border-gray-200 dark:border-neutral-700 hover:bg-gray-50 dark:hover:bg-neutral-700"
+              >
+                Test Connection
+              </button>
+              <button
+                onClick={onConnect}
+                className="px-3 py-1 text-xs rounded bg-accent-blue text-white hover:bg-accent-blue/90"
+              >
+                Connect
+              </button>
+            </div>
+          </section>
+
+          <section>
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-sm font-medium">Tenant</h3>
+              <span
+                className={
+                  tenantSaveState === "Saved"
+                    ? "text-[10px] text-accent-green"
+                    : tenantSaveState === "Error"
+                      ? "text-[10px] text-accent-red"
+                      : tenantSaveState === "Saving"
+                        ? "text-[10px] text-gray-500"
+                        : "text-[10px] text-transparent"
+                }
+                aria-live="polite"
+              >
+                {tenantSaveState === "idle" ? "·" : tenantSaveState}
+              </span>
+            </div>
+            <p className="text-[10px] text-gray-500 dark:text-neutral-400 mb-2">
+              Active tenant for new Applications and Datasources.
+            </p>
+            <label className="text-xs text-gray-500 dark:text-neutral-400" htmlFor="tenant">
+              Tenant (0..65535)
+            </label>
+            <input
+              id="tenant"
+              aria-label="Active tenant"
+              value={tenantDraft}
+              onChange={(e) => setTenantDraft(e.target.value)}
+              onFocus={() => {
+                if (!tenantHydrated) void refreshTenant();
+              }}
+              className="mt-1 w-full px-2 py-1 text-xs font-mono rounded border border-gray-200 dark:border-neutral-700 bg-white dark:bg-neutral-900"
+            />
+            {tenantError && (
+              <p className="mt-2 text-[10px] text-accent-red">{tenantError}</p>
+            )}
+          </section>
+
           <div className="mt-auto flex items-center gap-2 justify-end">
-            <button
-              onClick={onTest}
-              className="px-3 py-1 text-xs rounded border border-gray-200 dark:border-neutral-700 hover:bg-gray-50 dark:hover:bg-neutral-700"
-            >
-              Test Connection
-            </button>
-            <button
-              onClick={onConnect}
-              className="px-3 py-1 text-xs rounded bg-accent-blue text-white hover:bg-accent-blue/90"
-            >
-              Connect
-            </button>
             <button
               onClick={onClose}
               className="px-3 py-1 text-xs rounded border border-gray-200 dark:border-neutral-700"
@@ -141,7 +225,7 @@ export function SettingsModal({ open, onClose }: Props) {
   );
 }
 
-function Section({ label, active }: { label: string; active: boolean }) {
+function Section({ label, active }: { label: string; active?: boolean }) {
   return (
     <span
       className={[

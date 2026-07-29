@@ -10,6 +10,7 @@ pub mod applications;
 pub mod audit;
 pub mod pipelines;
 pub mod datasources;
+pub mod clusters;
 
 pub struct Database {
     conn: Mutex<Connection>,
@@ -149,6 +150,27 @@ pub const MIGRATIONS: &[Migration] = &[
             );
         "#,
     },
+    Migration {
+        version: 9,
+        name: "applications_tenant",
+        sql: r#"
+            ALTER TABLE applications ADD COLUMN tenant INTEGER NOT NULL DEFAULT 0;
+        "#,
+    },
+    Migration {
+        version: 10,
+        name: "cluster_profiles",
+        sql: r#"
+            CREATE TABLE cluster_profiles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                label TEXT NOT NULL,
+                addr TEXT NOT NULL UNIQUE,
+                tenant INTEGER NOT NULL DEFAULT 0,
+                last_used_at INTEGER,
+                created_at INTEGER NOT NULL
+            );
+        "#,
+    },
 ];
 
 impl Database {
@@ -235,7 +257,7 @@ mod tests {
         let db = Database::open(&path).unwrap();
         assert!(path.exists());
         let applied = db.applied_versions().unwrap();
-        assert_eq!(applied, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(applied, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     }
 
     #[test]
@@ -247,7 +269,7 @@ mod tests {
         let db2 = Database::open(&path).unwrap();
         let second = db2.applied_versions().unwrap();
         assert_eq!(first, second);
-        assert_eq!(first, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(first, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     }
 
     #[test]
@@ -259,6 +281,6 @@ mod tests {
             conn.execute_batch("CREATE TABLE migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at INTEGER NOT NULL);").unwrap();
         }
         let db = Database::open(&path).unwrap();
-        assert_eq!(db.applied_versions().unwrap(), vec![1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(db.applied_versions().unwrap(), vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     }
 }

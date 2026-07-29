@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 const applicationsList = vi.fn();
 const applicationCreate = vi.fn();
@@ -12,6 +13,15 @@ const tabClose = vi.fn();
 const tabSetActive = vi.fn();
 const tabPin = vi.fn();
 const workspaceState = vi.fn();
+
+const tenantGet = vi.fn();
+const tenantSet = vi.fn();
+
+const clusterProfileList = vi.fn();
+const clusterProfileSave = vi.fn();
+const clusterProfileRemove = vi.fn();
+const clusterProfileActivate = vi.fn();
+const clusterProfileMigrateLegacy = vi.fn();
 
 vi.mock("../../ipc/applications", () => ({
   applicationsList,
@@ -27,6 +37,17 @@ vi.mock("../../ipc/tabs", () => ({
   tabPin,
   workspaceState,
 }));
+vi.mock("../../ipc/tenant", () => ({
+  tenantGet,
+  tenantSet,
+}));
+vi.mock("../../ipc/clusters", () => ({
+  clusterProfileList,
+  clusterProfileSave,
+  clusterProfileRemove,
+  clusterProfileActivate,
+  clusterProfileMigrateLegacy,
+}));
 
 beforeEach(() => {
   vi.resetModules();
@@ -41,19 +62,38 @@ beforeEach(() => {
   tabPin.mockReset();
   workspaceState.mockReset();
 
+  tenantGet.mockReset();
+  tenantSet.mockReset();
+  clusterProfileList.mockReset();
+  clusterProfileSave.mockReset();
+  clusterProfileRemove.mockReset();
+  clusterProfileActivate.mockReset();
+  clusterProfileMigrateLegacy.mockReset();
+
   applicationsList.mockResolvedValue([]);
   tabsList.mockResolvedValue([]);
   workspaceState.mockResolvedValue({ activeTabId: null });
+  tenantGet.mockResolvedValue(0);
+  tenantSet.mockResolvedValue(0);
+  clusterProfileList.mockResolvedValue([]);
+  clusterProfileMigrateLegacy.mockResolvedValue({ inserted: 0, skipped: [] });
 
   if (typeof window !== "undefined" && typeof window.confirm === "function") {
     vi.spyOn(window, "confirm").mockReturnValue(true);
   }
 });
 
+function withClient(node: React.ReactNode) {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false, gcTime: 0 } },
+  });
+  return render(<QueryClientProvider client={client}>{node}</QueryClientProvider>);
+}
+
 describe("<NavTree>", () => {
   it("renders Cluster row + Application count of zero", async () => {
     const { NavTree } = await import("../../components/NavTree");
-    render(<NavTree />);
+    withClient(<NavTree />);
     expect(screen.getByText("Cluster")).toBeInTheDocument();
     expect(screen.getByText(/Applications \(0\)/)).toBeInTheDocument();
     expect(screen.getByText(/No applications yet/)).toBeInTheDocument();
@@ -63,20 +103,20 @@ describe("<NavTree>", () => {
     tabOpen.mockResolvedValueOnce(99);
     tabsList.mockResolvedValueOnce([{ id: 99, kind: "cluster", resource_id: null, title: "Cluster", pinned: false, position: 1 }]);
     const { NavTree } = await import("../../components/NavTree");
-    render(<NavTree />);
+    withClient(<NavTree />);
     fireEvent.click(screen.getByText("Cluster"));
     expect(tabOpen).toHaveBeenCalledWith("cluster", null, "Cluster");
   });
 
-it("lists existing applications", async () => {
+  it("lists existing applications", async () => {
     applicationsList.mockResolvedValue([
-      { id: 1, name: "alpha", enabled: true, display_order: 1, created_at: 0 },
-      { id: 2, name: "beta", enabled: false, display_order: 2, created_at: 0 },
+      { id: 1, name: "alpha", enabled: true, display_order: 1, tenant: 0, created_at: 0 },
+      { id: 2, name: "beta", enabled: false, display_order: 2, tenant: 5, created_at: 0 },
     ]);
     const { useApplications } = await import("../../state/applicationsStore");
     await useApplications.getState().refresh();
     const { NavTree } = await import("../../components/NavTree");
-    render(<NavTree />);
+    withClient(<NavTree />);
     expect(await screen.findByText("alpha")).toBeInTheDocument();
     expect(screen.getByText("beta")).toBeInTheDocument();
     expect(screen.getByText(/Applications \(2\)/)).toBeInTheDocument();

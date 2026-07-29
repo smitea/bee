@@ -39,7 +39,7 @@ beforeEach(() => {
   auditQuery.mockReset();
 
   applicationsList.mockResolvedValue([
-    { id: 1, name: "alpha", enabled: true, display_order: 1, created_at: 0 },
+    { id: 1, name: "alpha", enabled: true, display_order: 1, tenant: 0, created_at: 0 },
   ]);
   auditQuery.mockResolvedValue([]);
   applicationExport.mockResolvedValue(undefined);
@@ -50,6 +50,7 @@ beforeEach(() => {
       name: "alpha",
       enabled: true,
       display_order: 1,
+      tenant: 0,
       created_at: 0,
     },
     snapshot: null,
@@ -61,6 +62,7 @@ beforeEach(() => {
       name: "alpha",
       enabled: false,
       display_order: 1,
+      tenant: 0,
       created_at: 0,
     },
     snapshot: {

@@ -8,6 +8,7 @@ pub struct Application {
     pub name: String,
     pub enabled: bool,
     pub display_order: i64,
+    pub tenant: u16,
     pub created_at: i64,
 }
 
@@ -21,7 +22,7 @@ pub struct DisableSnapshot {
 pub fn list(conn: &Connection) -> Result<Vec<Application>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, name, enabled, display_order, created_at
+            "SELECT id, name, enabled, display_order, tenant, created_at
              FROM applications
              ORDER BY display_order ASC, id ASC",
         )
@@ -33,7 +34,8 @@ pub fn list(conn: &Connection) -> Result<Vec<Application>, String> {
                 name: row.get(1)?,
                 enabled: row.get::<_, i64>(2)? != 0,
                 display_order: row.get(3)?,
-                created_at: row.get(4)?,
+                tenant: row.get::<_, i64>(4)?.clamp(0, u16::MAX as i64) as u16,
+                created_at: row.get(5)?,
             })
         })
         .map_err(|e| format!("applications.list query: {e}"))?;
@@ -60,8 +62,8 @@ pub fn create(conn: &Connection, name: &str) -> Result<Application, String> {
     let order = next_display_order(conn)?;
     let now = now_secs();
     conn.execute(
-        "INSERT INTO applications (name, enabled, display_order, created_at)
-         VALUES (?, 1, ?, ?)",
+        "INSERT INTO applications (name, enabled, display_order, tenant, created_at)
+         VALUES (?, 1, ?, 0, ?)",
         params![trimmed, order, now],
     )
     .map_err(|e| format!("applications.create({trimmed}): {e}"))?;
@@ -71,6 +73,35 @@ pub fn create(conn: &Connection, name: &str) -> Result<Application, String> {
         name: trimmed.to_string(),
         enabled: true,
         display_order: order,
+        tenant: 0,
+        created_at: now,
+    })
+}
+
+pub fn create_with_tenant(
+    conn: &Connection,
+    name: &str,
+    tenant: u16,
+) -> Result<Application, String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("applications.create: name must not be empty".into());
+    }
+    let order = next_display_order(conn)?;
+    let now = now_secs();
+    conn.execute(
+        "INSERT INTO applications (name, enabled, display_order, tenant, created_at)
+         VALUES (?, 1, ?, ?, ?)",
+        params![trimmed, order, tenant as i64, now],
+    )
+    .map_err(|e| format!("applications.create({trimmed}): {e}"))?;
+    let id = conn.last_insert_rowid();
+    Ok(Application {
+        id,
+        name: trimmed.to_string(),
+        enabled: true,
+        display_order: order,
+        tenant,
         created_at: now,
     })
 }
@@ -91,7 +122,7 @@ pub fn set_enabled(conn: &Connection, id: i64, enabled: bool) -> Result<(), Stri
 pub fn get(conn: &Connection, id: i64) -> Result<Option<Application>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, name, enabled, display_order, created_at
+            "SELECT id, name, enabled, display_order, tenant, created_at
              FROM applications
              WHERE id = ?",
         )
@@ -103,7 +134,8 @@ pub fn get(conn: &Connection, id: i64) -> Result<Option<Application>, String> {
                 name: row.get(1)?,
                 enabled: row.get::<_, i64>(2)? != 0,
                 display_order: row.get(3)?,
-                created_at: row.get(4)?,
+                tenant: row.get::<_, i64>(4)?.clamp(0, u16::MAX as i64) as u16,
+                created_at: row.get(5)?,
             })
         })
         .map_err(|e| format!("applications.get query: {e}"))?;
@@ -112,6 +144,19 @@ pub fn get(conn: &Connection, id: i64) -> Result<Option<Application>, String> {
         Some(Err(e)) => Err(format!("applications.get next: {e}")),
         None => Ok(None),
     }
+}
+
+pub fn set_tenant(conn: &Connection, id: i64, tenant: u16) -> Result<(), String> {
+    let updated = conn
+        .execute(
+            "UPDATE applications SET tenant = ? WHERE id = ?",
+            params![tenant as i64, id],
+        )
+        .map_err(|e| format!("applications.set_tenant({id}): {e}"))?;
+    if updated == 0 {
+        return Err(format!("applications.set_tenant: no row {id}"));
+    }
+    Ok(())
 }
 
 pub fn delete(conn: &Connection, id: i64) -> Result<(), String> {
@@ -268,6 +313,34 @@ mod tests {
             assert!(a.display_order < b.display_order);
             let all = list(conn).unwrap();
             assert_eq!(all, vec![a.clone(), b.clone()]);
+        });
+    }
+
+    #[test]
+    fn create_with_tenant_persists_tenant_field() {
+        run(|conn| {
+            let app = create_with_tenant(conn, "alpha", 7).unwrap();
+            assert_eq!(app.tenant, 7);
+            let fetched = get(conn, app.id).unwrap().unwrap();
+            assert_eq!(fetched.tenant, 7);
+        });
+    }
+
+    #[test]
+    fn set_tenant_updates_field() {
+        run(|conn| {
+            let app = create(conn, "alpha").unwrap();
+            assert_eq!(app.tenant, 0);
+            set_tenant(conn, app.id, 42).unwrap();
+            let fetched = get(conn, app.id).unwrap().unwrap();
+            assert_eq!(fetched.tenant, 42);
+        });
+    }
+
+    #[test]
+    fn set_tenant_errors_on_unknown_id() {
+        run(|conn| {
+            assert!(set_tenant(conn, 9999, 1).is_err());
         });
     }
 

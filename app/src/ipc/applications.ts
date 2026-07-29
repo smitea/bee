@@ -5,6 +5,7 @@ export interface ApplicationView {
   name: string;
   enabled: boolean;
   display_order: number;
+  tenant: number;
   created_at: number;
 }
 
@@ -43,8 +44,11 @@ export async function applicationsList(): Promise<ApplicationView[]> {
   return invoke<ApplicationView[]>("applications_list");
 }
 
-export async function applicationCreate(name: string): Promise<ApplicationView> {
-  return invoke<ApplicationView>("application_create", { name });
+export async function applicationCreate(
+  name: string,
+  tenant?: number | null,
+): Promise<ApplicationView> {
+  return invoke<ApplicationView>("application_create", { name, tenant: tenant ?? null });
 }
 
 export async function applicationSetEnabled(id: number, enabled: boolean): Promise<void> {

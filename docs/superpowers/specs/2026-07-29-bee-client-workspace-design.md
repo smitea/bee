@@ -322,3 +322,10 @@ CI runs formatting, Clippy, Rust tests, TypeScript typecheck, frontend tests, fr
 - simultaneous active connections to multiple Bee Clusters;
 - plaintext export of credentials;
 - duplicating the same resource in multiple page tabs.
+
+## Deferred items — resolution status
+
+The original design deferred a few items to post-1.0. As of 2026-07-30:
+
+- **Tenant enforcement (ADR-0010)** — _resolved_ via the `tenant.rs` module, `applications.tenant` migration v9, and `tenant_get` / `tenant_set` commands. Application creation now accepts a tenant (defaults to the active tenant from `client_settings["tenant"]`); the Settings modal exposes a Tenant section with debounced save and 0..=65535 validation; the NavTree Application creation form requires a tenant.
+- **Multi-cluster saved connections** — _resolved_ via migration v10 (`cluster_profiles` table with `id PK, label, addr UNIQUE, tenant, last_used_at, created_at`), `db/clusters.rs` repo (`list` / `save` / `remove` / `set_active` / `get_active`), and `cluster_profile_*` commands. The new `ClusterProfilesSidebar` in `NavTree` lists, activates and removes profiles; `cluster_profile_activate(addr)` parses the addr, calls `connection::ensure_bundle` to swap the live connection, and persists the addr to `client_settings["addr"]`. Legacy `bee-gui.connections` localStorage entries are migrated once at first run by `cluster_profile_migrate_legacy`.

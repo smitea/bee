@@ -11,7 +11,7 @@ export interface ApplicationsStore {
   items: ApplicationView[];
   loaded: boolean;
   refresh(): Promise<void>;
-  create(name: string): Promise<ApplicationView>;
+  create(name: string, tenant?: number | null): Promise<ApplicationView>;
   setEnabled(id: number, enabled: boolean): Promise<void>;
   enable(id: number): Promise<EnableReport>;
   disable(id: number): Promise<DisableReport>;
@@ -25,8 +25,8 @@ export const useApplications = create<ApplicationsStore>((set) => ({
     const items = await ipc.applicationsList();
     set({ items, loaded: true });
   },
-  async create(name) {
-    const created = await ipc.applicationCreate(name);
+  async create(name, tenant) {
+    const created = await ipc.applicationCreate(name, tenant);
     set((s) => ({ items: [...s.items, created] }));
     return created;
   },

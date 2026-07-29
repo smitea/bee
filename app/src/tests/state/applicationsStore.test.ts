@@ -20,8 +20,8 @@ beforeEach(() => {
   applicationDelete.mockReset();
 });
 
-function makeApp(id: number, name = "alpha", enabled = true) {
-  return { id, name, enabled, display_order: id, created_at: 0 };
+function makeApp(id: number, name = "alpha", enabled = true, tenant = 0) {
+  return { id, name, enabled, display_order: id, tenant, created_at: 0 };
 }
 
 describe("useApplications.refresh", () => {
@@ -41,6 +41,16 @@ describe("useApplications.refresh", () => {
     const created = await useApplications.getState().create("beta");
     expect(created.id).toBe(7);
     expect(useApplications.getState().items.map((a) => a.id)).toEqual([7]);
+  });
+
+  it("create with tenant passes through", async () => {
+    applicationsList.mockResolvedValueOnce([]);
+    applicationCreate.mockResolvedValueOnce(makeApp(7, "beta", true, 5));
+    const { useApplications } = await import("../../state/applicationsStore");
+    await useApplications.getState().refresh();
+    const created = await useApplications.getState().create("beta", 5);
+    expect(created.tenant).toBe(5);
+    expect(applicationCreate).toHaveBeenCalledWith("beta", 5);
   });
 
   it("setEnabled toggles the local flag without refetching", async () => {
