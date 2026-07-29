@@ -123,7 +123,7 @@ pub fn spawn(addr: SocketAddr) -> ConnectionBundle {
                             run_request_loop(client, &mut cmd_rx, &msg_tx, &state_clone).await;
                         }
                         Err(e) => {
-                            let reason = format!("connect failed: {}", e);
+                            let reason = format!("connect failed: {} (addr={})", e, addr);
                             eprintln!("[bee-gui] {}", reason);
                             *state_clone.lock().unwrap() =
                                 ConnectionState::Error(reason.clone());
