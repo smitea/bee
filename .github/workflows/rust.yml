@@ -62,5 +62,7 @@ jobs:
         run: npm ci --no-audit --no-fund
       - name: typecheck
         run: npx tsc --noEmit
+      - name: Test frontend
+        run: npm test
       - name: Build frontend bundle
         run: npm run build

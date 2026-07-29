@@ -18,16 +18,16 @@ import {
 
 const REFRESH_MS = 5000;
 
-// Compass-inspired card grid: each "thing" (node, job) is a card with
+// Bee Client card grid: each "thing" (node, job) is a card with
 // metadata + a colored tag. The 3 stat cards on top become compact
 // counters in the toolbar.
 export function Dashboard() {
   const addr = useStore((s) => s.addr);
-  eprintln!("[bee-gui Dashboard] render: addr={}", addr);
+  console.log("[bee-gui Dashboard] render: addr=", addr);
   const clusterQ = useQuery<ClusterMetrics>({
     queryKey: ["cluster", addr],
     queryFn: () => {
-      eprintln!("[bee-gui Dashboard] cluster_status fired with addr={}", addr);
+      console.log("[bee-gui Dashboard] cluster_status fired with addr=", addr);
       return clusterStatus(addr);
     },
     refetchInterval: REFRESH_MS,
@@ -35,7 +35,7 @@ export function Dashboard() {
   const jobsQ = useQuery<JobSummary[]>({
     queryKey: ["jobs", addr],
     queryFn: () => {
-      eprintln!("[bee-gui Dashboard] list_jobs fired with addr={}", addr);
+      console.log("[bee-gui Dashboard] list_jobs fired with addr=", addr);
       return listJobs(addr);
     },
     refetchInterval: REFRESH_MS,

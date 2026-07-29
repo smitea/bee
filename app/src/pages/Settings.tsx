@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useStore } from "../state/store";
 
 export function Settings() {
@@ -9,7 +9,19 @@ export function Settings() {
   const addr = useStore((s) => s.addr);
   const setAddr = useStore((s) => s.setAddr);
 
+  const [inputAddr, setInputAddr] = useState(addr);
   const [exportMsg, setExportMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    setInputAddr(addr);
+  }, [addr]);
+
+  const handleSave = () => {
+    const trimmed = inputAddr.trim();
+    if (!trimmed) return;
+    setAddr(trimmed);
+    setExportMsg(`Saved ${trimmed} to localStorage & reconnected`);
+  };
 
   return (
     <div className="space-y-6">
@@ -27,23 +39,16 @@ export function Settings() {
             AdminServer:
           </label>
           <input
-            value={addr}
-            onChange={(e) => {
-              eprintln!("[bee-gui frontend] onChange: {}", e.target.value);
-              setAddr(e.target.value);
+            value={inputAddr}
+            onChange={(e) => setInputAddr(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") handleSave();
             }}
-            onBlur={(e) => setAddr(e.target.value)}
             placeholder="127.0.0.1:10001"
             className="flex-1 px-3 py-1.5 text-xs rounded-md border border-gray-200 dark:border-neutral-700 bg-white dark:bg-neutral-900"
           />
           <button
-            onClick={(e) => {
-              eprintln!("[bee-gui frontend] Save clicked");
-              const input = e.currentTarget
-                .previousElementSibling as HTMLInputElement | null;
-              if (input) setAddr(input.value);
-              setExportMsg(`Saved ${input?.value ?? addr} to localStorage`);
-            }}
+            onClick={handleSave}
             className="px-3 py-1.5 text-xs rounded-md bg-accent-blue text-white hover:bg-accent-blue/90"
           >
             Save

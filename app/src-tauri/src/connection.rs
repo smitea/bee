@@ -114,25 +114,51 @@ pub fn spawn(addr: SocketAddr) -> ConnectionBundle {
                     .await;
 
                 loop {
-                    match AdminClient::connect(addr).await {
-                        Ok(client) => {
-                            *state_clone.lock().unwrap() = ConnectionState::Connected;
-                            let _ = msg_tx
-                                .send(ConnectionMsg::StateChanged(ConnectionState::Connected))
-                                .await;
-                            run_request_loop(client, &mut cmd_rx, &msg_tx, &state_clone).await;
+                    tokio::select! {
+                        biased;
+                        cmd = cmd_rx.recv() => {
+                            match cmd {
+                                Some(Cmd::Shutdown) | None => break,
+                                Some(Cmd::Call { reply, .. }) => {
+                                    let _ = reply.send(Err(format!("not connected (addr={})", addr)));
+                                }
+                            }
                         }
-                        Err(e) => {
-                            let reason = format!("connect failed: {} (addr={})", e, addr);
-                            eprintln!("[bee-gui] {}", reason);
-                            *state_clone.lock().unwrap() =
-                                ConnectionState::Error(reason.clone());
-                            let _ = msg_tx
-                                .send(ConnectionMsg::StateChanged(ConnectionState::Error(reason)))
-                                .await;
+                        res = AdminClient::connect(addr) => {
+                            match res {
+                                Ok(client) => {
+                                    *state_clone.lock().unwrap() = ConnectionState::Connected;
+                                    let _ = msg_tx
+                                        .send(ConnectionMsg::StateChanged(ConnectionState::Connected))
+                                        .await;
+                                    run_request_loop(client, &mut cmd_rx, &msg_tx, &state_clone).await;
+                                    if cmd_rx.is_closed() {
+                                        break;
+                                    }
+                                }
+                                Err(e) => {
+                                    let reason = format!("connect failed: {} (addr={})", e, addr);
+                                    eprintln!("[bee-gui] {}", reason);
+                                    *state_clone.lock().unwrap() =
+                                        ConnectionState::Error(reason.clone());
+                                    let _ = msg_tx
+                                        .send(ConnectionMsg::StateChanged(ConnectionState::Error(reason)))
+                                        .await;
+                                }
+                            }
+                            tokio::select! {
+                                cmd = cmd_rx.recv() => {
+                                    match cmd {
+                                        Some(Cmd::Shutdown) | None => break,
+                                        Some(Cmd::Call { reply, .. }) => {
+                                            let _ = reply.send(Err(format!("not connected (addr={})", addr)));
+                                        }
+                                    }
+                                }
+                                _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+                            }
                         }
                     }
-                    tokio::time::sleep(Duration::from_secs(2)).await;
                 }
             });
         })
@@ -220,4 +246,22 @@ pub fn ensure_bundle(addr: SocketAddr) -> ConnectionHandle {
 
 pub fn addr_parse(s: &str) -> Result<SocketAddr, String> {
     s.parse().map_err(|e: std::net::AddrParseError| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn addr_parse_accepts_ipv4_host_port() {
+        let addr = addr_parse("127.0.0.1:9999").expect("must parse");
+        assert_eq!(addr.to_string(), "127.0.0.1:9999");
+    }
+
+    #[test]
+    fn addr_parse_rejects_garbage() {
+        assert!(addr_parse("not a socket").is_err());
+        assert!(addr_parse("").is_err());
+        assert!(addr_parse("9999").is_err());
+    }
 }

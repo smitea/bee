@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2.0.0-rc",
-  "productName": "Bee GUI",
+  "productName": "Bee Client",
   "version": "0.1.0",
-  "identifier": "io.smitea.beegui",
+  "identifier": "io.smitea.beeclient",
   "build": {
     "frontendDist": "../dist",
     "beforeDevCommand": "npm run dev",
@@ -11,7 +11,7 @@
   "app": {
     "windows": [
       {
-        "title": "Bee GUI",
+        "title": "Bee Client",
         "width": 1100,
         "height": 720,
         "resizable": true,

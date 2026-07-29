@@ -11,18 +11,16 @@ import {
   Sparkles,
   ChevronRight,
   Server,
-
   Trash2,
   RefreshCcw,
   type LucideIcon,
 } from "lucide-react";
 import { useStore, type Tab } from "../state/store";
+import { useConnection } from "../state/connectionStore";
+import { SettingsModal } from "./SettingsModal";
+import { ConnectionStatusView } from "./ConnectionStatus";
 import { tooltipLabelForTab } from "../tooltip";
 
-// ------------------------------------------------------------
-// Saved connections (MongoDB Compass-style sidebar items)
-// Persisted in localStorage, the same as the Tauri AdminServer addr.
-// ------------------------------------------------------------
 interface SavedConnection {
   id: string;
   label: string;
@@ -47,8 +45,9 @@ export function AppShell({ children }: { children: ReactNode }) {
   const setTab = useStore((s) => s.setTab);
   const theme = useStore((s) => s.theme);
   const toggleTheme = useStore((s) => s.toggleTheme);
-  const addr = useStore((s) => s.addr);
-  const setAddr = useStore((s) => s.setAddr);
+  const addr = useConnection((s) => s.addr);
+  const setAddr = useConnection((s) => s.setAddr);
+  const status = useConnection((s) => s.status);
   const [connections, setConnections] = useState<SavedConnection[]>(
     loadConnections,
   );
@@ -56,13 +55,9 @@ export function AppShell({ children }: { children: ReactNode }) {
   const [showAdd, setShowAdd] = useState(false);
   const [newLabel, setNewLabel] = useState("");
   const [newAddr, setNewAddr] = useState("");
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
-  // Keep the active connection's addr in the sidebar's "current" slot
-  // and persist it in localStorage on every change.
   const ensureActive = (next: SavedConnection[]) => {
-    if (!next.find((c) => c.addr === addr)) {
-      // implicit "current" connection — show at top
-    }
     saveConnections(next);
     setConnections(next);
   };
@@ -99,13 +94,11 @@ export function AppShell({ children }: { children: ReactNode }) {
 
   return (
     <div className="h-full flex flex-col bg-gray-50 dark:bg-neutral-900 text-gray-900 dark:text-neutral-100">
-      {/* ---- Top tab bar (Compass-style: Welcome / My Queries / Data Modeling ...) ---- */}
       <header className="flex items-center h-9 px-3 bg-white dark:bg-neutral-800 border-b border-gray-200 dark:border-neutral-700 text-xs">
         <div className="flex items-center gap-1">
           <Tab id="dashboard" Icon={Gauge} label="Welcome" active={tab === "dashboard"} onSelect={setTab} />
           <Tab id="dataSources" Icon={Database} label="Data Sources" active={tab === "dataSources"} onSelect={setTab} />
           <Tab id="pipelines" Icon={Workflow} label="Pipelines" active={tab === "pipelines"} onSelect={setTab} />
-          <Tab id="settings" Icon={Cog} label="Settings" active={tab === "settings"} onSelect={setTab} />
           <button
             className="ml-1 p-1 rounded text-gray-400 hover:bg-gray-100 dark:hover:bg-neutral-700"
             title="New tab"
@@ -115,17 +108,23 @@ export function AppShell({ children }: { children: ReactNode }) {
         </div>
         <div className="flex-1" />
         <button
+          onClick={() => setSettingsOpen(true)}
+          className="p-1.5 rounded text-gray-500 hover:bg-gray-100 dark:hover:bg-neutral-700"
+          title="Settings"
+          aria-label="Open settings"
+        >
+          <Cog size={14} />
+        </button>
+        <button
           onClick={toggleTheme}
           title={theme === "light" ? "Switch to Dark" : "Switch to Light"}
-          className="p-1.5 rounded text-gray-500 hover:bg-gray-100 dark:hover:bg-neutral-700"
+          className="ml-1 p-1.5 rounded text-gray-500 hover:bg-gray-100 dark:hover:bg-neutral-700"
         >
           {theme === "light" ? <Moon size={14} /> : <Sun size={14} />}
         </button>
       </header>
 
-      {/* ---- Body: sidebar + main ---- */}
       <div className="flex-1 flex overflow-hidden">
-        {/* Sidebar */}
         <aside className="w-60 bg-white dark:bg-neutral-800 border-r border-gray-200 dark:border-neutral-700 flex flex-col">
           <SidebarHeader onAddClick={() => setShowAdd(true)} />
           <div className="px-2 pt-1">
@@ -197,26 +196,25 @@ export function AppShell({ children }: { children: ReactNode }) {
             </div>
           )}
 
-          <SidebarFooter addr={addr} />
+          <SidebarFooter addr={addr} status={status} onOpenSettings={() => setSettingsOpen(true)} />
         </aside>
 
-        {/* Main content */}
         <main className="flex-1 flex flex-col overflow-hidden">
           <TopToolbar />
           <div className="flex-1 overflow-auto p-6">{children}</div>
         </main>
       </div>
 
-      {/* ---- Bottom status bar ---- */}
       <footer className="flex items-center gap-4 px-3 h-6 text-[10px] text-gray-500 dark:text-neutral-400 bg-white dark:bg-neutral-800 border-t border-gray-200 dark:border-neutral-700">
         <span className="font-medium text-gray-700 dark:text-neutral-200">
-          bee-gui v0.1.0 (Tauri)
+          Bee Client v0.1.0
         </span>
-        <span>addr: {addr}</span>
-        <span>theme: {theme}</span>
+        <ConnectionStatusView addr={addr} status={status} onOpenSettings={() => setSettingsOpen(true)} />
         <div className="flex-1" />
-        <span>Compass-inspired layout</span>
+        <span>theme: {theme}</span>
       </footer>
+
+      <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </div>
   );
 }
@@ -297,7 +295,7 @@ function ConnectionRow({
 function SidebarHeader({ onAddClick }: { onAddClick: () => void }) {
   return (
     <div className="flex items-center justify-between px-3 py-2 border-b border-gray-200 dark:border-neutral-700">
-      <span className="text-sm font-semibold">Compass</span>
+      <span className="text-sm font-semibold">Bee</span>
       <button
         onClick={onAddClick}
         className="p-1 rounded text-gray-500 hover:bg-gray-100 dark:hover:bg-neutral-700"
@@ -309,13 +307,18 @@ function SidebarHeader({ onAddClick }: { onAddClick: () => void }) {
   );
 }
 
-function SidebarFooter({ addr }: { addr: string }) {
+function SidebarFooter({
+  addr,
+  status,
+  onOpenSettings,
+}: {
+  addr: string;
+  status: import("../ipc").ConnStatus;
+  onOpenSettings(): void;
+}) {
   return (
     <div className="border-t border-gray-200 dark:border-neutral-700 p-3 text-[10px] text-gray-500 dark:text-neutral-400">
-      <div className="flex items-center gap-1.5">
-        <span className="w-1.5 h-1.5 rounded-full bg-accent-red" />
-        <span className="truncate">active: {addr}</span>
-      </div>
+      <ConnectionStatusView addr={addr} status={status} onOpenSettings={onOpenSettings} />
     </div>
   );
 }
