@@ -115,7 +115,7 @@ pub fn spawn(addr: SocketAddr) -> ConnectionBundle {
 
                 loop {
                     match AdminClient::connect(addr).await {
-                        Ok(mut client) => {
+                        Ok(client) => {
                             *state_clone.lock().unwrap() = ConnectionState::Connected;
                             let _ = msg_tx
                                 .send(ConnectionMsg::StateChanged(ConnectionState::Connected))
@@ -197,7 +197,7 @@ where
 /// thread and starts a new one). This is what makes the Settings
 /// addr-picker feel "live" — no need to restart the GUI when the
 /// user picks a different AdminServer.
-pub fn ensure_bundle(addr: SocketAddr) -> ConnectionBundle {
+pub fn ensure_bundle(addr: SocketAddr) -> ConnectionHandle {
     let mut g = GLOBAL.lock().unwrap();
     let needs_new = match g.as_ref() {
         Some(b) => b.handle.addr() != addr,
@@ -210,8 +210,11 @@ pub fn ensure_bundle(addr: SocketAddr) -> ConnectionBundle {
             receiver: bundle.receiver,
         });
     }
-    // Safe: needs_new == false branch returned a fresh bundle above.
-    g.as_ref().expect("just installed").handle.clone()
+    // Safe: needs_new == false branch kept a fresh bundle above.
+    g.as_ref()
+        .expect("just installed")
+        .handle
+        .clone()
 }
 
 pub fn addr_parse(s: &str) -> Result<SocketAddr, String> {
