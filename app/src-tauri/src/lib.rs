@@ -6,6 +6,8 @@ pub mod commands;
 pub mod connection;
 pub mod db;
 pub mod import_export;
+pub mod plugin_registry;
+pub mod rolling_restart;
 pub mod settings_io;
 
 fn db_file_path(app: &tauri::AppHandle) -> Option<PathBuf> {
@@ -93,6 +95,8 @@ pub fn run() {
             commands::applications::applications_list,
             commands::applications::application_create,
             commands::applications::application_set_enabled,
+            commands::applications::application_enable,
+            commands::applications::application_disable,
             commands::applications::application_delete,
             commands::audit::audit_list,
             commands::audit::audit_query,
@@ -103,6 +107,7 @@ pub fn run() {
             commands::datasources::datasource_delete,
             commands::plugins::plugin_list,
             commands::plugins::plugin_schema,
+            commands::rolling_restart::rolling_restart_apply,
             commands::pipelines::pipelines_list,
             commands::pipelines::pipeline_list,
             commands::pipelines::pipeline_create,

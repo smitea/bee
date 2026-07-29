@@ -9,4 +9,5 @@ export * from "./audit";
 export * from "./datasources";
 export * from "./pipelines";
 export * from "./plugins";
+export * from "./rolling_restart";
 export * from "./search";

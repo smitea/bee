@@ -137,6 +137,18 @@ pub const MIGRATIONS: &[Migration] = &[
             );
         "#,
     },
+    Migration {
+        version: 8,
+        name: "application_disable_snapshots",
+        sql: r#"
+            CREATE TABLE application_disable_snapshots (
+                application_id INTEGER NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+                taken_at INTEGER NOT NULL,
+                payload_json TEXT NOT NULL,
+                PRIMARY KEY (application_id, taken_at)
+            );
+        "#,
+    },
 ];
 
 impl Database {
@@ -223,7 +235,7 @@ mod tests {
         let db = Database::open(&path).unwrap();
         assert!(path.exists());
         let applied = db.applied_versions().unwrap();
-        assert_eq!(applied, vec![1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(applied, vec![1, 2, 3, 4, 5, 6, 7, 8]);
     }
 
     #[test]
@@ -235,7 +247,7 @@ mod tests {
         let db2 = Database::open(&path).unwrap();
         let second = db2.applied_versions().unwrap();
         assert_eq!(first, second);
-        assert_eq!(first, vec![1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(first, vec![1, 2, 3, 4, 5, 6, 7, 8]);
     }
 
     #[test]
@@ -247,6 +259,6 @@ mod tests {
             conn.execute_batch("CREATE TABLE migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at INTEGER NOT NULL);").unwrap();
         }
         let db = Database::open(&path).unwrap();
-        assert_eq!(db.applied_versions().unwrap(), vec![1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(db.applied_versions().unwrap(), vec![1, 2, 3, 4, 5, 6, 7, 8]);
     }
 }
