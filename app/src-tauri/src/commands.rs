@@ -112,8 +112,9 @@ pub mod connection_state {
 }
 
 /// Get a connection handle, bootstrapping one on demand if the JS frontend
-/// hasn't yet called the lib's `run()`. Wrapped in a `tokio::sync::Mutex`
-/// so concurrent commands don't race on `install_bundle`.
+/// hasn't yet called the lib's `run()`. If the addr changed since the
+/// last call, the old bundle is dropped and a new connection thread is
+/// spawned (this is what makes the Settings addr-picker feel live).
 static HANDLE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 async fn ensure_handle(addr: &str) -> Result<ConnectionHandle, CmdError> {
@@ -121,13 +122,6 @@ async fn ensure_handle(addr: &str) -> Result<ConnectionHandle, CmdError> {
         return Ok(h);
     }
     let _guard = HANDLE_LOCK.lock().await;
-    // Re-check under the lock.
-    if let Ok(h) = connection::with_handle(|h| Ok(h.clone())) {
-        return Ok(h);
-    }
     let parsed = connection::addr_parse(addr).map_err(CmdError::from)?;
-    let bundle = connection::spawn(parsed);
-    let handle = bundle.handle.clone();
-    connection::install_bundle(bundle);
-    Ok(handle)
+    Ok(connection::ensure_bundle(parsed))
 }

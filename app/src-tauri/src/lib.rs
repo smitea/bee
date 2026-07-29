@@ -15,8 +15,7 @@ pub fn run() {
     let addr = std::env::var("BEE_ADMIN_ADDR")
         .unwrap_or_else(|_| "127.0.0.1:9999".to_string());
     if let Ok(parsed) = connection::addr_parse(&addr) {
-        let bundle = connection::spawn(parsed);
-        connection::install_bundle(bundle);
+        let _ = connection::ensure_bundle(parsed);
     }
 
     tauri::Builder::default()

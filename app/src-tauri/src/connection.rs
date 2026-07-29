@@ -192,6 +192,28 @@ where
     f(&b.handle)
 }
 
+/// Get or replace the global bundle. If the existing bundle targets a
+/// different address, replace it (which drops the old connection
+/// thread and starts a new one). This is what makes the Settings
+/// addr-picker feel "live" — no need to restart the GUI when the
+/// user picks a different AdminServer.
+pub fn ensure_bundle(addr: SocketAddr) -> ConnectionBundle {
+    let mut g = GLOBAL.lock().unwrap();
+    let needs_new = match g.as_ref() {
+        Some(b) => b.handle.addr() != addr,
+        None => true,
+    };
+    if needs_new {
+        let bundle = spawn(addr);
+        *g = Some(ConnectionBundle {
+            handle: bundle.handle.clone(),
+            receiver: bundle.receiver,
+        });
+    }
+    // Safe: needs_new == false branch returned a fresh bundle above.
+    g.as_ref().expect("just installed").handle.clone()
+}
+
 pub fn addr_parse(s: &str) -> Result<SocketAddr, String> {
     s.parse().map_err(|e: std::net::AddrParseError| e.to_string())
 }
