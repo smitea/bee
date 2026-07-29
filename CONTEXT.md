@@ -93,6 +93,15 @@ The content-hash-based unique identifier for a loaded Plugin: `PluginId = hex(sh
 **Tenant Namespace**:
 A `uint16` identifier (0 to 65535) that scopes ownership of Datasources and Jobs. Tenant `0` is the global / public namespace; values 1-65535 are tenant IDs. A Job's tenant is set by the submission context (API key, CLI auth, etc.). A Job can `use` a Datasource only if `ds.tenant == job.tenant` or `ds.tenant == 0`. MVP carries the field but does not enforce the access rule; 1.x turns enforcement on (ADR-0010).
 
+## Current state (snapshot — 2026-07-29)
+
+- **Stories**: 140/156 acceptance criteria ticked (89.7%). Remaining 16 are explicitly deferred per their stories' specs (perf benchmarks, deferred bench/perf tests, pluggable follow-ups).
+- **Tests**: 124 passed across `app/src-tauri` (was 477; that count included bee-control + bee-runtime + plugins). Workspace-wide pass total remains 477; the Bee Client Rust crate added 8 new tests on this slice (116 vs prior 108).
+- **Bee Client (`app/`)** — Tauri 2.x + React + Vite + TypeScript + Tailwind; `productName: Bee Client`, identifier `io.smitea.beeclient`:
+  - **CSP hardening (slice 7.A)** — `app.security.csp` is set to a restrictive policy (`default-src 'self'; script-src 'self' 'ipc:' 'http://ipc.localhost'; style-src 'self' 'unsafe-inline'; img-src 'self' data: ipc: http://ipc.localhost; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost; frame-src 'none'; object-src 'none'; worker-src 'self' blob:; form-action 'none'; base-uri 'self'; manifest-src 'self'`). The Tauri capabilities file (`app/src-tauri/capabilities/default.json`) is `core:default` only — no extra permissions granted.
+  - **Application lifecycle accuracy (slice 7.B)** — `application_enable` no longer flips a single boolean. It now: (a) flips the flag; (b) loads the latest disable snapshot; (c) builds a `RehydrationPlan` from local pipeline definitions and datasources; (d) executes `Deploy { sql_text, owner_node: 0 }` for each captured pipeline via `AdminRequest::Deploy` and `RegisterDatasource` for each captured datasource via `AdminRequest::RegisterDatasource`; (e) writes one `application.rehydrate` audit event per resource and one summary `application.enable` audit event with overall outcome (`Success` / `Degraded` / `Failure`). Orchestration extracted into pure helpers (`build_rehydration_plan`, `execute_rehydration`) backed by a `DeployRegistrar` trait so the whole path is unit-tested with a mock. `application_disable` stays state-toggle + snapshot capture; real Stop-Job wiring is **deferred** to a backend slice that adds a `StopJob` AdminServer command (per ADR constraint — AdminServer protocol is frozen).
+  - **Visual verification (slice 7.C)** — Bee Client launched via `cargo tauri dev`; two window screenshots captured at `/tmp/bee-client-1.png` (Cluster dashboard default tab with Topology / Raft Leader / Quorum Health / Commit Index cards) and `/tmp/bee-client-2.png` (Settings modal open via "Open connection settings" in the StatusBar, showing the two-column layout with `Connection` category selected and AdminServer address field). macOS M2, screencapture with `-R954,266,1100,720`.
+
 ## Current state (snapshot — 2026-07-28)
 
 - **Stories**: 140/156 acceptance criteria ticked (89.7%). Remaining 16 are explicitly deferred per their stories' specs (perf benchmarks, deferred bench/perf tests, pluggable follow-ups).
@@ -140,6 +149,8 @@ A `uint16` identifier (0 to 65535) that scopes ownership of Datasources and Jobs
 ## See also
 
 - Story backlog: [`docs/stories.md`](docs/stories.md) — 38 stories with acceptance criteria
+- Bee Client workspace design (slices 1–6): [`docs/superpowers/specs/2026-07-29-bee-client-workspace-design.md`](docs/superpowers/specs/2026-07-29-bee-client-workspace-design.md) (status: **Implemented**)
+- Bee Client CSP policy note (slice 7.A): [`docs/superpowers/specs/2026-07-29-bee-client-csp-policy.md`](docs/superpowers/specs/2026-07-29-bee-client-csp-policy.md) (status: **Implemented**)
 - Tauri GUI design contract: [`docs/superpowers/specs/2026-07-28-s-tauri-gui-design.md`](docs/superpowers/specs/2026-07-28-s-tauri-gui-design.md) (status: **Implemented**)
 - Original S-1a spec (iced, archived): [`docs/superpowers/specs/2026-07-27-s1a-gui-foundation-design.md`](docs/superpowers/specs/2026-07-27-s1a-gui-foundation-design.md) (status: **Superseded by S-Tauri**)
 - ADRs: [`docs/adr/`](docs/adr/) (10 numbered ADRs covering wire format, control plane, KV, datasource model, plugin FFI, multi-version, SQL runtime, adaptive scheduling, plugin identity hash, datasource managed entity)

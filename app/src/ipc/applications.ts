@@ -26,6 +26,19 @@ export interface DisableReport {
   datasources: string[];
 }
 
+export interface ResourceRehydrationOutcome {
+  kind: string;
+  name: string;
+  result: string;
+  detail: string | null;
+}
+
+export interface EnableReport {
+  application: ApplicationView;
+  snapshot: DisableSnapshotView | null;
+  rehydrated: ResourceRehydrationOutcome[];
+}
+
 export async function applicationsList(): Promise<ApplicationView[]> {
   return invoke<ApplicationView[]>("applications_list");
 }
@@ -38,8 +51,11 @@ export async function applicationSetEnabled(id: number, enabled: boolean): Promi
   await invoke("application_set_enabled", { id, enabled });
 }
 
-export async function applicationEnable(id: number): Promise<ApplicationView> {
-  return invoke<ApplicationView>("application_enable", { id });
+export async function applicationEnable(
+  id: number,
+  addr?: string,
+): Promise<EnableReport> {
+  return invoke<EnableReport>("application_enable", { id, addr: addr ?? null });
 }
 
 export async function applicationDisable(id: number): Promise<DisableReport> {

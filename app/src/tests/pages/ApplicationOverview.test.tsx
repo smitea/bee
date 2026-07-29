@@ -45,11 +45,15 @@ beforeEach(() => {
   applicationExport.mockResolvedValue(undefined);
   applicationImport.mockResolvedValue({ created: ["alpha"], skipped: [] });
   applicationEnable.mockImplementation(async (id: number) => ({
-    id,
-    name: "alpha",
-    enabled: true,
-    display_order: 1,
-    created_at: 0,
+    application: {
+      id,
+      name: "alpha",
+      enabled: true,
+      display_order: 1,
+      created_at: 0,
+    },
+    snapshot: null,
+    rehydrated: [],
   }));
   applicationDisable.mockImplementation(async (id: number) => ({
     application: {
@@ -193,11 +197,15 @@ describe("<ApplicationOverview> import/export", () => {
       { id: 1, name: "alpha", enabled: false, display_order: 1, created_at: 0 },
     ]);
     applicationEnable.mockResolvedValueOnce({
-      id: 1,
-      name: "alpha",
-      enabled: true,
-      display_order: 1,
-      created_at: 0,
+      application: {
+        id: 1,
+        name: "alpha",
+        enabled: true,
+        display_order: 1,
+        created_at: 0,
+      },
+      snapshot: null,
+      rehydrated: [],
     });
     const { ApplicationOverview } = await import("../../pages/ApplicationOverview");
     render(<ApplicationOverview applicationId={1} />);
