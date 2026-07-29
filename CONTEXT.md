@@ -96,29 +96,32 @@ A `uint16` identifier (0 to 65535) that scopes ownership of Datasources and Jobs
 ## Current state (snapshot — 2026-07-28)
 
 - **Stories**: 140/156 acceptance criteria ticked (89.7%). Remaining 16 are explicitly deferred per their stories' specs (perf benchmarks, deferred bench/perf tests, pluggable follow-ups).
-- **Tests**: 475 pass / 0 fail / 5 ignored (the 5 ignored are stubs awaiting `S-1c test-utils` future expansion).
-- **GUI**: `crates/bee-gui/` (iced 0.12) implements the full S-1 spec plus S-1b (theme switch), S-1c (self-drawn tooltips). All 4 tabs functional:
-  - **Dashboard** (S-1a) — 3 stat cards + Nodes table + Recent Jobs table + Refresh
-  - **数据管理** (S-2) — Datasource CRUD (create / list / inspect / pause / resume / delete)
-  - **Pipelines** (S-3/4) — Job list + Inspect panel
-  - **设置** (S-5) — Theme picker + log level picker + diagnostics export + spec link
-- **Backend**:
+- **Tests**: 477 pass / 0 fail / 5 ignored (the 5 ignored are stubs awaiting `S-1c test-utils` future expansion).
+- **GUI**: `app/` (Tauri 2.x + React + Vite + TypeScript + Tailwind) — replaces the iced `crates/bee-gui/`. All 4 tabs functional:
+  - **Dashboard** (S-1a) — 3 stat cards + Nodes table + Recent Jobs table + auto-refresh 5s
+  - **Data Sources** (S-2) — Datasource CRUD (create / list / inspect / pause / resume / delete) via in-process DatasourceRegistry (localStorage); production wires through AdminServer RPC
+  - **Pipelines** (S-3/4) — Job list + Inspect panel via AdminServer `list_jobs` / `job_inspect`
+  - **Settings** (S-5) — Theme picker + log level picker + diagnostic export + spec link
+- **Backend** (unchanged by the Tauri switch):
   - S-07 Raft WAL (`crates/bee-control/src/raft/wal.rs`, magic `BEERAWL1`) — log + term persistence across restart
   - S-07-x Raft snapshot (`crates/bee-control/src/raft/snapshot.rs`, magic `BEERSNP1`) — WAL bounded via snapshot+truncate
-  - S-1c test-utils (`crates/bee-control/src/test_utils.rs`) — public 3-node Cluster + AdminServer harness, 4 bee-gui integration tests enabled
+  - S-1c test-utils (`crates/bee-control/src/test_utils.rs`) — public 3-node Cluster + AdminServer harness
+- **Tauri backend** (`app/src-tauri/`):
+  - `src/connection.rs` — port of `crates/bee-gui/src/connection.rs` (AdminClient lifecycle + tokio bridge)
+  - `src/commands.rs` — `#[tauri::command]` per RPC: `ping`, `cluster_status`, `list_jobs`, `job_inspect`, `connection_state`
+  - `src/lib.rs` — Tauri builder + setup; bootstraps AdminClient on `BEE_ADMIN_ADDR` env var (default `127.0.0.1:9999`)
 - **CI** (`.github/workflows/rust.yml`):
-  - `build` job on ubuntu-latest (cargo build --workspace --release)
-  - `test` job on ubuntu-latest (cargo test --workspace --release)
-  - `gui-smoke` job on macos-latest (build bee-gui, smoke-launch 3s)
-  - All pinned to `rust-toolchain.toml` channel = 1.89.0
-- **Toolchain**: rustc 1.89.0 (kstring 2.0.2 pin via Cargo.lock since kstring 2.0.3+ requires rustc 1.96+)
+  - `rust-build` job on ubuntu-latest (cargo build --workspace --release, pinned to rustc 1.89.0 via rust-toolchain.toml)
+  - `rust-test` job on ubuntu-latest (cargo test --workspace --release)
+  - `tauri-frontend-build` job on ubuntu-latest (Node.js 20 + npm ci + tsc --noEmit + vite build)
+- **Toolchain**: rustc 1.89.0 (kstring 2.0.2 pin via Cargo.lock since kstring 2.0.3+ requires rustc 1.96+); Node.js 20 for the Tauri frontend
 
 ## Recently completed (2026-07-28 session)
 
 | Commit | Spec area | Description |
 |---|---|---|
 | `feat/all-stories-cleanup` | S00-S49 | 84 acceptance criteria flipped from `[ ]` to `[x]` |
-| `feat/s1a-gui-foundation` | S-1a | 13 commits — crates/bee-gui workspace member, 29 Lucide icons, Dashboard, settings, error, log_panel |
+| `feat/s1a-gui-foundation` | S-1a | 13 commits — crates/bee-gui workspace member (iced), 29 Lucide icons, Dashboard, settings, error, log_panel |
 | `feat/s1a-gui-launch` | S-1a | `iced::Application::run` wired; macOS M2 GUI verified |
 | `feat/s1b-theme-switch` | S-1b | Light/Dark theme toggle in AppBar |
 | `feat/s1c-test-utils` | S-1c | Public TestCluster harness; 4 ignored bee-gui tests enabled |
@@ -127,10 +130,16 @@ A `uint16` identifier (0 to 65535) that scopes ownership of Datasources and Jobs
 | `feat/s5-settings-ui` | S-5 | Settings page replaces placeholder |
 | `feat/s3-pipelines-ui` | S-3/4 | Pipelines page replaces placeholder |
 | `feat/s1c-tooltip` | S-1c | Self-drawn tooltip widget on AppBar |
+| `feat/ui-polish` | ui redo | fixes loading bug + English tabs + UI redesign |
+| `feat/s1c-pipeline` | deprecation | merges s1a-gui-launch wiring |
 | `feat/ci-setup` | infra | 3-job CI workflow + rust-toolchain.toml pin |
+| `feat/docs-refresh` | docs | CONTEXT.md current-state snapshot |
+| `feat/taui-frontend` | S-Tauri A+B | Tauri 2.x + React + Vite + Tailwind scaffold + 4 frontend pages |
+| `feat/taui-cleanup` | S-Tauri C-E | removed iced, updated CI for Node.js + Tauri |
 
 ## See also
 
 - Story backlog: [`docs/stories.md`](docs/stories.md) — 38 stories with acceptance criteria
-- GUI design contract: [`docs/superpowers/specs/2026-07-27-s1a-gui-foundation-design.md`](docs/superpowers/specs/2026-07-27-s1a-gui-foundation-design.md) (status: **Implemented**)
+- Tauri GUI design contract: [`docs/superpowers/specs/2026-07-28-s-tauri-gui-design.md`](docs/superpowers/specs/2026-07-28-s-tauri-gui-design.md) (status: **Implemented**)
+- Original S-1a spec (iced, archived): [`docs/superpowers/specs/2026-07-27-s1a-gui-foundation-design.md`](docs/superpowers/specs/2026-07-27-s1a-gui-foundation-design.md) (status: **Superseded by S-Tauri**)
 - ADRs: [`docs/adr/`](docs/adr/) (10 numbered ADRs covering wire format, control plane, KV, datasource model, plugin FFI, multi-version, SQL runtime, adaptive scheduling, plugin identity hash, datasource managed entity)

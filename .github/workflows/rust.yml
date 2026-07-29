@@ -1,4 +1,4 @@
-name: Rust
+name: Bee CI
 
 on:
   push:
@@ -11,8 +11,8 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
-  build:
-    name: build (release)
+  rust-build:
+    name: Rust build (release)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -28,8 +28,8 @@ jobs:
       - name: Build (release)
         run: cargo build --workspace --release --verbose
 
-  test:
-    name: test (release)
+  rust-test:
+    name: Rust test (release)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -45,30 +45,24 @@ jobs:
       - name: Test (release)
         run: cargo test --workspace --release --verbose
 
-  gui-smoke:
-    name: bee-gui smoke launch (macOS)
-    runs-on: macos-latest
+  tauri-frontend-build:
+    name: Tauri frontend build (Node.js + Vite)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.89.0
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
         with:
-          workspaces: |
-            -> target
-            -> crates/*/target
-            -> bee/target
-      - name: Build bee-gui
-        run: cargo build --release -p bee-gui
-      - name: Smoke launch bee-gui (3s)
-        run: |
-          ./target/release/bee-gui --connect 127.0.0.1:9999 &
-          PID=$!
-          sleep 3
-          if kill -0 $PID 2>/dev/null; then
-            echo "bee-gui is running (PID $PID)"
-            kill $PID
-            exit 0
-          else
-            echo "bee-gui exited prematurely"
-            exit 1
-          fi
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: app/package-lock.json
+      - name: Install npm deps
+        run: npm ci --no-audit --no-fund
+      - name: typecheck
+        run: npx tsc --noEmit
+      - name: Test frontend
+        run: npm test
+      - name: Build frontend bundle
+        run: npm run build

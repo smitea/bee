@@ -1,0 +1,33 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Bee Client: Apple-minimal light + dark theming via the .dark class on <html>.
+   Tailwind's darkMode: 'class' (see tailwind.config.js) toggles these. */
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family:
+    -apple-system,
+    BlinkMacSystemFont,
+    "SF Pro Text",
+    "Segoe UI",
+    Inter,
+    "Helvetica Neue",
+    Arial,
+    sans-serif;
+  font-size: 13px;
+  line-height: 1.45;
+  color: #0a0a0a;
+  -webkit-font-smoothing: antialiased;
+}
+
+.dark body {
+  color: #f5f5f7;
+}

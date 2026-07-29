@@ -12,6 +12,14 @@
 > The main repo's stories are now S0–S31 (generic Bee feature
 > set) + S41 (performance showcase).
 
+> **GUI framework**: Originally S-1a targeted **iced 0.12** (Rust-native).
+> In 2026-07-28, the GUI was rewritten to **Tauri 2.x + React + Vite + Tailwind**
+> (per [`docs/superpowers/specs/2026-07-28-s-tauri-gui-design.md`](superpowers/specs/2026-07-28-s-tauri-gui-design.md))
+> for a larger UI ecosystem and broader contributor base. The iced
+> implementation (`crates/bee-gui/`) has been removed; the Tauri app
+> lives at `app/`. The 4 tabs (Dashboard / DataSources / Pipelines / Settings)
+> remain the same conceptual surface.
+
 ## How to use this document
 
 1. **Pick a story** whose `Blocked by` list is satisfied.
