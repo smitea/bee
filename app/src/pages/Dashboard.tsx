@@ -23,14 +23,21 @@ const REFRESH_MS = 5000;
 // counters in the toolbar.
 export function Dashboard() {
   const addr = useStore((s) => s.addr);
+  eprintln!("[bee-gui Dashboard] render: addr={}", addr);
   const clusterQ = useQuery<ClusterMetrics>({
     queryKey: ["cluster", addr],
-    queryFn: () => clusterStatus(addr),
+    queryFn: () => {
+      eprintln!("[bee-gui Dashboard] cluster_status fired with addr={}", addr);
+      return clusterStatus(addr);
+    },
     refetchInterval: REFRESH_MS,
   });
   const jobsQ = useQuery<JobSummary[]>({
     queryKey: ["jobs", addr],
-    queryFn: () => listJobs(addr),
+    queryFn: () => {
+      eprintln!("[bee-gui Dashboard] list_jobs fired with addr={}", addr);
+      return listJobs(addr);
+    },
     refetchInterval: REFRESH_MS,
   });
 
