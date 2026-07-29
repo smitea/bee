@@ -42,6 +42,7 @@ pub enum ConnectionMsg {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)] // Shutdown is reserved for S-Tauri.x admin-quit command
 enum Cmd {
     Call {
         id: u64,
@@ -65,11 +66,19 @@ impl ConnectionHandle {
     pub fn state(&self) -> ConnectionState {
         self.state.lock().unwrap().clone()
     }
-    pub fn call(&self, req: AdminRequest) -> oneshot::Receiver<Result<AdminResponse, String>> {
+    /// Async send to the connection thread. Safe to call from a tokio
+    /// runtime (e.g. inside a `#[tauri::command]`).
+    pub async fn call(
+        &self,
+        req: AdminRequest,
+    ) -> Result<oneshot::Receiver<Result<AdminResponse, String>>, String> {
         let (reply, rx) = oneshot::channel();
         let id = next_id();
-        let _ = self.cmd_tx.blocking_send(Cmd::Call { id, req, reply });
-        rx
+        self.cmd_tx
+            .send(Cmd::Call { id, req, reply })
+            .await
+            .map_err(|e| format!("send: {e}"))?;
+        Ok(rx)
     }
 }
 

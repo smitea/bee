@@ -26,16 +26,18 @@ type CmdResult<T> = Result<T, CmdError>;
 
 #[tauri::command]
 pub async fn ping(addr: String) -> CmdResult<String> {
-    let handle = connection::with_handle(|h| Ok(h.clone()))
-        .or_else(|_| reconnect(&addr))?;
-    let _ = handle.call(AdminRequest::Ping);
+    let handle = ensure_handle(&addr).await?;
+    let _rx = handle.call(AdminRequest::Ping).await.map_err(CmdError::from)?;
     Ok("Pong (queued)".to_string())
 }
 
 #[tauri::command]
 pub async fn cluster_status(addr: String) -> CmdResult<ClusterMetricsDetail> {
-    let handle = ensure_handle(&addr)?;
-    let rx = handle.call(AdminRequest::ClusterStatus);
+    let handle = ensure_handle(&addr).await?;
+    let rx = handle
+        .call(AdminRequest::ClusterStatus)
+        .await
+        .map_err(CmdError::from)?;
     let resp = rx
         .await
         .map_err(|e| CmdError { message: format!("recv: {e:?}") })?
@@ -43,14 +45,19 @@ pub async fn cluster_status(addr: String) -> CmdResult<ClusterMetricsDetail> {
     match resp {
         AdminResponse::ClusterMetrics(detail) => Ok(detail),
         AdminResponse::Error(msg) => Err(CmdError { message: msg }),
-        other => Err(CmdError { message: format!("unexpected: {other:?}") }),
+        other => Err(CmdError {
+            message: format!("unexpected: {other:?}"),
+        }),
     }
 }
 
 #[tauri::command]
 pub async fn list_jobs(addr: String) -> CmdResult<Vec<JobSummary>> {
-    let handle = ensure_handle(&addr)?;
-    let rx = handle.call(AdminRequest::ListJobs);
+    let handle = ensure_handle(&addr).await?;
+    let rx = handle
+        .call(AdminRequest::ListJobs)
+        .await
+        .map_err(CmdError::from)?;
     let resp = rx
         .await
         .map_err(|e| CmdError { message: format!("recv: {e:?}") })?
@@ -58,14 +65,19 @@ pub async fn list_jobs(addr: String) -> CmdResult<Vec<JobSummary>> {
     match resp {
         AdminResponse::JobList(jobs) => Ok(jobs),
         AdminResponse::Error(msg) => Err(CmdError { message: msg }),
-        other => Err(CmdError { message: format!("unexpected: {other:?}") }),
+        other => Err(CmdError {
+            message: format!("unexpected: {other:?}"),
+        }),
     }
 }
 
 #[tauri::command]
 pub async fn job_inspect(addr: String, id: u32) -> CmdResult<Option<JobDetail>> {
-    let handle = ensure_handle(&addr)?;
-    let rx = handle.call(AdminRequest::JobInspect(id));
+    let handle = ensure_handle(&addr).await?;
+    let rx = handle
+        .call(AdminRequest::JobInspect(id))
+        .await
+        .map_err(CmdError::from)?;
     let resp = rx
         .await
         .map_err(|e| CmdError { message: format!("recv: {e:?}") })?
@@ -73,14 +85,15 @@ pub async fn job_inspect(addr: String, id: u32) -> CmdResult<Option<JobDetail>> 
     match resp {
         AdminResponse::JobDetail(d) => Ok(d),
         AdminResponse::Error(msg) => Err(CmdError { message: msg }),
-        other => Err(CmdError { message: format!("unexpected: {other:?}") }),
+        other => Err(CmdError {
+            message: format!("unexpected: {other:?}"),
+        }),
     }
 }
 
 #[tauri::command]
-pub fn connection_state(addr: String) -> CmdResult<connection_state::StateView> {
-    let _ = addr;
-    let handle = connection::with_handle(|h| Ok(h.clone()))?;
+pub async fn connection_state(addr: String) -> CmdResult<connection_state::StateView> {
+    let handle = ensure_handle(&addr).await?;
     Ok(connection_state::StateView {
         addr: handle.addr().to_string(),
         state: handle.state().tag().to_string(),
@@ -98,14 +111,20 @@ pub mod connection_state {
     }
 }
 
-fn ensure_handle(addr: &str) -> Result<ConnectionHandle, CmdError> {
+/// Get a connection handle, bootstrapping one on demand if the JS frontend
+/// hasn't yet called the lib's `run()`. Wrapped in a `tokio::sync::Mutex`
+/// so concurrent commands don't race on `install_bundle`.
+static HANDLE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+async fn ensure_handle(addr: &str) -> Result<ConnectionHandle, CmdError> {
     if let Ok(h) = connection::with_handle(|h| Ok(h.clone())) {
         return Ok(h);
     }
-    reconnect(addr)
-}
-
-fn reconnect(addr: &str) -> Result<ConnectionHandle, CmdError> {
+    let _guard = HANDLE_LOCK.lock().await;
+    // Re-check under the lock.
+    if let Ok(h) = connection::with_handle(|h| Ok(h.clone())) {
+        return Ok(h);
+    }
     let parsed = connection::addr_parse(addr).map_err(CmdError::from)?;
     let bundle = connection::spawn(parsed);
     let handle = bundle.handle.clone();
