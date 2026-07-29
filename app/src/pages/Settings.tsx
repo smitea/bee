@@ -29,11 +29,21 @@ export function Settings() {
           <input
             value={addr}
             onChange={(e) => setAddr(e.target.value)}
+            onBlur={(e) => setAddr(e.target.value)}
             placeholder="127.0.0.1:10001"
             className="flex-1 px-3 py-1.5 text-xs rounded-md border border-gray-200 dark:border-neutral-700 bg-white dark:bg-neutral-900"
           />
           <button
-            onClick={() => setExportMsg(`Saved ${addr} to localStorage`)}
+            onClick={(e) => {
+              // Force a Save even if the user never touched the input
+              // (e.g. paste via context menu → onChange doesn't fire in
+              // some browsers). We read the live input value from the
+              // sibling <input> via a ref to guarantee the latest text.
+              const input = e.currentTarget
+                .previousElementSibling as HTMLInputElement | null;
+              if (input) setAddr(input.value);
+              setExportMsg(`Saved ${addr} to localStorage`);
+            }}
             className="px-3 py-1.5 text-xs rounded-md bg-accent-blue text-white hover:bg-accent-blue/90"
           >
             Save
