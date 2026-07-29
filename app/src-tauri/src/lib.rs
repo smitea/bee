@@ -1,9 +1,11 @@
 use std::path::PathBuf;
 use tauri::Manager;
 
+pub mod audit_seed;
 pub mod commands;
 pub mod connection;
 pub mod db;
+pub mod import_export;
 pub mod settings_io;
 
 fn db_file_path(app: &tauri::AppHandle) -> Option<PathBuf> {
@@ -47,6 +49,10 @@ pub fn run() {
 
             app.manage(database);
 
+            if let Err(e) = audit_seed::seed(app.state::<db::Database>().inner()) {
+                log::warn!("audit seed: {e}");
+            }
+
             let startup_addr = {
                 let db = app.state::<db::Database>();
                 let conn = db.lock().unwrap();
@@ -84,6 +90,26 @@ pub fn run() {
             commands::profiles::profiles_list,
             commands::profiles::profile_save,
             commands::profiles::profile_remove,
+            commands::applications::applications_list,
+            commands::applications::application_create,
+            commands::applications::application_set_enabled,
+            commands::applications::application_delete,
+            commands::audit::audit_list,
+            commands::audit::audit_query,
+            commands::audit::audit_latest,
+            commands::audit::audit_record,
+            commands::datasources::datasource_list,
+            commands::datasources::datasource_create,
+            commands::datasources::datasource_delete,
+            commands::plugins::plugin_list,
+            commands::plugins::plugin_schema,
+            commands::pipelines::pipelines_list,
+            commands::pipelines::pipeline_list,
+            commands::pipelines::pipeline_create,
+            commands::pipelines::pipeline_get,
+            commands::pipelines::pipeline_delete,
+            commands::applications::application_export,
+            commands::applications::application_import,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

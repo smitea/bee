@@ -1,37 +1,35 @@
 import { useEffect } from "react";
-import { useStore } from "./state/store";
-import { AppBar } from "./components/AppBar";
+import { useUi } from "./state/store";
 import { AppShell } from "./components/AppShell";
-import { StatusBar } from "./components/StatusBar";
-import { Dashboard } from "./pages/Dashboard";
-import { DataSources } from "./pages/DataSources";
-import { Pipelines } from "./pages/Pipelines";
-import { Settings } from "./pages/Settings";
+import { useConnection } from "./state/connectionStore";
+import { connState } from "./ipc";
 
 export default function App() {
-  const tab = useStore((s) => s.tab);
-  const theme = useStore((s) => s.theme);
+  const theme = useUi((s) => s.theme);
+  const addr = useConnection((s) => s.addr);
+  const setStatus = useConnection((s) => s.setStatus);
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
   }, [theme]);
 
-  const body = (() => {
-    switch (tab) {
-      case "dashboard":
-        return <Dashboard />;
-      case "dataSources":
-        return <DataSources />;
-      case "pipelines":
-        return <Pipelines />;
-      case "settings":
-        return <Settings />;
-    }
-  })();
+  useEffect(() => {
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const view = await connState(addr);
+        if (!cancelled) setStatus({ addr: view.addr, status: view.status });
+      } catch {
+        if (!cancelled) setStatus({ kind: "Disconnected" });
+      }
+    };
+    void tick();
+    const handle = setInterval(tick, 4000);
+    return () => {
+      cancelled = true;
+      clearInterval(handle);
+    };
+  }, [addr, setStatus]);
 
-  return <AppShell>{body}</AppShell>;
+  return <AppShell />;
 }
-
-// keep AppBar in scope for the existing icon re-exports
-void AppBar;
-void StatusBar;
