@@ -2,8 +2,6 @@
 //!
 //! Each `#[tauri::command]` is callable from JS via `invoke('name', { args })`.
 
-use std::sync::Mutex;
-
 use bee_control::raft::{
     AdminRequest, AdminResponse, ClusterMetricsDetail, JobDetail, JobSummary,
 };
@@ -25,12 +23,6 @@ impl<E: std::fmt::Display> From<E> for CmdError {
 }
 
 type CmdResult<T> = Result<T, CmdError>;
-
-/// Pending (in-flight) RPCs keyed by id, so the dispatch thread can
-/// route the response back to the originating command.
-type PendingMap = Mutex<Vec<(u64, std::sync::mpsc::Sender<AdminResponse>)>>;
-
-static PENDING: PendingMap = Mutex::new(Vec::new());
 
 #[tauri::command]
 pub async fn ping(addr: String) -> CmdResult<String> {
