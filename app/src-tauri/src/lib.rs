@@ -108,8 +108,11 @@ pub fn run() {
             commands::pipelines::pipeline_create,
             commands::pipelines::pipeline_get,
             commands::pipelines::pipeline_delete,
+            commands::pipelines::pipeline_latest_result,
             commands::applications::application_export,
             commands::applications::application_import,
+            commands::search::search_local,
+            commands::search::search_server,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

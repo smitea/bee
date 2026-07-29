@@ -36,3 +36,18 @@ export async function pipelineGet(id: number): Promise<PipelineDefinitionView | 
 export async function pipelineDelete(id: number): Promise<void> {
   await invoke("pipeline_delete", { id });
 }
+
+export interface PipelineLatestResultView {
+  numeric: number;
+  label: string;
+}
+
+export async function pipelineLatestResult(
+  addr: string,
+  jobId: number,
+): Promise<PipelineLatestResultView | null> {
+  return invoke<PipelineLatestResultView | null>("pipeline_latest_result", {
+    addr,
+    jobId,
+  });
+}
