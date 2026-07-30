@@ -18,7 +18,6 @@ import type { TabKind } from "../state/tabsStore";
 import { useConnection } from "../state/connectionStore";
 import { useTenant } from "../state/tenantStore";
 import { SearchBox } from "./SearchBox";
-import { ClusterProfilesSidebar } from "./ClusterProfilesSidebar";
 import type { SearchHit } from "../ipc/search";
 
 function titleFor(kind: TabKind, resourceId: string | null): string {
@@ -58,8 +57,6 @@ export function NavTree() {
   const openTab = useTabs((s) => s.open);
   const tabs = useTabs((s) => s.tabs);
   const activeId = useTabs((s) => s.activeId);
-  const close = useTabs((s) => s.close);
-  const pin = useTabs((s) => s.pin);
   const addr = useConnection((s) => s.addr);
 
   const [query, setQuery] = useState("");
@@ -149,14 +146,6 @@ export function NavTree() {
           <Hexagon size={14} className="text-accent-blue" />
           <span className="text-sm font-semibold">Bee</span>
         </div>
-        <button
-          aria-label="Add application"
-          title="Add application"
-          onClick={() => setAdding((s) => !s)}
-          className="p-1 rounded text-gray-500 hover:bg-gray-100 dark:hover:bg-neutral-700"
-        >
-          <Plus size={14} />
-        </button>
       </div>
 
       <div className="px-2 pt-2">
@@ -179,6 +168,14 @@ export function NavTree() {
 
         <div className="px-2 pt-3 pb-1 flex items-center justify-between text-[10px] font-semibold uppercase tracking-wider text-gray-500 dark:text-neutral-400">
           <span>Applications ({filtered.length})</span>
+          <button
+            aria-label="Add application"
+            title="Add application"
+            onClick={() => setAdding((s) => !s)}
+            className="p-0.5 rounded text-gray-500 hover:bg-gray-100 dark:hover:bg-neutral-700"
+          >
+            <Plus size={11} />
+          </button>
         </div>
 
         {adding && (
@@ -340,26 +337,7 @@ export function NavTree() {
         })}
       </nav>
 
-      <div className="border-t border-gray-200 dark:border-neutral-700 p-2 text-[10px] text-gray-500 dark:text-neutral-400">
-        <button
-          onClick={() => {
-            tabs
-              .filter((t) => t.id !== activeId)
-              .forEach((t) => void close(t.id));
-          }}
-          className="w-full px-2 py-1 text-left text-xs rounded hover:bg-gray-100 dark:hover:bg-neutral-700"
-        >
-          Close other tabs
-        </button>
-        <button
-          onClick={() => tabs.forEach((t) => void pin(t.id, !t.pinned))}
-          className="w-full px-2 py-1 text-left text-xs rounded hover:bg-gray-100 dark:hover:bg-neutral-700"
-        >
-          Toggle pinned
-        </button>
-      </div>
-
-      <ClusterProfilesSidebar />
+      <div className="border-t border-gray-200 dark:border-neutral-700 p-2 text-[10px] text-gray-500 dark:text-neutral-400" />
     </div>
   );
 }

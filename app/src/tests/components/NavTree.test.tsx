@@ -121,4 +121,20 @@ describe("<NavTree>", () => {
     expect(screen.getByText("beta")).toBeInTheDocument();
     expect(screen.getByText(/Applications \(2\)/)).toBeInTheDocument();
   });
+
+  it("does not render the legacy Close-other-tabs / Toggle-pinned sidebar buttons", async () => {
+    const { NavTree } = await import("../../components/NavTree");
+    withClient(<NavTree />);
+    expect(screen.queryByText(/close other tabs/i)).toBeNull();
+    expect(screen.queryByText(/toggle pinned/i)).toBeNull();
+  });
+
+  it("renders the Add-application control inside the Applications row (not the Bee header)", async () => {
+    const { NavTree } = await import("../../components/NavTree");
+    withClient(<NavTree />);
+    const appsHeading = screen.getByText(/Applications \(0\)/);
+    const add = screen.getByRole("button", { name: /add application/i });
+    expect(appsHeading.parentElement?.contains(add)).toBe(true);
+    expect(screen.getByText("Bee").closest("div")?.querySelector('[aria-label="Add application"]')).toBeNull();
+  });
 });

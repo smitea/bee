@@ -111,7 +111,7 @@ export function PipelinesPage() {
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 min-w-0 overflow-x-auto">
       <header className="flex items-center justify-between">
         <h1 className="text-xl font-semibold">Pipelines</h1>
         <div className="flex items-center gap-2">

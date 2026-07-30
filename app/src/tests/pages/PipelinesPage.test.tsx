@@ -113,4 +113,16 @@ describe("<PipelinesPage>", () => {
     expect(arg.kind).toBe("pipeline");
     expect(arg.resourceId).toBe("42");
   });
+
+  it("renders all four lifecycle sections inside an overflow-x-auto container so the right-side buttons never clip", async () => {
+    const { PipelinesPage } = await import("../../pages/PipelinesPage");
+    const { container } = withClient(<PipelinesPage />);
+    await screen.findByText(/^Queued/);
+    const root = container.firstElementChild as HTMLElement | null;
+    expect(root).not.toBeNull();
+    expect(root?.className).toMatch(/min-w-0/);
+    expect(root?.className).toMatch(/overflow-x-auto/);
+    expect(screen.getByRole("button", { name: /new pipeline/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /create.*pipeline/i })).toBeInTheDocument();
+  });
 });

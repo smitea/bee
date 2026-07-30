@@ -28,6 +28,8 @@ export interface TabsStore {
   hydrate(): Promise<void>;
   open(input: { kind: TabKind; resourceId: string | null; title: string }): Promise<void>;
   close(id: number): Promise<void>;
+  closeOthers(id: number): Promise<void>;
+  closeRight(id: number): Promise<void>;
   setActive(id: number | null): Promise<void>;
   pin(id: number, pinned: boolean): Promise<void>;
 }
@@ -121,6 +123,43 @@ export const useTabs = create<TabsStore>((set, get) => ({
         position: t.position,
       })),
       activeId: nextActive,
+    });
+  },
+  async closeOthers(id) {
+    await ipc.tabCloseOthers(id);
+    await ipc.tabSetActive(id);
+    const list = await ipc.tabsList();
+    set({
+      tabs: list.map((t) => ({
+        id: t.id,
+        kind: asKind(t.kind),
+        resource_id: t.resourceId,
+        title: t.title,
+        pinned: t.pinned,
+        position: t.position,
+      })),
+      activeId: id,
+    });
+  },
+  async closeRight(id) {
+    const list = await ipc.tabsList();
+    const sorted = [...list].sort((a, b) => a.position - b.position);
+    const idx = sorted.findIndex((t) => t.id === id);
+    if (idx < 0) return;
+    const toClose = sorted.slice(idx + 1);
+    for (const t of toClose) {
+      await ipc.tabClose(t.id);
+    }
+    const refreshed = await ipc.tabsList();
+    set({
+      tabs: refreshed.map((t) => ({
+        id: t.id,
+        kind: asKind(t.kind),
+        resource_id: t.resourceId,
+        title: t.title,
+        pinned: t.pinned,
+        position: t.position,
+      })),
     });
   },
   async setActive(id) {

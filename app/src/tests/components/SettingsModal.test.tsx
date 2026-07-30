@@ -51,10 +51,34 @@ afterEach(() => {
   vi.mocked(tenantSetIpc).mockReset();
 });
 
+function openTenantSection() {
+  fireEvent.click(screen.getByRole("button", { name: "Tenant" }));
+}
+
 describe("<SettingsModal>", () => {
   it("renders nothing when closed", () => {
     const { container } = render(<SettingsModal open={false} onClose={() => {}} />);
     expect(container.firstChild).toBeNull();
+  });
+
+  it("lists every settings category in the sidebar", () => {
+    render(<SettingsModal open onClose={() => {}} />);
+    for (const label of [
+      "Client",
+      "Connection",
+      "Tenant",
+      "Cluster",
+      "Appearance",
+      "Logging",
+      "Diagnostics",
+      "Raft",
+      "KV",
+      "Scheduling",
+      "Plugins",
+      "Security",
+    ]) {
+      expect(screen.getByRole("button", { name: label })).toBeInTheDocument();
+    }
   });
 
   it("Test Connection does not change the active address", async () => {
@@ -87,6 +111,7 @@ describe("<SettingsModal>", () => {
     vi.mocked(tenantGetIpc).mockReset();
     vi.mocked(tenantGetIpc).mockResolvedValue(7);
     render(<SettingsModal open onClose={() => {}} />);
+    openTenantSection();
     await waitFor(() => expect(screen.getByLabelText("Active tenant")).toBeInTheDocument());
     expect((screen.getByLabelText("Active tenant") as HTMLInputElement).value).toBe("7");
   });
@@ -97,6 +122,7 @@ describe("<SettingsModal>", () => {
     vi.mocked(tenantSetIpc).mockReset();
     vi.mocked(tenantSetIpc).mockResolvedValue(42);
     render(<SettingsModal open onClose={() => {}} />);
+    openTenantSection();
     const input = await screen.findByLabelText("Active tenant");
     fireEvent.change(input, { target: { value: "42" } });
     await waitFor(() => expect(tenantSetIpc).toHaveBeenCalledWith(42));
@@ -104,6 +130,7 @@ describe("<SettingsModal>", () => {
 
   it("rejects an out-of-range tenant and shows an error", async () => {
     render(<SettingsModal open onClose={() => {}} />);
+    openTenantSection();
     const input = await screen.findByLabelText("Active tenant");
     fireEvent.change(input, { target: { value: "70000" } });
     const err = await screen.findByText(/tenant must be a number between 0 and 65535/);

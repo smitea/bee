@@ -1,9 +1,11 @@
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Cog, Moon, Sun, X, Pin, PinOff } from "lucide-react";
 
 import { NavTree } from "./NavTree";
 import { StatusBar } from "./StatusBar";
 import { SettingsModal } from "./SettingsModal";
+import { ClusterSelectorDropdown } from "./ClusterSelectorDropdown";
+import { ContextMenu, type ContextMenuItem } from "./ContextMenu";
 import { useUi } from "../state/store";
 import { useTabs } from "../state/tabsStore";
 import { useApplications } from "../state/applicationsStore";
@@ -32,8 +34,9 @@ export function AppShell({ children }: { children?: ReactNode }) {
 
   return (
     <div className="h-full flex flex-col bg-gray-50 dark:bg-neutral-900 text-gray-900 dark:text-neutral-100">
-      <header className="flex items-center h-9 px-3 bg-white dark:bg-neutral-800 border-b border-gray-200 dark:border-neutral-700 text-xs">
+      <header className="flex items-center gap-2 h-9 px-3 bg-white dark:bg-neutral-800 border-b border-gray-200 dark:border-neutral-700 text-xs">
         <div className="flex-1" />
+        <ClusterSelectorDropdown onOpenSettings={openSettings} />
         <button
           onClick={openSettings}
           className="p-1.5 rounded text-gray-500 hover:bg-gray-100 dark:hover:bg-neutral-700"
@@ -46,7 +49,7 @@ export function AppShell({ children }: { children?: ReactNode }) {
           onClick={toggleTheme}
           title={theme === "light" ? "Switch to Dark" : "Switch to Light"}
           aria-label="Toggle theme"
-          className="ml-1 p-1.5 rounded text-gray-500 hover:bg-gray-100 dark:hover:bg-neutral-700"
+          className="p-1 rounded text-gray-500 hover:bg-gray-100 dark:hover:bg-neutral-700"
         >
           {theme === "light" ? <Moon size={14} /> : <Sun size={14} />}
         </button>
@@ -57,7 +60,7 @@ export function AppShell({ children }: { children?: ReactNode }) {
         </aside>
         <main className="flex-1 flex flex-col overflow-hidden">
           <PageTabs />
-          <div className="flex-1 overflow-auto p-6">{children}</div>
+          {children && <div className="flex-1 overflow-auto p-6">{children}</div>}
         </main>
       </div>
       <StatusBar />
@@ -66,13 +69,23 @@ export function AppShell({ children }: { children?: ReactNode }) {
   );
 }
 
+interface MenuState {
+  tabId: number;
+  x: number;
+  y: number;
+}
+
 function PageTabs() {
   const tabs = useTabs((s) => s.tabs);
   const activeId = useTabs((s) => s.activeId);
   const setActive = useTabs((s) => s.setActive);
   const close = useTabs((s) => s.close);
+  const closeOthers = useTabs((s) => s.closeOthers);
+  const closeRight = useTabs((s) => s.closeRight);
   const pin = useTabs((s) => s.pin);
   const applications = useApplications((s) => s.items);
+
+  const [menu, setMenu] = useState<MenuState | null>(null);
 
   const active = tabs.find((t) => t.id === activeId);
 
@@ -112,6 +125,31 @@ function PageTabs() {
     }
   })();
 
+  const menuItems = (tab: { id: number; pinned: boolean }): ContextMenuItem[] => {
+    const idx = tabs.findIndex((t) => t.id === tab.id);
+    const hasRight = idx >= 0 && idx < tabs.length - 1;
+    return [
+      { id: "close", label: "Close", onSelect: () => void close(tab.id) },
+      {
+        id: "close-others",
+        label: "Close Others",
+        onSelect: () => void closeOthers(tab.id),
+        disabled: tabs.length <= 1,
+      },
+      {
+        id: "close-right",
+        label: "Close to the Right",
+        onSelect: () => void closeRight(tab.id),
+        disabled: !hasRight,
+      },
+      {
+        id: "pin",
+        label: tab.pinned ? "Unpin" : "Pin",
+        onSelect: () => void pin(tab.id, !tab.pinned),
+      },
+    ];
+  };
+
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
       <div
@@ -126,6 +164,10 @@ function PageTabs() {
               role="tab"
               aria-selected={isActive}
               onClick={() => void setActive(t.id)}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                setMenu({ tabId: t.id, x: e.clientX, y: e.clientY });
+              }}
               className={[
                 "group flex items-center gap-1.5 px-3 h-8 rounded-t-md text-xs cursor-pointer",
                 isActive
@@ -161,6 +203,18 @@ function PageTabs() {
         })}
       </div>
       <div className="flex-1 overflow-auto p-6">{body}</div>
+      {menu && (
+        <ContextMenu
+          open
+          x={menu.x}
+          y={menu.y}
+          items={(() => {
+            const tab = tabs.find((t) => t.id === menu.tabId);
+            return tab ? menuItems(tab) : [];
+          })()}
+          onClose={() => setMenu(null)}
+        />
+      )}
     </div>
   );
 }
