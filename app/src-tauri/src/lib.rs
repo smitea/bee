@@ -69,6 +69,9 @@ pub fn run() {
                 let _ = connection::ensure_bundle(parsed);
             }
 
+            let plugin_dir = commands::plugins::default_plugin_dir();
+            log::info!("plugin directory: {}", plugin_dir.display());
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -115,6 +118,9 @@ pub fn run() {
             commands::datasources::datasource_delete,
             commands::plugins::plugin_list,
             commands::plugins::plugin_schema,
+            commands::plugins::plugin_scan_directory,
+            commands::plugins::plugin_default_dir,
+            commands::plugins::plugin_last_dir,
             commands::plugins::datasource_form_schema,
             commands::plugin_settings::plugin_settings_get,
             commands::plugin_settings::plugin_settings_set,

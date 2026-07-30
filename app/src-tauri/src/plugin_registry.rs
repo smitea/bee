@@ -77,6 +77,36 @@ impl PluginRegistry {
         }
     }
 
+    pub fn scan_directory(&self, path: &Path) -> Vec<PluginSummary> {
+        let mut loaded_ids: Vec<String> = Vec::new();
+        let ext = std::env::consts::DLL_EXTENSION;
+        let read = match std::fs::read_dir(path) {
+            Ok(r) => r,
+            Err(_) => return Vec::new(),
+        };
+        for entry in read.flatten() {
+            let p = entry.path();
+            if !p.is_file() {
+                continue;
+            }
+            let matches = p
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|s| s.eq_ignore_ascii_case(ext))
+                .unwrap_or(false);
+            if !matches {
+                continue;
+            }
+            if let Ok(id) = self.load(&p) {
+                loaded_ids.push(id);
+            }
+        }
+        let mut summaries = self.list_summaries();
+        summaries.sort_by(|a, b| a.name.cmp(&b.name));
+        summaries.retain(|s| loaded_ids.iter().any(|id| id == &s.id));
+        summaries
+    }
+
     pub fn load(&self, path: &Path) -> Result<String, PluginRegistryError> {
         let path_str = path.display().to_string();
         let bytes = std::fs::read(path).map_err(|e| PluginRegistryError::Read {
@@ -423,7 +453,7 @@ mod tests {
 
     #[test]
     fn load_real_compiled_cdylib_returns_summary_with_id_and_manifest() {
-        let Some(cdylib_path) = build_minimal_test_cdylib() else {
+        let Some(cdylib_path) = build_named_test_cdylib("bee-plugin-test-fixture", None) else {
             eprintln!("rustc not on PATH or compile failed; skipping cdylib load test");
             return;
         };
@@ -438,10 +468,48 @@ mod tests {
         assert_eq!(s.adapters, vec!["subscribe".to_string()]);
         assert!(s.handlers.is_empty());
     }
+
+    #[test]
+    fn scan_directory_returns_plugins_sorted_by_name() {
+        let dir = tempdir_in_target();
+        let Some(_zeta) = build_named_test_cdylib("zeta-plugin", Some(&dir)) else {
+            eprintln!("rustc not on PATH or compile failed; skipping scan_directory test");
+            return;
+        };
+        let Some(_alpha) = build_named_test_cdylib("alpha-plugin", Some(&dir)) else {
+            eprintln!("rustc not on PATH or compile failed; skipping scan_directory test");
+            return;
+        };
+        let reg = PluginRegistry::new();
+        let summaries = reg.scan_directory(&dir);
+        assert_eq!(summaries.len(), 2, "expected two plugins loaded");
+        assert_eq!(summaries[0].name, "alpha-plugin");
+        assert_eq!(summaries[1].name, "zeta-plugin");
+    }
+
+    #[test]
+    fn scan_directory_nonexistent_returns_empty_list() {
+        let reg = PluginRegistry::new();
+        let summaries = reg.scan_directory(Path::new("/tmp/bee_plugin_scan_no_such_dir_xyz"));
+        assert!(summaries.is_empty());
+    }
+
+    #[test]
+    fn scan_directory_skips_non_plugin_files() {
+        let dir = tempdir_in_target();
+        std::fs::write(dir.join("readme.txt"), b"not a plugin").unwrap();
+        std::fs::write(dir.join("config.json"), b"{}").unwrap();
+        let reg = PluginRegistry::new();
+        let summaries = reg.scan_directory(&dir);
+        assert!(summaries.is_empty());
+    }
 }
 
 #[cfg(test)]
-fn build_minimal_test_cdylib() -> Option<std::path::PathBuf> {
+fn build_named_test_cdylib(
+    plugin_name: &str,
+    out_dir: Option<&std::path::Path>,
+) -> Option<std::path::PathBuf> {
     let target = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
@@ -461,11 +529,19 @@ fn build_minimal_test_cdylib() -> Option<std::path::PathBuf> {
                 .map(|s| s.starts_with("libbee_plugin_sdk-") && s.ends_with(".rlib"))
                 .unwrap_or(false)
         })?;
-    let dir = tempdir_in_target();
-    let src = dir.join("plugin.rs");
-    let cdylib_name = "bee_plugin_test_fixture";
-    let output = dir.join(cdylib_lib_filename(cdylib_name));
-    let src_text = r#"
+    let build_dir = match out_dir {
+        Some(d) => d.to_path_buf(),
+        None => tempdir_in_target(),
+    };
+    let safe_name: String = plugin_name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    let src = build_dir.join(format!("plugin_{}.rs", safe_name));
+    let cdylib_name = format!("bee_plugin_test_{}", safe_name);
+    let output = build_dir.join(cdylib_lib_filename(&cdylib_name));
+    let plugin_name_lit = plugin_name.replace('"', "\\\"");
+    let template = r#"
 use bee_plugin_sdk::{
     AdapterDescriptor, Factory, PluginHandle, PluginManifest, PluginName, PluginResult,
 };
@@ -477,7 +553,7 @@ pub struct TestFactory;
 impl Factory for TestFactory {
     fn manifest() -> PluginManifest {
         PluginManifest {
-            name: PluginName("bee-plugin-test-fixture".into()),
+            name: PluginName("__PLUGIN_NAME__".into()),
             feature_version: "0.0.1".into(),
             abi_version: "v1".into(),
             adapters: vec![AdapterDescriptor {
@@ -500,6 +576,7 @@ impl Factory for TestFactory {
 
 bee_plugin_sdk::cdylib_plugin!(TestFactory);
 "#;
+    let src_text = template.replace("__PLUGIN_NAME__", &plugin_name_lit);
     std::fs::write(&src, src_text).ok()?;
     let status = std::process::Command::new("rustc")
         .args([

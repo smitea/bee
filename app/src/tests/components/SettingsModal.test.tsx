@@ -21,6 +21,9 @@ vi.mock("../../ipc", async () => {
     settingsPut: vi.fn(),
     tenantGet: vi.fn(),
     tenantSet: vi.fn(),
+    pluginScanDirectory: vi.fn().mockResolvedValue([]),
+    pluginDefaultDir: vi.fn().mockResolvedValue("/Users/test/.bee/plugins"),
+    pluginLastDir: vi.fn().mockResolvedValue(null),
   };
 });
 

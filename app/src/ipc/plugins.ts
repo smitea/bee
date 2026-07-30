@@ -34,3 +34,15 @@ export async function pluginList(): Promise<PluginSummary[]> {
 export async function pluginSchema(plugin: string): Promise<PluginSchema> {
   return invoke<PluginSchema>("plugin_schema", { plugin });
 }
+
+export async function pluginScanDirectory(path: string): Promise<PluginSummary[]> {
+  return invoke<PluginSummary[]>("plugin_scan_directory", { path });
+}
+
+export async function pluginDefaultDir(): Promise<string> {
+  return invoke<string>("plugin_default_dir");
+}
+
+export async function pluginLastDir(): Promise<string | null> {
+  return invoke<string | null>("plugin_last_dir");
+}

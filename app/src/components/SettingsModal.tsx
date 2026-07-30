@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { Plug, Power, PowerOff } from "lucide-react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Plug, Power, PowerOff, RefreshCw } from "lucide-react";
 
 import { useConnection } from "../state/connectionStore";
 import { useTenant } from "../state/tenantStore";
@@ -12,6 +12,9 @@ import {
   tenantGet,
   tenantSet,
   pluginList,
+  pluginScanDirectory,
+  pluginDefaultDir,
+  pluginLastDir,
   pluginSettingsGet,
   pluginSettingsSet,
   type PluginSummary,
@@ -398,11 +401,57 @@ function ConnectionSection({
 }
 
 function PluginsSection() {
+  const queryClient = useQueryClient();
   const pluginsQ = useQuery<PluginSummary[]>({
     queryKey: ["plugins-list"],
     queryFn: () => pluginList(),
   });
+  const [pluginDir, setPluginDir] = useState<string>("");
+  const [scanState, setScanState] = useState<"idle" | "Scanning" | "Scanned" | "Error">("idle");
+  const [scanError, setScanError] = useState<string>("");
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const last = await pluginLastDir();
+        const fallback = await pluginDefaultDir();
+        if (!cancelled) {
+          setPluginDir(last && last.trim() !== "" ? last : fallback);
+        }
+      } catch {
+        if (!cancelled) {
+          try {
+            const fallback = await pluginDefaultDir();
+            if (!cancelled) setPluginDir(fallback);
+          } catch {
+            if (!cancelled) setPluginDir("");
+          }
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const all = pluginsQ.data ?? [];
+
+  const onReload = async () => {
+    if (!pluginDir) return;
+    setScanState("Scanning");
+    setScanError("");
+    try {
+      await pluginScanDirectory(pluginDir);
+      await settingsPut("plugin_dir", pluginDir);
+      await queryClient.invalidateQueries({ queryKey: ["plugins-list"] });
+      setScanState("Scanned");
+    } catch (e) {
+      setScanError(String((e as Error).message ?? e));
+      setScanState("Error");
+    }
+  };
+
   return (
     <section>
       <div className="flex items-center justify-between mb-3">
@@ -418,6 +467,58 @@ function PluginsSection() {
         Plugins loaded via bee_plugin_sdk. Toggle enabled state and edit per-plugin
         configuration (JSON).
       </p>
+      <div className="mb-3 rounded border border-gray-200 dark:border-neutral-700 p-2 space-y-2">
+        <label
+          className="text-[10px] uppercase tracking-wider text-gray-500 dark:text-neutral-400"
+          htmlFor="plugin-dir"
+        >
+          Plugin directory
+        </label>
+        <input
+          id="plugin-dir"
+          aria-label="Plugin directory"
+          value={pluginDir}
+          onChange={(e) => setPluginDir(e.target.value)}
+          placeholder="/path/to/plugins"
+          className="w-full px-2 py-1 text-xs font-mono rounded border border-gray-200 dark:border-neutral-700 bg-white dark:bg-neutral-900"
+          data-testid="plugin-dir-input"
+        />
+        <div className="flex items-center justify-between">
+          <span
+            className={
+              scanState === "Scanned"
+                ? "text-[10px] text-accent-green"
+                : scanState === "Error"
+                  ? "text-[10px] text-accent-red"
+                  : scanState === "Scanning"
+                    ? "text-[10px] text-gray-500"
+                    : "text-[10px] text-transparent"
+            }
+            aria-live="polite"
+            data-testid="plugin-scan-status"
+          >
+            {scanState === "idle" ? "·" : scanState}
+          </span>
+          <button
+            type="button"
+            onClick={() => void onReload()}
+            disabled={scanState === "Scanning" || !pluginDir}
+            data-testid="plugin-reload"
+            className="flex items-center gap-1 px-2 py-1 text-[10px] rounded bg-accent-blue text-white hover:bg-accent-blue/90 disabled:opacity-50"
+          >
+            <RefreshCw
+              size={11}
+              className={scanState === "Scanning" ? "animate-spin" : ""}
+            />
+            Reload from disk
+          </button>
+        </div>
+        {scanError && (
+          <p className="text-[10px] text-accent-red" data-testid="plugin-scan-error">
+            {scanError}
+          </p>
+        )}
+      </div>
       {all.length === 0 ? (
         <p className="text-[11px] text-gray-400 px-2 py-2">no plugins loaded</p>
       ) : (

@@ -210,4 +210,101 @@ describe("<ClusterTopology>", () => {
     expect(container.querySelector('[data-testid="rf-node-n-1"]')).toBeTruthy();
     expect(container.querySelector('[data-testid="rf-node-n-2"]')).toBeTruthy();
   });
+
+  it("renders all five nodes when AdminServer reports a 5-node cluster", () => {
+    const fiveNodes: TopologyNode[] = [
+      { id: 1, role: "Leader", addr: "127.0.0.1:9001", term: 5, lag: 0 },
+      { id: 2, role: "Follower", addr: "127.0.0.1:9002", term: 5, lag: 0 },
+      { id: 3, role: "Follower", addr: "127.0.0.1:9003", term: 5, lag: 1 },
+      { id: 4, role: "Candidate", addr: "127.0.0.1:9004", term: 5, lag: 0 },
+      { id: 5, role: "Follower", addr: "127.0.0.1:9005", term: 5, lag: 2 },
+    ];
+    render(<ClusterTopology nodes={fiveNodes} leaderId={1} />);
+    for (const id of [1, 2, 3, 4, 5]) {
+      expect(screen.getByTestId(`topology-node-${id}`)).toBeInTheDocument();
+      expect(screen.getByTestId(`topology-status-${id}`)).toBeInTheDocument();
+      expect(screen.getByTestId(`rf-node-n-${id}`)).toBeInTheDocument();
+    }
+    expect(screen.getAllByTestId(/^topology-node-/).length).toBe(5);
+    expect(screen.getAllByTestId(/^rf-node-n-/).length).toBe(5);
+    expect(screen.getByTestId("topology-node-1").getAttribute("data-role")).toBe("leader");
+    expect(screen.getByTestId("topology-node-4").getAttribute("data-role")).toBe("candidate");
+    for (const id of [2, 3, 5]) {
+      expect(
+        screen.getByTestId(`topology-node-${id}`).getAttribute("data-role"),
+      ).toBe("follower");
+    }
+  });
+
+  it("renders exactly one react-flow edge from leader to each follower in a 5-node cluster", () => {
+    const fiveNodes: TopologyNode[] = [
+      { id: 1, role: "Leader", addr: "127.0.0.1:9001", term: 5, lag: 0 },
+      { id: 2, role: "Follower", addr: "127.0.0.1:9002", term: 5, lag: 0 },
+      { id: 3, role: "Follower", addr: "127.0.0.1:9003", term: 5, lag: 0 },
+      { id: 4, role: "Follower", addr: "127.0.0.1:9004", term: 5, lag: 0 },
+      { id: 5, role: "Follower", addr: "127.0.0.1:9005", term: 5, lag: 0 },
+    ];
+    render(<ClusterTopology nodes={fiveNodes} leaderId={1} />);
+    expect(screen.getByTestId("rf-edge-e-1-2")).toBeInTheDocument();
+    expect(screen.getByTestId("rf-edge-e-1-3")).toBeInTheDocument();
+    expect(screen.getByTestId("rf-edge-e-1-4")).toBeInTheDocument();
+    expect(screen.getByTestId("rf-edge-e-1-5")).toBeInTheDocument();
+    expect(screen.getAllByTestId(/^rf-edge-e-/).length).toBe(4);
+  });
+
+  it("maps a down follower to the down status in a multi-node cluster", () => {
+    const mixed: TopologyNode[] = [
+      { id: 1, role: "Leader", addr: "127.0.0.1:9001", term: 5, lag: 0 },
+      { id: 2, role: "Follower", addr: "127.0.0.1:9002", term: 5, lag: 0 },
+      { id: 3, role: "Follower", addr: "127.0.0.1:9003", term: 5, lag: 0, error: "refused" },
+      { id: 4, role: "Follower", addr: "127.0.0.1:9004", term: 5, lag: 0 },
+      { id: 5, role: "Follower", addr: "127.0.0.1:9005", term: 5, lag: 0 },
+    ];
+    render(<ClusterTopology nodes={mixed} leaderId={1} />);
+    expect(
+      screen.getByTestId("topology-status-3").getAttribute("data-status-dot"),
+    ).toBe("down");
+    expect(
+      screen.getByTestId("topology-status-1").getAttribute("data-status-dot"),
+    ).toBe("healthy");
+    expect(
+      screen.getByTestId("topology-status-4").getAttribute("data-status-dot"),
+    ).toBe("healthy");
+  });
+
+  it("handles the ClusterDashboard-style mapping where every node has an id, role, commit_index, log_length", () => {
+    const fromAdmin: {
+      id: number;
+      role: string;
+      commit_index: number;
+      log_length: number;
+    }[] = [
+      { id: 1, role: "Leader", commit_index: 100, log_length: 100 },
+      { id: 2, role: "Follower", commit_index: 100, log_length: 100 },
+      { id: 3, role: "Follower", commit_index: 100, log_length: 98 },
+      { id: 4, role: "Candidate", commit_index: 99, log_length: 99 },
+      { id: 5, role: "Follower", commit_index: 100, log_length: 95 },
+    ];
+    const mapped: TopologyNode[] = fromAdmin.map((n) => ({
+      id: n.id,
+      role: n.role as TopologyNode["role"],
+      addr: "127.0.0.1:9999",
+      term: 7,
+      lag: n.commit_index - n.log_length,
+      error:
+        n.role === "Follower" && n.log_length < n.commit_index
+          ? `lag ${n.commit_index - n.log_length}`
+          : null,
+    }));
+    render(<ClusterTopology nodes={mapped} leaderId={1} />);
+    for (const n of fromAdmin) {
+      expect(screen.getByTestId(`topology-node-${n.id}`)).toBeInTheDocument();
+      expect(
+        screen.getByTestId(`topology-node-${n.id}`).getAttribute("data-role"),
+      ).toBe(n.role.toLowerCase());
+    }
+    expect(screen.getByTestId("topology-status-4").getAttribute("data-status-dot")).toBe(
+      "candidate",
+    );
+  });
 });

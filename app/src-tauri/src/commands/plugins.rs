@@ -1,5 +1,12 @@
-use serde::Serialize;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
+use serde::Serialize;
+use tauri::AppHandle;
+use tauri::Manager;
+
+use crate::commands::{CmdError, CmdResult};
+use crate::db::{self, Database};
 use crate::plugin_registry::{self, PluginRegistry, PluginSummary};
 
 #[derive(Debug, Serialize, Clone)]
@@ -27,6 +34,8 @@ fn registry_static() -> &'static PluginRegistry {
     REG.get_or_init(PluginRegistry::new)
 }
 
+static INITIAL_SCAN_DONE: AtomicBool = AtomicBool::new(false);
+
 pub fn list_summaries() -> Vec<PluginSummary> {
     registry_static().list_summaries()
 }
@@ -41,6 +50,42 @@ pub fn schema(name: &str) -> PluginSchema {
         name: name.to_string(),
         adapters,
     }
+}
+
+pub fn default_plugin_dir() -> PathBuf {
+    if let Ok(p) = std::env::var("BEE_PLUGIN_DIR") {
+        let trimmed = p.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.is_empty() {
+            return PathBuf::from(home).join(".bee").join("plugins");
+        }
+    }
+    if let Ok(home) = std::env::var("USERPROFILE") {
+        if !home.is_empty() {
+            return PathBuf::from(home).join(".bee").join("plugins");
+        }
+    }
+    PathBuf::from(".bee").join("plugins")
+}
+
+pub fn ensure_initial_scan() {
+    if INITIAL_SCAN_DONE.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let dir = default_plugin_dir();
+    let _ = registry_static().scan_directory(&dir);
+}
+
+pub fn scan_directory_path(path: &Path) -> Vec<PluginSummary> {
+    registry_static().scan_directory(path)
+}
+
+pub fn mark_initial_scan_done() {
+    INITIAL_SCAN_DONE.store(true, Ordering::SeqCst);
 }
 
 fn first_adapter_name(adapters: &serde_json::Value) -> Option<String> {
@@ -81,12 +126,37 @@ fn flatten_connection_fields(adapter: &serde_json::Value) -> Vec<DatasourceFormF
 
 #[tauri::command]
 pub fn plugin_list() -> Vec<PluginSummary> {
+    ensure_initial_scan();
     list_summaries()
 }
 
 #[tauri::command]
 pub fn plugin_schema(plugin: String) -> PluginSchema {
     schema(&plugin)
+}
+
+#[tauri::command]
+pub fn plugin_scan_directory(path: String) -> Vec<PluginSummary> {
+    mark_initial_scan_done();
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    scan_directory_path(Path::new(trimmed))
+}
+
+#[tauri::command]
+pub fn plugin_default_dir() -> String {
+    default_plugin_dir().to_string_lossy().into_owned()
+}
+
+#[tauri::command]
+pub fn plugin_last_dir(app: AppHandle) -> CmdResult<Option<String>> {
+    let state = app
+        .try_state::<Database>()
+        .ok_or_else(|| CmdError { message: "db not initialised".into() })?;
+    let conn = state.lock().map_err(CmdError::from)?;
+    db::settings::get(&conn, "plugin_dir").map_err(CmdError::from)
 }
 
 #[tauri::command]
@@ -213,5 +283,93 @@ mod tests {
         m.insert("beta".into(), serde_json::json!({}));
         let v = serde_json::Value::Object(m);
         assert_eq!(first_adapter_name(&v).as_deref(), Some("alpha"));
+    }
+
+    #[test]
+    fn summaries_sorted_by_name_ascending() {
+        let reg = PluginRegistry::new();
+        let descriptors = vec![
+            ("zeta-plugin", "z-id"),
+            ("alpha-plugin", "a-id"),
+            ("mike-plugin", "m-id"),
+        ];
+        for (name, id) in descriptors {
+            reg.insert_manifest(
+                id.into(),
+                bee_plugin_sdk::PluginManifest {
+                    name: bee_plugin_sdk::PluginName(name.into()),
+                    feature_version: "0.0.1".into(),
+                    abi_version: "v1".into(),
+                    adapters: vec![],
+                    handlers: vec![],
+                },
+            );
+        }
+        let summaries = reg.list_summaries();
+        let names: Vec<&str> = summaries.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha-plugin", "mike-plugin", "zeta-plugin"]);
+    }
+
+    #[test]
+    fn scan_directory_command_returns_empty_for_missing_path() {
+        mark_initial_scan_done();
+        let out = plugin_scan_directory("/tmp/bee_plugin_definitely_missing_xyz_9999".into());
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn scan_directory_command_trims_whitespace_and_returns_empty_for_blank() {
+        mark_initial_scan_done();
+        let out = plugin_scan_directory("   ".into());
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn scan_directory_command_returns_empty_when_path_is_nonexistent() {
+        mark_initial_scan_done();
+        let dir = std::env::temp_dir().join("bee_plugin_scan_nonexistent_xyz_unique");
+        let _ = std::fs::remove_dir_all(&dir);
+        let out = plugin_scan_directory(dir.to_string_lossy().into_owned());
+        assert!(out.is_empty());
+    }
+
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn default_plugin_dir_respects_bee_plugin_dir_env() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let prev = std::env::var("BEE_PLUGIN_DIR").ok();
+        std::env::set_var("BEE_PLUGIN_DIR", "/custom/bee/plugin/dir");
+        let dir = default_plugin_dir();
+        assert_eq!(dir, PathBuf::from("/custom/bee/plugin/dir"));
+        match prev {
+            Some(v) => std::env::set_var("BEE_PLUGIN_DIR", v),
+            None => std::env::remove_var("BEE_PLUGIN_DIR"),
+        }
+    }
+
+    #[test]
+    fn default_plugin_dir_falls_back_to_home_when_env_missing() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let prev_plugin = std::env::var("BEE_PLUGIN_DIR").ok();
+        let prev_home = std::env::var("HOME").ok();
+        let prev_userprofile = std::env::var("USERPROFILE").ok();
+        std::env::remove_var("BEE_PLUGIN_DIR");
+        std::env::set_var("HOME", "/test/home");
+        std::env::remove_var("USERPROFILE");
+        let dir = default_plugin_dir();
+        assert_eq!(dir, PathBuf::from("/test/home/.bee/plugins"));
+        match prev_plugin {
+            Some(v) => std::env::set_var("BEE_PLUGIN_DIR", v),
+            None => std::env::remove_var("BEE_PLUGIN_DIR"),
+        }
+        match prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        match prev_userprofile {
+            Some(v) => std::env::set_var("USERPROFILE", v),
+            None => std::env::remove_var("USERPROFILE"),
+        }
     }
 }
