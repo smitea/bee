@@ -345,6 +345,22 @@ function PanelFrame({
   onMenuToggle,
 }: FrameProps) {
   const ref = useRef<HTMLDivElement | null>(null);
+  const dragListeners = useRef<{
+    onMove: (event: MouseEvent) => void;
+    onUp: () => void;
+  } | null>(null);
+
+  const removeDragListeners = () => {
+    const listeners = dragListeners.current;
+    if (listeners === null) return;
+    document.removeEventListener("mousemove", listeners.onMove);
+    document.removeEventListener("mouseup", listeners.onUp);
+    window.removeEventListener("mousemove", listeners.onMove);
+    window.removeEventListener("mouseup", listeners.onUp);
+    dragListeners.current = null;
+  };
+
+  useEffect(() => removeDragListeners, []);
 
   const onMouseDown = (e: React.MouseEvent, mode: "move" | "resize") => {
     if (!editing) return;
@@ -366,12 +382,15 @@ function PanelFrame({
       else onResize(incDx, incDy);
     };
     const onUp = () => {
-      document.removeEventListener("mousemove", onMove2);
-      document.removeEventListener("mouseup", onUp);
+      removeDragListeners();
       onCommit();
     };
+    removeDragListeners();
+    dragListeners.current = { onMove: onMove2, onUp };
     document.addEventListener("mousemove", onMove2);
     document.addEventListener("mouseup", onUp);
+    window.addEventListener("mousemove", onMove2);
+    window.addEventListener("mouseup", onUp);
   };
 
   return (

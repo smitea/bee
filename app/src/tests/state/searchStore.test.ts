@@ -62,6 +62,21 @@ describe("useSearch", () => {
     }
   });
 
+  it("reset clears a pending debounce", async () => {
+    vi.useFakeTimers();
+    try {
+      useSearch.getState().setQuery("alpha");
+      useSearch.setState({ query: "", loading: false, results: [] });
+
+      await vi.advanceTimersByTimeAsync(250);
+
+      expect(mocks.searchLocal).not.toHaveBeenCalled();
+      expect(mocks.searchServer).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("cancellation: stale local response does not overwrite fresh results", async () => {
     let resolveLocal: (hits: { kind: string; id: string; title: string; path: string[] }[]) => void = () => {};
     const stale = [{ kind: "Pipeline", id: "stale", title: "old", path: ["P"] }];

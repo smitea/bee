@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { act, render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 const applicationsList = vi.fn();
@@ -173,6 +173,32 @@ describe("<NavTree>", () => {
       expect(screen.getByText(/Applications \(1\)/)).toBeInTheDocument(),
     );
     expect(await screen.findByText("Demo")).toBeInTheDocument();
+  });
+
+  it("does not report a rejected seed after unmount", async () => {
+    let rejectSeed: (reason?: unknown) => void = () => {};
+    seedDemo.mockImplementationOnce(
+      () =>
+        new Promise((_, reject) => {
+          rejectSeed = reject;
+        }),
+    );
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { NavTree } = await import("../../components/NavTree");
+    const rendered = withClient(<NavTree />);
+    const seedBtn = await screen.findByTestId("nav-seed-demo");
+
+    fireEvent.click(seedBtn);
+    expect(seedDemo).toHaveBeenCalledTimes(1);
+    rendered.unmount();
+
+    await act(async () => {
+      rejectSeed(new Error("cancelled"));
+      await Promise.resolve();
+    });
+
+    expect(error).not.toHaveBeenCalled();
+    error.mockRestore();
   });
 
   it("does not render the Seed demo button when applications already exist", async () => {

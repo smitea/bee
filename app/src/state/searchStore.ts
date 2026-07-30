@@ -8,6 +8,7 @@ export interface SearchStoreState {
   loading: boolean;
   results: SearchHit[];
   setQuery(q: string): void;
+  clear(): void;
   runSearchNow(query: string): Promise<void>;
   merge(hits: SearchHit[]): SearchHit[];
 }
@@ -31,16 +32,19 @@ function scoreOf(h: SearchHit, q: string): number {
 let requestSeq = 0;
 let debounceHandle: ReturnType<typeof setTimeout> | null = null;
 
+function clearDebounce(): void {
+  if (debounceHandle === null) return;
+  clearTimeout(debounceHandle);
+  debounceHandle = null;
+}
+
 export const useSearch = create<SearchStoreState>((set, get) => ({
   query: "",
   loading: false,
   results: [],
   setQuery(q) {
     set({ query: q });
-    if (debounceHandle !== null) {
-      clearTimeout(debounceHandle);
-      debounceHandle = null;
-    }
+    clearDebounce();
     if (!q) {
       set({ results: [], loading: false });
       return;
@@ -49,6 +53,10 @@ export const useSearch = create<SearchStoreState>((set, get) => ({
       debounceHandle = null;
       void get().runSearchNow(q);
     }, DEBOUNCE_MS);
+  },
+  clear() {
+    clearDebounce();
+    set({ query: "", loading: false, results: [] });
   },
   async runSearchNow(query) {
     requestSeq += 1;
@@ -78,3 +86,18 @@ export const useSearch = create<SearchStoreState>((set, get) => ({
     return [...hits].sort((a, b) => scoreOf(b, q) - scoreOf(a, q));
   },
 }));
+
+const unsubscribeReset = useSearch.subscribe((state, previousState) => {
+  if (!state.query && previousState.query) {
+    clearDebounce();
+  }
+});
+
+const hot = import.meta as ImportMeta & {
+  hot?: { dispose(callback: () => void): void };
+};
+
+hot.hot?.dispose(() => {
+  clearDebounce();
+  unsubscribeReset();
+});

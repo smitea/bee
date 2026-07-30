@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Hexagon,
   Plus,
@@ -71,9 +71,17 @@ export function NavTree() {
   const [draftTenant, setDraftTenant] = useState("");
   const [expanded, setExpanded] = useState<Record<number, boolean>>({});
   const [seeding, setSeeding] = useState(false);
+  const cancelled = useRef(false);
   const activeTenant = useTenant((s) => s.tenant);
   const tenantHydrated = useTenant((s) => s.hydrated);
   const refreshTenant = useTenant((s) => s.refresh);
+
+  useEffect(() => {
+    cancelled.current = false;
+    return () => {
+      cancelled.current = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (!applicationsLoaded) {
@@ -151,10 +159,12 @@ export function NavTree() {
     setSeeding(true);
     try {
       await seedDemo();
+      if (cancelled.current) return;
     } catch (e) {
+      if (cancelled.current) return;
       console.error("seed demo failed", e);
     } finally {
-      setSeeding(false);
+      if (!cancelled.current) setSeeding(false);
     }
   };
 

@@ -145,6 +145,29 @@ describe("<DashboardEditor>", () => {
     });
   });
 
+  it("cleans up drag listeners when released outside the panel", async () => {
+    const addWindowListener = vi.spyOn(window, "addEventListener");
+    const removeWindowListener = vi.spyOn(window, "removeEventListener");
+    withClient(<DashboardEditor applicationId={1} />);
+    await screen.findByTestId("panel-kline");
+    const callsBefore = mocks.dashboardSave.mock.calls.length;
+    const header = screen.getByTestId("panel-kline").querySelector("header") as HTMLElement;
+
+    fireEvent.mouseDown(header, { clientX: 0, clientY: 0 });
+    expect(addWindowListener).toHaveBeenCalledWith("mousemove", expect.any(Function));
+    expect(addWindowListener).toHaveBeenCalledWith("mouseup", expect.any(Function));
+    fireEvent.mouseMove(window, { clientX: 240, clientY: 240 });
+    fireEvent.mouseUp(window);
+
+    await waitFor(() =>
+      expect(mocks.dashboardSave.mock.calls.length).toBeGreaterThan(callsBefore),
+    );
+    expect(removeWindowListener).toHaveBeenCalledWith("mousemove", expect.any(Function));
+    expect(removeWindowListener).toHaveBeenCalledWith("mouseup", expect.any(Function));
+    addWindowListener.mockRestore();
+    removeWindowListener.mockRestore();
+  });
+
   it("round-trips a saved layout through dashboard_get + dashboard_save", async () => {
     mocks.dashboardGet.mockResolvedValue({
       application_id: 1,
