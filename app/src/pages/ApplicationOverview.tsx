@@ -2,7 +2,12 @@ import { useEffect, useState } from "react";
 import { LayoutDashboard, Workflow, Database, Download, Upload } from "lucide-react";
 
 import { useApplications } from "../state/applicationsStore";
-import type { ApplicationView, DisableReport, ImportReportView } from "../ipc/applications";
+import type {
+  ApplicationView,
+  DisableReport,
+  EnableReport,
+  ImportReportView,
+} from "../ipc/applications";
 import {
   applicationExport,
   applicationImport,
@@ -14,6 +19,13 @@ interface Props {
   applicationId: number;
 }
 
+type LifecycleState =
+  | { kind: "idle" }
+  | { kind: "busy" }
+  | { kind: "enabled"; report: EnableReport }
+  | { kind: "disabled"; report: DisableReport }
+  | { kind: "error"; message: string };
+
 export function ApplicationOverview({ applicationId }: Props) {
   const applications = useApplications((s) => s.items);
   const refresh = useApplications((s) => s.refresh);
@@ -22,13 +34,7 @@ export function ApplicationOverview({ applicationId }: Props) {
   const app = applications.find((a) => a.id === applicationId);
 
   const [events, setEvents] = useState<AuditEventView[]>([]);
-  const [lifecycleState, setLifecycleState] = useState<
-    | { kind: "idle" }
-    | { kind: "busy" }
-    | { kind: "enabled" }
-    | { kind: "disabled"; report: DisableReport }
-    | { kind: "error"; message: string }
-  >({ kind: "idle" });
+  const [lifecycleState, setLifecycleState] = useState<LifecycleState>({ kind: "idle" });
 
   const [exportPass, setExportPass] = useState("");
   const [exportPath, setExportPath] = useState("");
@@ -86,8 +92,8 @@ export function ApplicationOverview({ applicationId }: Props) {
   const onEnable = async () => {
     setLifecycleState({ kind: "busy" });
     try {
-      await enableAction(app.id);
-      setLifecycleState({ kind: "enabled" });
+      const report = await enableAction(app.id);
+      setLifecycleState({ kind: "enabled", report });
       await refresh();
     } catch (e) {
       setLifecycleState({ kind: "error", message: (e as Error).message });
@@ -133,18 +139,75 @@ export function ApplicationOverview({ applicationId }: Props) {
       </header>
 
       {lifecycleState.kind === "enabled" && (
-        <div data-testid="lifecycle-enabled" className="text-[11px] text-accent-green">
-          Application enabled
+        <div
+          data-testid="lifecycle-enabled"
+          className="text-[11px] text-gray-600 dark:text-neutral-300 bg-white dark:bg-neutral-800 border border-gray-200 dark:border-neutral-700 rounded-md p-2 space-y-1"
+        >
+          <div
+            className={
+              lifecycleState.report.outcome === "Success"
+                ? "text-accent-green"
+                : lifecycleState.report.outcome === "Degraded"
+                  ? "text-accent-amber"
+                  : "text-accent-red"
+            }
+          >
+            Enable {lifecycleState.report.outcome} ·{" "}
+            {lifecycleState.report.succeeded.length} succeeded,{" "}
+            {lifecycleState.report.failed.length} failed,{" "}
+            {lifecycleState.report.skipped.length} skipped
+          </div>
+          {lifecycleState.report.failed.length > 0 && (
+            <ul
+              data-testid="enable-failed"
+              className="list-disc list-inside text-accent-red"
+            >
+              {lifecycleState.report.failed.map((f) => (
+                <li key={`${f.kind}-${f.id}`}>
+                  {f.kind} "{f.id}": {f.reason}
+                </li>
+              ))}
+            </ul>
+          )}
+          {lifecycleState.report.skipped.length > 0 && (
+            <ul
+              data-testid="enable-skipped"
+              className="list-disc list-inside text-gray-500"
+            >
+              {lifecycleState.report.skipped.map((s) => (
+                <li key={`${s.kind}-${s.id}`}>
+                  {s.kind} "{s.id}"
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
       )}
       {lifecycleState.kind === "disabled" && (
-        <div
-          data-testid="disable-summary"
-          className="text-[11px] text-gray-600 dark:text-neutral-300 bg-white dark:bg-neutral-800 border border-gray-200 dark:border-neutral-700 rounded-md p-2"
-        >
-          snapshot taken_at={lifecycleState.report.snapshot.taken_at} · pipelines:{" "}
-          {lifecycleState.report.pipelines.length} · datasources:{" "}
-          {lifecycleState.report.datasources.length}
+        <div className="space-y-1">
+          <div
+            data-testid="disable-summary"
+            className="text-[11px] text-gray-600 dark:text-neutral-300 bg-white dark:bg-neutral-800 border border-gray-200 dark:border-neutral-700 rounded-md p-2"
+          >
+            {lifecycleState.report.snapshot
+              ? `snapshot taken_at=${lifecycleState.report.snapshot.taken_at} · `
+              : ""}
+            pipelines: {lifecycleState.report.pipelines.length} · datasources:{" "}
+            {lifecycleState.report.datasources.length} ·{" "}
+            {lifecycleState.report.succeeded.length} snapshotted
+          </div>
+          {lifecycleState.report.succeeded.length > 0 && (
+            <ul
+              data-testid="pending-rehydrations"
+              className="text-[11px] text-gray-500 dark:text-neutral-400 list-disc list-inside"
+            >
+              {lifecycleState.report.succeeded.map((r) => (
+                <li key={`pending-${r.kind}-${r.id}`}>
+                  pending rehydration: {r.kind} "{r.id}"
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
       )}
       {lifecycleState.kind === "error" && (

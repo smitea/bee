@@ -19,6 +19,45 @@ pub struct DisableSnapshot {
     pub payload_json: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceSnapshot {
+    pub application_id: i64,
+    pub taken_at: i64,
+    pub resource_kind: String,
+    pub resource_id: String,
+    pub payload_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DisableOutcome {
+    pub snapshot_rows: Vec<ResourceSnapshot>,
+    pub pipelines: Vec<String>,
+    pub datasources: Vec<String>,
+    pub enabled_after: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceOp {
+    pub kind: String,
+    pub id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FailedResource {
+    pub kind: String,
+    pub id: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnableOutcome {
+    pub outcome: String,
+    pub succeeded: Vec<ResourceOp>,
+    pub failed: Vec<FailedResource>,
+    pub skipped: Vec<ResourceOp>,
+    pub enabled_after: bool,
+}
+
 pub fn list(conn: &Connection) -> Result<Vec<Application>, String> {
     let mut stmt = conn
         .prepare(
@@ -253,6 +292,277 @@ pub fn list_disable_snapshots(
         .map_err(|e| format!("applications.list_disable_snapshots collect: {e}"))
 }
 
+pub fn take_resource_snapshot(
+    conn: &Connection,
+    application_id: i64,
+    resource_kind: &str,
+    resource_id: &str,
+    payload_json: &str,
+) -> Result<ResourceSnapshot, String> {
+    let taken_at = now_secs();
+    conn.execute(
+        "INSERT INTO application_resource_snapshots
+            (application_id, taken_at, resource_kind, resource_id, payload_json)
+         VALUES (?, ?, ?, ?, ?)",
+        params![application_id, taken_at, resource_kind, resource_id, payload_json],
+    )
+    .map_err(|e| format!(
+        "applications.take_resource_snapshot(app={application_id}, {resource_kind}={resource_id}): {e}"
+    ))?;
+    Ok(ResourceSnapshot {
+        application_id,
+        taken_at,
+        resource_kind: resource_kind.to_string(),
+        resource_id: resource_id.to_string(),
+        payload_json: payload_json.to_string(),
+    })
+}
+
+pub fn list_resource_snapshots(
+    conn: &Connection,
+    application_id: i64,
+) -> Result<Vec<ResourceSnapshot>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT application_id, taken_at, resource_kind, resource_id, payload_json
+             FROM application_resource_snapshots
+             WHERE application_id = ?
+             ORDER BY taken_at ASC, resource_kind ASC, resource_id ASC",
+        )
+        .map_err(|e| format!("applications.list_resource_snapshots prepare: {e}"))?;
+    let rows = stmt
+        .query_map(params![application_id], |row| {
+            Ok(ResourceSnapshot {
+                application_id: row.get(0)?,
+                taken_at: row.get(1)?,
+                resource_kind: row.get(2)?,
+                resource_id: row.get(3)?,
+                payload_json: row.get(4)?,
+            })
+        })
+        .map_err(|e| format!("applications.list_resource_snapshots query: {e}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("applications.list_resource_snapshots collect: {e}"))
+}
+
+pub fn application_disable(conn: &Connection, application_id: i64) -> Result<DisableOutcome, String> {
+    let pipelines = crate::db::pipelines::list(conn)?;
+    let datasources = crate::db::datasources::list(conn)?;
+
+    let mut snapshot_rows: Vec<ResourceSnapshot> = Vec::new();
+
+    for p in &pipelines {
+        let payload = serde_json::to_string(&serde_json::json!({
+            "id": p.id,
+            "name": p.name,
+            "dag_json": p.dag_json,
+        }))
+        .map_err(|e| format!("applications.application_disable serialize pipeline: {e}"))?;
+        let row = take_resource_snapshot(conn, application_id, "pipeline", &p.name, &payload)?;
+        let summary = format!("snapshotted pipeline \"{}\"", p.name);
+        let _ = crate::db::audit::record(
+            conn,
+            crate::db::audit::NewAuditEvent {
+                actor: "user",
+                action: "application.disable",
+                result: "Success",
+                summary: &summary,
+                resource_kind: Some("pipeline"),
+                resource_id: Some(&p.name),
+                application_id: Some(application_id),
+                correlation_id: None,
+                operation_id: None,
+                nav_kind: Some("pipeline"),
+                nav_resource_id: Some(&p.name),
+            },
+        );
+        snapshot_rows.push(row);
+    }
+
+    for d in &datasources {
+        let payload = serde_json::to_string(&serde_json::json!({
+            "name": d.name,
+            "plugin": d.plugin,
+            "config": d.config,
+            "tenant": d.tenant,
+        }))
+        .map_err(|e| format!("applications.application_disable serialize datasource: {e}"))?;
+        let row = take_resource_snapshot(conn, application_id, "datasource", &d.name, &payload)?;
+        let summary = format!("snapshotted datasource \"{}\"", d.name);
+        let _ = crate::db::audit::record(
+            conn,
+            crate::db::audit::NewAuditEvent {
+                actor: "user",
+                action: "application.disable",
+                result: "Success",
+                summary: &summary,
+                resource_kind: Some("datasource"),
+                resource_id: Some(&d.name),
+                application_id: Some(application_id),
+                correlation_id: None,
+                operation_id: None,
+                nav_kind: Some("datasource"),
+                nav_resource_id: Some(&d.name),
+            },
+        );
+        snapshot_rows.push(row);
+    }
+
+    let was_enabled = get(conn, application_id)?
+        .ok_or_else(|| format!("applications.application_disable: no row {application_id}"))?
+        .enabled;
+    if was_enabled {
+        set_enabled(conn, application_id, false)?;
+    }
+
+    let summary = format!(
+        "Application disabled (snapshotted {} pipelines, {} datasources)",
+        pipelines.len(),
+        datasources.len()
+    );
+    let _ = crate::db::audit::record(
+        conn,
+        crate::db::audit::NewAuditEvent {
+            actor: "user",
+            action: "application.disable",
+            result: "Success",
+            summary: &summary,
+            resource_kind: Some("application"),
+            resource_id: None,
+            application_id: Some(application_id),
+            correlation_id: None,
+            operation_id: None,
+            nav_kind: Some("application"),
+            nav_resource_id: None,
+        },
+    );
+
+    Ok(DisableOutcome {
+        snapshot_rows,
+        pipelines: pipelines.into_iter().map(|p| p.name).collect(),
+        datasources: datasources.into_iter().map(|d| d.name).collect(),
+        enabled_after: false,
+    })
+}
+
+pub fn application_enable<F>(
+    conn: &Connection,
+    application_id: i64,
+    mut on_resource: F,
+) -> Result<EnableOutcome, String>
+where
+    F: FnMut(&ResourceSnapshot) -> Result<(), String>,
+{
+    let snapshots = list_resource_snapshots(conn, application_id)?;
+
+    let mut succeeded: Vec<ResourceOp> = Vec::new();
+    let mut failed: Vec<FailedResource> = Vec::new();
+    let mut skipped: Vec<ResourceOp> = Vec::new();
+
+    for snap in &snapshots {
+        match on_resource(snap) {
+            Ok(()) => {
+                let summary =
+                    format!("rehydrated {} \"{}\"", snap.resource_kind, snap.resource_id);
+                let _ = crate::db::audit::record(
+                    conn,
+                    crate::db::audit::NewAuditEvent {
+                        actor: "user",
+                        action: "application.enable",
+                        result: "Success",
+                        summary: &summary,
+                        resource_kind: Some(&snap.resource_kind),
+                        resource_id: Some(&snap.resource_id),
+                        application_id: Some(application_id),
+                        correlation_id: None,
+                        operation_id: None,
+                        nav_kind: Some(&snap.resource_kind),
+                        nav_resource_id: Some(&snap.resource_id),
+                    },
+                );
+                succeeded.push(ResourceOp {
+                    kind: snap.resource_kind.clone(),
+                    id: snap.resource_id.clone(),
+                });
+            }
+            Err(reason) => {
+                let summary = format!(
+                    "failed to rehydrate {} \"{}\": {}",
+                    snap.resource_kind, snap.resource_id, reason
+                );
+                let _ = crate::db::audit::record(
+                    conn,
+                    crate::db::audit::NewAuditEvent {
+                        actor: "user",
+                        action: "application.enable",
+                        result: "Failure",
+                        summary: &summary,
+                        resource_kind: Some(&snap.resource_kind),
+                        resource_id: Some(&snap.resource_id),
+                        application_id: Some(application_id),
+                        correlation_id: None,
+                        operation_id: None,
+                        nav_kind: Some(&snap.resource_kind),
+                        nav_resource_id: Some(&snap.resource_id),
+                    },
+                );
+                failed.push(FailedResource {
+                    kind: snap.resource_kind.clone(),
+                    id: snap.resource_id.clone(),
+                    reason,
+                });
+            }
+        }
+    }
+
+    let outcome = if snapshots.is_empty() {
+        "Failure"
+    } else if failed.is_empty() {
+        "Success"
+    } else if succeeded.is_empty() {
+        "Failure"
+    } else {
+        "Degraded"
+    };
+
+    let mut enabled_after = false;
+    if outcome != "Failure" {
+        set_enabled(conn, application_id, true)?;
+        enabled_after = true;
+    }
+
+    let summary = format!(
+        "Application enable: {} succeeded, {} failed, {} skipped",
+        succeeded.len(),
+        failed.len(),
+        skipped.len()
+    );
+    let _ = crate::db::audit::record(
+        conn,
+        crate::db::audit::NewAuditEvent {
+            actor: "user",
+            action: "application.enable",
+            result: outcome,
+            summary: &summary,
+            resource_kind: Some("application"),
+            resource_id: None,
+            application_id: Some(application_id),
+            correlation_id: None,
+            operation_id: None,
+            nav_kind: Some("application"),
+            nav_resource_id: None,
+        },
+    );
+
+    Ok(EnableOutcome {
+        outcome: outcome.to_string(),
+        succeeded,
+        failed,
+        skipped,
+        enabled_after,
+    })
+}
+
 pub fn snapshot_payload(
     pipelines: &[crate::db::pipelines::PipelineDefinition],
     datasources: &[crate::db::datasources::Datasource],
@@ -484,5 +794,200 @@ mod tests {
             ds[0].get("plugin").unwrap().as_str(),
             Some("binance_subscribe")
         );
+    }
+
+    #[test]
+    fn take_resource_snapshot_writes_one_row_and_list_resource_snapshots_reads_it_back() {
+        run(|conn| {
+            let app = create(conn, "alpha").unwrap();
+            let snap =
+                take_resource_snapshot(conn, app.id, "pipeline", "p1", r#"{"k":1}"#).unwrap();
+            assert_eq!(snap.application_id, app.id);
+            assert_eq!(snap.resource_kind, "pipeline");
+            assert_eq!(snap.resource_id, "p1");
+            assert_eq!(snap.payload_json, r#"{"k":1}"#);
+            assert!(snap.taken_at > 0);
+
+            let rows = list_resource_snapshots(conn, app.id).unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0], snap);
+        });
+    }
+
+    #[test]
+    fn list_resource_snapshots_returns_empty_when_no_rows() {
+        run(|conn| {
+            let app = create(conn, "alpha").unwrap();
+            assert!(list_resource_snapshots(conn, app.id).unwrap().is_empty());
+        });
+    }
+
+    #[test]
+    fn disable_writes_per_resource_snapshot_rows() {
+        run(|conn| {
+            let app = create(conn, "alpha").unwrap();
+            crate::db::pipelines::create(conn, "p1", "{}").unwrap();
+            crate::db::pipelines::create(conn, "p2", "{}").unwrap();
+            crate::db::datasources::create(conn, "binance", "binance_subscribe", "{}", 0).unwrap();
+            crate::db::datasources::create(conn, "newsapi", "newsapi_subscribe", "{}", 0).unwrap();
+
+            let outcome = application_disable(conn, app.id).unwrap();
+            assert_eq!(outcome.snapshot_rows.len(), 4);
+            assert_eq!(outcome.pipelines.len(), 2);
+            assert_eq!(outcome.datasources.len(), 2);
+            assert!(!outcome.enabled_after);
+
+            let rows = list_resource_snapshots(conn, app.id).unwrap();
+            assert_eq!(rows.len(), 4);
+
+            let kinds: std::collections::HashSet<&str> =
+                rows.iter().map(|r| r.resource_kind.as_str()).collect();
+            assert!(kinds.contains("pipeline"));
+            assert!(kinds.contains("datasource"));
+
+            let pipeline_ids: std::collections::HashSet<&str> = rows
+                .iter()
+                .filter(|r| r.resource_kind == "pipeline")
+                .map(|r| r.resource_id.as_str())
+                .collect();
+            assert!(pipeline_ids.contains("p1"));
+            assert!(pipeline_ids.contains("p2"));
+
+            let datasource_ids: std::collections::HashSet<&str> = rows
+                .iter()
+                .filter(|r| r.resource_kind == "datasource")
+                .map(|r| r.resource_id.as_str())
+                .collect();
+            assert!(datasource_ids.contains("binance"));
+            assert!(datasource_ids.contains("newsapi"));
+
+            let fetched = get(conn, app.id).unwrap().unwrap();
+            assert!(!fetched.enabled);
+
+            let events = crate::db::audit::query(conn, Some(app.id), 100).unwrap();
+            let disable_events: Vec<_> = events
+                .iter()
+                .filter(|e| e.action == "application.disable")
+                .collect();
+            assert!(disable_events.len() >= 4);
+        });
+    }
+
+    #[test]
+    fn enable_returns_failure_when_snapshot_empty() {
+        run(|conn| {
+            let app = create(conn, "alpha").unwrap();
+            set_enabled(conn, app.id, false).unwrap();
+
+            let mut called = 0;
+            let outcome = application_enable(conn, app.id, |_| {
+                called += 1;
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(called, 0);
+            assert_eq!(outcome.outcome, "Failure");
+            assert!(outcome.succeeded.is_empty());
+            assert!(outcome.failed.is_empty());
+            assert!(!outcome.enabled_after);
+
+            let fetched = get(conn, app.id).unwrap().unwrap();
+            assert!(!fetched.enabled, "application must stay disabled on failure");
+
+            let events = crate::db::audit::query(conn, Some(app.id), 100).unwrap();
+            assert!(
+                events
+                    .iter()
+                    .any(|e| e.action == "application.enable" && e.result == "Failure"),
+                "expected a Failure summary audit event"
+            );
+        });
+    }
+
+    #[test]
+    fn enable_records_per_resource_audit_and_aggregates_outcome() {
+        run(|conn| {
+            let app = create(conn, "alpha").unwrap();
+            set_enabled(conn, app.id, false).unwrap();
+            take_resource_snapshot(conn, app.id, "pipeline", "p1", "{}").unwrap();
+            take_resource_snapshot(conn, app.id, "datasource", "binance", "{}").unwrap();
+
+            let outcome = application_enable(conn, app.id, |snap| {
+                if snap.resource_id == "binance" {
+                    Err("cluster unreachable".into())
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap();
+
+            assert_eq!(outcome.outcome, "Degraded");
+            assert_eq!(
+                outcome.succeeded,
+                vec![ResourceOp {
+                    kind: "pipeline".into(),
+                    id: "p1".into()
+                }]
+            );
+            assert_eq!(
+                outcome.failed,
+                vec![FailedResource {
+                    kind: "datasource".into(),
+                    id: "binance".into(),
+                    reason: "cluster unreachable".into()
+                }]
+            );
+            assert!(outcome.enabled_after);
+
+            let fetched = get(conn, app.id).unwrap().unwrap();
+            assert!(fetched.enabled);
+
+            let events = crate::db::audit::query(conn, Some(app.id), 100).unwrap();
+            let per_resource: Vec<_> = events
+                .iter()
+                .filter(|e| {
+                    e.action == "application.enable"
+                        && e.resource_kind.is_some()
+                        && e.resource_id.is_some()
+                })
+                .collect();
+            assert_eq!(per_resource.len(), 2);
+            assert!(per_resource
+                .iter()
+                .any(|e| e.result == "Success" && e.resource_id.as_deref() == Some("p1")));
+            assert!(per_resource
+                .iter()
+                .any(|e| e.result == "Failure" && e.resource_id.as_deref() == Some("binance")));
+
+            let summary = events
+                .iter()
+                .find(|e| e.action == "application.enable"
+                    && e.resource_id.is_none()
+                    && e.result == "Degraded")
+                .expect("Degraded summary event");
+            assert!(summary.summary.contains("1 succeeded"));
+            assert!(summary.summary.contains("1 failed"));
+        });
+    }
+
+    #[test]
+    fn enable_pure_failure_does_not_flip_enabled_flag() {
+        run(|conn| {
+            let app = create(conn, "alpha").unwrap();
+            set_enabled(conn, app.id, false).unwrap();
+            take_resource_snapshot(conn, app.id, "pipeline", "p1", "{}").unwrap();
+
+            let outcome = application_enable(conn, app.id, |_| -> Result<(), String> {
+                Err("admin refused".into())
+            })
+            .unwrap();
+            assert_eq!(outcome.outcome, "Failure");
+            assert!(outcome.succeeded.is_empty());
+            assert_eq!(outcome.failed.len(), 1);
+            assert!(!outcome.enabled_after);
+
+            let fetched = get(conn, app.id).unwrap().unwrap();
+            assert!(!fetched.enabled);
+        });
     }
 }

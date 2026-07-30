@@ -226,6 +226,22 @@ pub const MIGRATIONS: &[Migration] = &[
             );
         "#,
     },
+    Migration {
+        version: 15,
+        name: "application_resource_snapshots",
+        sql: r#"
+            CREATE TABLE application_resource_snapshots (
+                application_id INTEGER NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+                taken_at INTEGER NOT NULL,
+                resource_kind TEXT NOT NULL,
+                resource_id TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                PRIMARY KEY (application_id, taken_at, resource_kind, resource_id)
+            );
+            CREATE INDEX idx_application_resource_snapshots_app
+                ON application_resource_snapshots(application_id);
+        "#,
+    },
 ];
 
 impl Database {
@@ -312,7 +328,7 @@ mod tests {
         let db = Database::open(&path).unwrap();
         assert!(path.exists());
         let applied = db.applied_versions().unwrap();
-        assert_eq!(applied, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
+        assert_eq!(applied, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
     }
 
     #[test]
@@ -324,7 +340,7 @@ mod tests {
         let db2 = Database::open(&path).unwrap();
         let second = db2.applied_versions().unwrap();
         assert_eq!(first, second);
-        assert_eq!(first, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
+        assert_eq!(first, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
     }
 
     #[test]
@@ -336,6 +352,6 @@ mod tests {
             conn.execute_batch("CREATE TABLE migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at INTEGER NOT NULL);").unwrap();
         }
         let db = Database::open(&path).unwrap();
-        assert_eq!(db.applied_versions().unwrap(), vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
+        assert_eq!(db.applied_versions().unwrap(), vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
     }
 }

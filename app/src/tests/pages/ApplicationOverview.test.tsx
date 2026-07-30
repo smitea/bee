@@ -54,7 +54,11 @@ beforeEach(() => {
       created_at: 0,
     },
     snapshot: null,
+    succeeded: [],
+    failed: [],
+    skipped: [],
     rehydrated: [],
+    outcome: "Success",
   }));
   applicationDisable.mockImplementation(async (id: number) => ({
     application: {
@@ -70,8 +74,12 @@ beforeEach(() => {
       taken_at: 0,
       payload_json: "{}",
     },
+    succeeded: [],
+    failed: [],
+    skipped: [],
     pipelines: [],
     datasources: [],
+    outcome: "Success",
   }));
 });
 
@@ -174,6 +182,7 @@ describe("<ApplicationOverview> import/export", () => {
         name: "alpha",
         enabled: false,
         display_order: 1,
+        tenant: 0,
         created_at: 0,
       },
       snapshot: {
@@ -181,8 +190,16 @@ describe("<ApplicationOverview> import/export", () => {
         taken_at: 12345,
         payload_json: '{"pipelines":[],"datasources":[]}',
       },
+      succeeded: [
+        { kind: "pipeline", id: "p1" },
+        { kind: "pipeline", id: "p2" },
+        { kind: "datasource", id: "binance" },
+      ],
+      failed: [],
+      skipped: [],
       pipelines: ["p1", "p2"],
       datasources: ["binance"],
+      outcome: "Success",
     });
     const { ApplicationOverview } = await import("../../pages/ApplicationOverview");
     render(<ApplicationOverview applicationId={1} />);
@@ -194,9 +211,9 @@ describe("<ApplicationOverview> import/export", () => {
     expect(summary.textContent).toMatch(/datasources: 1/);
   });
 
-  it("Enable button calls application_enable and shows success indicator", async () => {
+  it("Enable button calls application_enable and shows success report", async () => {
     applicationsList.mockResolvedValueOnce([
-      { id: 1, name: "alpha", enabled: false, display_order: 1, created_at: 0 },
+      { id: 1, name: "alpha", enabled: false, display_order: 1, tenant: 0, created_at: 0 },
     ]);
     applicationEnable.mockResolvedValueOnce({
       application: {
@@ -204,16 +221,86 @@ describe("<ApplicationOverview> import/export", () => {
         name: "alpha",
         enabled: true,
         display_order: 1,
+        tenant: 0,
         created_at: 0,
       },
       snapshot: null,
+      succeeded: [{ kind: "pipeline", id: "p1" }],
+      failed: [],
+      skipped: [],
       rehydrated: [],
+      outcome: "Success",
     });
     const { ApplicationOverview } = await import("../../pages/ApplicationOverview");
     render(<ApplicationOverview applicationId={1} />);
     const enableBtn = await screen.findByTestId("enable-app");
     fireEvent.click(enableBtn);
     await waitFor(() => expect(applicationEnable).toHaveBeenCalledWith(1));
-    expect(await screen.findByText(/enabled/i)).toBeInTheDocument();
+    const indicator = await screen.findByTestId("lifecycle-enabled");
+    expect(indicator.textContent).toMatch(/Enable Success/);
+    expect(indicator.textContent).toMatch(/1 succeeded/);
+  });
+
+  it("Enable button shows the failed-resources list in the report", async () => {
+    applicationsList.mockResolvedValueOnce([
+      { id: 1, name: "alpha", enabled: false, display_order: 1, tenant: 0, created_at: 0 },
+    ]);
+    applicationEnable.mockResolvedValueOnce({
+      application: {
+        id: 1,
+        name: "alpha",
+        enabled: true,
+        display_order: 1,
+        tenant: 0,
+        created_at: 0,
+      },
+      snapshot: null,
+      succeeded: [{ kind: "pipeline", id: "p1" }],
+      failed: [{ kind: "datasource", id: "binance", reason: "cluster unreachable" }],
+      skipped: [],
+      rehydrated: [],
+      outcome: "Degraded",
+    });
+    const { ApplicationOverview } = await import("../../pages/ApplicationOverview");
+    render(<ApplicationOverview applicationId={1} />);
+    fireEvent.click(await screen.findByTestId("enable-app"));
+    const indicator = await screen.findByTestId("lifecycle-enabled");
+    expect(indicator.textContent).toMatch(/Degraded/);
+    const failed = await screen.findByTestId("enable-failed");
+    expect(failed.textContent).toMatch(/datasource "binance"/);
+    expect(failed.textContent).toMatch(/cluster unreachable/);
+  });
+
+  it("Disable report lists pending rehydrations when snapshots were captured", async () => {
+    applicationDisable.mockResolvedValueOnce({
+      application: {
+        id: 1,
+        name: "alpha",
+        enabled: false,
+        display_order: 1,
+        tenant: 0,
+        created_at: 0,
+      },
+      snapshot: {
+        application_id: 1,
+        taken_at: 12345,
+        payload_json: "{}",
+      },
+      succeeded: [
+        { kind: "pipeline", id: "p1" },
+        { kind: "datasource", id: "binance" },
+      ],
+      failed: [],
+      skipped: [],
+      pipelines: ["p1"],
+      datasources: ["binance"],
+      outcome: "Success",
+    });
+    const { ApplicationOverview } = await import("../../pages/ApplicationOverview");
+    render(<ApplicationOverview applicationId={1} />);
+    fireEvent.click(await screen.findByTestId("disable-app"));
+    const list = await screen.findByTestId("pending-rehydrations");
+    expect(list.textContent).toMatch(/pending rehydration: pipeline "p1"/);
+    expect(list.textContent).toMatch(/pending rehydration: datasource "binance"/);
   });
 });

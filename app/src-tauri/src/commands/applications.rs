@@ -24,11 +24,28 @@ pub struct DisableSnapshotView {
 }
 
 #[derive(Debug, Serialize, Clone)]
+pub struct ResourceOpView {
+    pub kind: String,
+    pub id: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct FailedResourceView {
+    pub kind: String,
+    pub id: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
 pub struct DisableReport {
     pub application: ApplicationView,
-    pub snapshot: DisableSnapshotView,
+    pub snapshot: Option<DisableSnapshotView>,
+    pub succeeded: Vec<ResourceOpView>,
+    pub failed: Vec<FailedResourceView>,
+    pub skipped: Vec<ResourceOpView>,
     pub pipelines: Vec<String>,
     pub datasources: Vec<String>,
+    pub outcome: String,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -43,7 +60,11 @@ pub struct ResourceRehydrationOutcome {
 pub struct EnableReport {
     pub application: ApplicationView,
     pub snapshot: Option<DisableSnapshotView>,
+    pub succeeded: Vec<ResourceOpView>,
+    pub failed: Vec<FailedResourceView>,
+    pub skipped: Vec<ResourceOpView>,
     pub rehydrated: Vec<ResourceRehydrationOutcome>,
+    pub outcome: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,6 +107,23 @@ pub trait DeployRegistrar {
 
 pub struct AdminServerDeployRegistrar {
     pub addr: std::net::SocketAddr,
+}
+
+pub struct NoopDeployRegistrar;
+
+impl DeployRegistrar for NoopDeployRegistrar {
+    fn deploy_sql(&self, _sql_text: &str) -> Result<(), RehydrationError> {
+        Ok(())
+    }
+    fn register_datasource(
+        &self,
+        _name: &str,
+        _adapter: &str,
+        _config_json: &str,
+        _tenant: u16,
+    ) -> Result<(), RehydrationError> {
+        Ok(())
+    }
 }
 
 fn run_call_blocking<F, T>(fut: F) -> Result<T, String>
@@ -274,6 +312,45 @@ pub fn execute_rehydration<R: DeployRegistrar>(
     out
 }
 
+fn rehydrate_one<R: DeployRegistrar>(
+    snap: &db::applications::ResourceSnapshot,
+    registrar: &R,
+) -> Result<(), String> {
+    match snap.resource_kind.as_str() {
+        "pipeline" => {
+            #[derive(serde::Deserialize)]
+            struct P {
+                id: i64,
+                name: String,
+                dag_json: String,
+            }
+            let p: P = serde_json::from_str(&snap.payload_json)
+                .map_err(|e| format!("enable: parse pipeline payload: {e}"))?;
+            registrar
+                .deploy_sql(&p.dag_json)
+                .map_err(|e| format!("deploy pipeline \"{}\"", p.name))?;
+            Ok(())
+        }
+        "datasource" => {
+            #[derive(serde::Deserialize)]
+            struct D {
+                name: String,
+                plugin: String,
+                config: String,
+                tenant: Option<i64>,
+            }
+            let d: D = serde_json::from_str(&snap.payload_json)
+                .map_err(|e| format!("enable: parse datasource payload: {e}"))?;
+            let tenant = d.tenant.unwrap_or(0).clamp(0, u16::MAX as i64) as u16;
+            registrar
+                .register_datasource(&d.name, &d.plugin, &d.config, tenant)
+                .map_err(|e| format!("register datasource \"{}\"", d.name))?;
+            Ok(())
+        }
+        other => Err(format!("enable: unknown resource_kind {other}")),
+    }
+}
+
 #[tauri::command]
 pub fn applications_list(app: AppHandle) -> CmdResult<Vec<ApplicationView>> {
     let db = db_handle(&app)?;
@@ -355,90 +432,71 @@ pub fn application_set_enabled(
 pub fn application_enable(app: AppHandle, id: i64, addr: Option<String>) -> CmdResult<EnableReport> {
     let db = db_handle(&app)?;
     let conn = db.lock().map_err(CmdError::from)?;
-    let existing = db::applications::get(&conn, id)
+    let _existing = db::applications::get(&conn, id)
         .map_err(CmdError::from)?
         .ok_or_else(|| CmdError { message: format!("application_enable: no row {id}") })?;
 
-    let latest_snapshots = db::applications::list_disable_snapshots(&conn, id)
-        .map_err(CmdError::from)?;
-    let latest_snapshot = latest_snapshots.first().cloned();
+    let latest_snapshot = db::applications::list_disable_snapshots(&conn, id)
+        .map_err(CmdError::from)?
+        .first()
+        .cloned();
 
-    if !existing.enabled {
-        db::applications::set_enabled(&conn, id, true).map_err(CmdError::from)?;
-    }
+    let use_noop = addr.as_deref().map(|s| s.trim().is_empty()).unwrap_or(false);
+    let target_addr = match addr
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .map(connection::addr_parse)
+        .transpose()
+        .map_err(CmdError::from)?
+    {
+        Some(a) => Some(a),
+        None => connection::with_handle(|h| Ok(h.addr())).ok(),
+    };
+
+    let outcome = if use_noop || target_addr.is_none() {
+        db::applications::application_enable(&conn, id, |_snap| Ok(()))
+            .map_err(CmdError::from)?
+    } else {
+        let registrar = AdminServerDeployRegistrar { addr: target_addr.unwrap() };
+        db::applications::application_enable(&conn, id, |snap| rehydrate_one(snap, &registrar))
+            .map_err(CmdError::from)?
+    };
+
     let updated = db::applications::get(&conn, id)
         .map_err(CmdError::from)?
         .ok_or_else(|| CmdError { message: format!("application_enable: vanished {id}") })?;
 
-    let mut rehydrated: Vec<ResourceRehydrationOutcome> = Vec::new();
-    let mut enabled_count = 0u32;
-    let mut failed_count = 0u32;
-    if let Some(snap) = &latest_snapshot {
-        let plan = build_rehydration_plan(&conn, snap).map_err(CmdError::from)?;
-        let target_addr = match addr
-            .as_deref()
-            .map(connection::addr_parse)
-            .transpose()
-            .map_err(CmdError::from)?
-        {
-            Some(a) => a,
-            None => connection::with_handle(|h| Ok(h.addr())).map_err(CmdError::from)?,
-        };
-        let registrar = AdminServerDeployRegistrar { addr: target_addr };
-        rehydrated = execute_rehydration(&plan, &registrar);
-        for ev in &rehydrated {
-            match ev.result.as_str() {
-                "Success" => enabled_count += 1,
-                _ => failed_count += 1,
-            }
-            let summary = format!(
-                "Application \"{}\" rehydrate {} \"{}\": {}",
-                updated.name, ev.kind, ev.name, ev.result
-            );
-            let _ = db::audit::record(&conn, db::audit::NewAuditEvent {
-                actor: "user",
-                action: "application.rehydrate",
-                result: &ev.result,
-                summary: &summary,
-                resource_kind: Some(&ev.kind),
-                resource_id: Some(&ev.name),
-                application_id: Some(id),
-                correlation_id: None,
-                operation_id: None,
-                nav_kind: Some(&ev.kind),
-                nav_resource_id: Some(&ev.name),
-            });
-        }
-    }
-
-    let overall = if failed_count == 0 {
-        "Success"
-    } else if enabled_count == 0 {
-        "Failure"
-    } else {
-        "Degraded"
-    };
-    let _ = db::audit::record(&conn, db::audit::NewAuditEvent {
-        actor: "user",
-        action: "application.enable",
-        result: overall,
-        summary: &format!(
-            "Application \"{}\" enabled ({} succeeded, {} failed)",
-            updated.name, enabled_count, failed_count
-        ),
-        resource_kind: Some("application"),
-        resource_id: None,
-        application_id: Some(id),
-        correlation_id: None,
-        operation_id: None,
-        nav_kind: Some("application"),
-        nav_resource_id: None,
-    });
+    let succeeded: Vec<ResourceRehydrationOutcome> = outcome
+        .succeeded
+        .iter()
+        .map(|s| ResourceRehydrationOutcome {
+            kind: s.kind.clone(),
+            name: s.id.clone(),
+            result: "Success".to_string(),
+            detail: None,
+        })
+        .collect();
 
     Ok(EnableReport {
         application: to_view(updated),
         snapshot: latest_snapshot.map(snapshot_to_view),
-        rehydrated,
+        succeeded: outcome
+            .succeeded
+            .into_iter()
+            .map(|s| ResourceOpView { kind: s.kind, id: s.id })
+            .collect(),
+        failed: outcome
+            .failed
+            .into_iter()
+            .map(|f| FailedResourceView { kind: f.kind, id: f.id, reason: f.reason })
+            .collect(),
+        skipped: outcome
+            .skipped
+            .into_iter()
+            .map(|s| ResourceOpView { kind: s.kind, id: s.id })
+            .collect(),
+        rehydrated: succeeded,
+        outcome: outcome.outcome,
     })
 }
 
@@ -446,49 +504,39 @@ pub fn application_enable(app: AppHandle, id: i64, addr: Option<String>) -> CmdR
 pub fn application_disable(app: AppHandle, id: i64) -> CmdResult<DisableReport> {
     let db = db_handle(&app)?;
     let conn = db.lock().map_err(CmdError::from)?;
-    let existing = db::applications::get(&conn, id)
+    let _existing = db::applications::get(&conn, id)
         .map_err(CmdError::from)?
         .ok_or_else(|| CmdError { message: format!("application_disable: no row {id}") })?;
 
-    let pipelines = db::pipelines::list(&conn).map_err(CmdError::from)?;
-    let datasources = db::datasources::list(&conn).map_err(CmdError::from)?;
+    let disable_outcome = db::applications::application_disable(&conn, id).map_err(CmdError::from)?;
 
-    let payload_json =
-        db::applications::snapshot_payload(&pipelines, &datasources).map_err(CmdError::from)?;
-    let snapshot =
-        db::applications::record_disable_snapshot(&conn, id, &payload_json).map_err(CmdError::from)?;
+    let latest_snapshot = db::applications::list_disable_snapshots(&conn, id)
+        .map_err(CmdError::from)?
+        .first()
+        .cloned();
 
-    if existing.enabled {
-        db::applications::set_enabled(&conn, id, false).map_err(CmdError::from)?;
-    }
     let updated = db::applications::get(&conn, id)
         .map_err(CmdError::from)?
         .ok_or_else(|| CmdError { message: format!("application_disable: vanished {id}") })?;
 
-    let _ = db::audit::record(&conn, db::audit::NewAuditEvent {
-        actor: "user",
-        action: "application.disable",
-        result: "Success",
-        summary: &format!(
-            "Application \"{}\" disabled (snapshot has {} pipelines, {} datasources)",
-            updated.name,
-            pipelines.len(),
-            datasources.len()
-        ),
-        resource_kind: Some("application"),
-        resource_id: None,
-        application_id: Some(id),
-        correlation_id: None,
-        operation_id: None,
-        nav_kind: Some("application"),
-        nav_resource_id: None,
-    });
+    let succeeded: Vec<ResourceOpView> = disable_outcome
+        .snapshot_rows
+        .iter()
+        .map(|s| ResourceOpView {
+            kind: s.resource_kind.clone(),
+            id: s.resource_id.clone(),
+        })
+        .collect();
 
     Ok(DisableReport {
         application: to_view(updated),
-        snapshot: snapshot_to_view(snapshot),
-        pipelines: pipelines.into_iter().map(|p| p.name).collect(),
-        datasources: datasources.into_iter().map(|d| d.name).collect(),
+        snapshot: latest_snapshot.map(snapshot_to_view),
+        succeeded,
+        failed: vec![],
+        skipped: vec![],
+        pipelines: disable_outcome.pipelines,
+        datasources: disable_outcome.datasources,
+        outcome: "Success".to_string(),
     })
 }
 

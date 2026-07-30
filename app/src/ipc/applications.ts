@@ -20,11 +20,26 @@ export interface DisableSnapshotView {
   payload_json: string;
 }
 
+export interface ResourceOpView {
+  kind: string;
+  id: string;
+}
+
+export interface FailedResourceView {
+  kind: string;
+  id: string;
+  reason: string;
+}
+
 export interface DisableReport {
   application: ApplicationView;
-  snapshot: DisableSnapshotView;
+  snapshot: DisableSnapshotView | null;
+  succeeded: ResourceOpView[];
+  failed: FailedResourceView[];
+  skipped: ResourceOpView[];
   pipelines: string[];
   datasources: string[];
+  outcome: string;
 }
 
 export interface ResourceRehydrationOutcome {
@@ -37,7 +52,11 @@ export interface ResourceRehydrationOutcome {
 export interface EnableReport {
   application: ApplicationView;
   snapshot: DisableSnapshotView | null;
+  succeeded: ResourceOpView[];
+  failed: FailedResourceView[];
+  skipped: ResourceOpView[];
   rehydrated: ResourceRehydrationOutcome[];
+  outcome: string;
 }
 
 export async function applicationsList(): Promise<ApplicationView[]> {
