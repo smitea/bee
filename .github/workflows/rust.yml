@@ -73,3 +73,23 @@ jobs:
         run: npm test
       - name: Build frontend bundle
         run: npm run build
+
+  tauri-launch-smoke:
+    name: Tauri launch smoke test
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: app/src-tauri
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            -> target
+            -> crates/*/target
+            -> app/src-tauri/target
+      - name: Build app binary (debug)
+        run: cargo build --bin app --verbose
+      - name: Run tauri launch smoke test
+        run: cargo test --test tauri_launch_smoke -- --nocapture --test-threads=1
