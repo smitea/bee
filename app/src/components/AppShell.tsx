@@ -18,6 +18,7 @@ import { PipelineEditor } from "../pages/PipelineEditor";
 import { DataSources } from "../pages/DataSources";
 import { ApplicationOverview } from "../pages/ApplicationOverview";
 import { DashboardPage } from "../pages/DashboardPage";
+import { ActivityPage } from "../pages/ActivityPage";
 
 const TAB_KINDS: ReadonlySet<TabKind> = new Set([
   "cluster",
@@ -28,6 +29,7 @@ const TAB_KINDS: ReadonlySet<TabKind> = new Set([
   "pipeline",
   "datasource",
   "pipeline_editor",
+  "activity",
 ]);
 
 function titleFor(kind: TabKind, resourceId: string | null): string {
@@ -48,6 +50,8 @@ function titleFor(kind: TabKind, resourceId: string | null): string {
       return resourceId ? `Datasource ${resourceId}` : "Datasource";
     case "pipeline_editor":
       return "New Pipeline";
+    case "activity":
+      return "Recent Activity";
   }
 }
 
@@ -231,6 +235,8 @@ function PageTabs() {
         return <PipelineEditor />;
       case "datasource":
         return <p className="text-xs text-gray-400">datasource detail · coming in a later slice</p>;
+      case "activity":
+        return <ActivityPage />;
     }
   })();
 

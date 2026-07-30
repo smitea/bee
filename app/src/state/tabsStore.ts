@@ -10,7 +10,8 @@ export type TabKind =
   | "application_dashboard"
   | "pipeline"
   | "datasource"
-  | "pipeline_editor";
+  | "pipeline_editor"
+  | "activity";
 
 export interface TabRow {
   id: number;
@@ -32,6 +33,7 @@ export interface TabsStore {
   closeRight(id: number): Promise<void>;
   setActive(id: number | null): Promise<void>;
   pin(id: number, pinned: boolean): Promise<void>;
+  openActivity(): Promise<void>;
 }
 
 function asKind(k: string): TabKind {
@@ -44,6 +46,7 @@ function asKind(k: string): TabKind {
     case "pipeline":
     case "datasource":
     case "pipeline_editor":
+    case "activity":
       return k;
     default:
       return "cluster";
@@ -181,5 +184,13 @@ export const useTabs = create<TabsStore>((set, get) => ({
         position: t.position,
       })),
     });
+  },
+  async openActivity() {
+    const existing = get().tabs.find((t) => t.kind === "activity");
+    if (existing) {
+      await get().setActive(existing.id);
+      return;
+    }
+    await get().open({ kind: "activity", resourceId: null, title: "Recent Activity" });
   },
 }));

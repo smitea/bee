@@ -10,6 +10,7 @@ import {
   Trash2,
   Power,
   PowerOff,
+  ScrollText,
 } from "lucide-react";
 
 import { useApplications } from "../state/applicationsStore";
@@ -38,6 +39,8 @@ function titleFor(kind: TabKind, resourceId: string | null): string {
       return resourceId ? `Datasource ${resourceId}` : "Datasource";
     case "pipeline_editor":
       return "New Pipeline";
+    case "activity":
+      return "Recent Activity";
   }
 }
 
@@ -55,6 +58,7 @@ export function NavTree() {
   const deleteApp = useApplications((s) => s.delete);
 
   const openTab = useTabs((s) => s.open);
+  const openActivity = useTabs((s) => s.openActivity);
   const tabs = useTabs((s) => s.tabs);
   const activeId = useTabs((s) => s.activeId);
   const addr = useConnection((s) => s.addr);
@@ -157,6 +161,21 @@ export function NavTree() {
         >
           <Hexagon size={11} />
           <span>Cluster</span>
+        </button>
+
+        <button
+          onClick={() => void openActivity()}
+          className={[
+            "w-full flex items-center gap-2 px-2 py-1.5 rounded",
+            isActive(tabs, activeId, "activity", null)
+              ? "bg-accent-blue/10 text-accent-blue"
+              : "text-gray-700 dark:text-neutral-200 hover:bg-gray-100 dark:hover:bg-neutral-700",
+          ].join(" ")}
+          data-testid="nav-activity"
+          aria-label="Open recent activity"
+        >
+          <ScrollText size={11} />
+          <span>Activity</span>
         </button>
 
         <div className="px-2 pt-3 pb-1 flex items-center justify-between text-[10px] font-semibold uppercase tracking-wider text-gray-500 dark:text-neutral-400">

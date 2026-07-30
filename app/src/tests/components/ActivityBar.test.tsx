@@ -11,12 +11,28 @@ vi.mock("../../ipc/audit", () => ({
   auditRecord: vi.fn(),
 }));
 
+const tabOpen = vi.fn();
+const tabsList = vi.fn();
+const tabSetActive = vi.fn();
+vi.mock("../../ipc/tabs", () => ({
+  tabOpen,
+  tabsList,
+  tabClose: vi.fn(),
+  tabSetActive,
+  tabPin: vi.fn(),
+  workspaceState: vi.fn(),
+}));
+
 beforeEach(() => {
   vi.resetModules();
   auditList.mockReset();
   auditLatest.mockReset();
+  tabOpen.mockReset();
+  tabsList.mockReset();
+  tabSetActive.mockReset();
   auditList.mockResolvedValue([]);
   auditLatest.mockResolvedValue(null);
+  tabsList.mockResolvedValue([]);
 });
 
 describe("<ActivityBar>", () => {
@@ -41,11 +57,29 @@ describe("<ActivityBar>", () => {
     expect(await screen.findByText("Bee Client started")).toBeInTheDocument();
   });
 
-  it("clicking the bar opens the dialog", async () => {
+  it("clicking the bar opens the activity page (tab) and not the dialog", async () => {
     auditList.mockResolvedValueOnce([]);
+    tabOpen.mockResolvedValueOnce(101);
+    tabsList.mockResolvedValueOnce([
+      {
+        id: 101, kind: "activity", resource_id: null, title: "Recent Activity",
+        pinned: false, position: 0,
+      },
+    ]);
     const { ActivityBar } = await import("../../components/ActivityBar");
     render(<ActivityBar />);
-    fireEvent.click(screen.getByRole("button", { name: /open activity/i }));
-    expect(screen.getByRole("dialog", { name: /activity/i })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /click for full activity/i }));
+    expect(tabOpen).toHaveBeenCalledWith("activity", null, "Recent Activity");
+    expect(screen.queryByRole("dialog", { name: /^activity$/i })).toBeNull();
+  });
+
+  it("clicking the bar uses the navigate callback when provided instead of opening a tab", async () => {
+    auditList.mockResolvedValueOnce([]);
+    const navigate = vi.fn();
+    const { ActivityBar } = await import("../../components/ActivityBar");
+    render(<ActivityBar navigate={navigate} />);
+    fireEvent.click(screen.getByRole("button", { name: /click for full activity/i }));
+    expect(navigate).toHaveBeenCalledWith("activity", null);
+    expect(tabOpen).not.toHaveBeenCalled();
   });
 });
