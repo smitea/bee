@@ -1,0 +1,146 @@
+networks:
+  bee-net:
+    driver: bridge
+
+# Plugin distribution per node (managed by scripts/deploy-plugins.sh):
+#   node 1: libbee_plugin_sample_kline       (lightweight K-line demo)
+#   node 2: libbee_plugin_perf_fib           (perf micro-bench handler)
+#   node 3: libbee_plugin_onnx_ml            (heavy: tract-onnx + FinBERT)
+#   node 4: <none — failover standby>
+#   node 5: all three                        (warm pool + work-stealing target)
+#
+# Run `scripts/deploy-plugins.sh --build --mode docker` to compile the
+# three workspace plugins and copy them into volumes/node_N/plugins.
+# The Dockerfile copies the same artifacts into the image at /etc/bee/plugins
+# so a fresh container is bootable without the deploy script.
+
+services:
+  bee-node-1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: bee-node-1
+    hostname: bee-node-1
+    networks:
+      - bee-net
+    ports:
+      - "7701:7701"
+      - "8701:8701"
+    volumes:
+      - ./volumes/node_1/plugins:/etc/bee/plugins
+    environment:
+      - BEE_PLUGIN_DIR=/etc/bee/plugins
+      - RUST_LOG=info
+    command: >
+      node --id 1
+      --bind 0.0.0.0:7701
+      --admin-bind 0.0.0.0:8701
+      --peer 2=bee-node-2:7702
+      --peer 3=bee-node-3:7703
+      --peer 4=bee-node-4:7704
+      --peer 5=bee-node-5:7705
+    restart: unless-stopped
+
+  bee-node-2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: bee-node-2
+    hostname: bee-node-2
+    networks:
+      - bee-net
+    ports:
+      - "7702:7702"
+      - "8702:8702"
+    volumes:
+      - ./volumes/node_2/plugins:/etc/bee/plugins
+    environment:
+      - BEE_PLUGIN_DIR=/etc/bee/plugins
+      - RUST_LOG=info
+    command: >
+      node --id 2
+      --bind 0.0.0.0:7702
+      --admin-bind 0.0.0.0:8702
+      --peer 1=bee-node-1:7701
+      --peer 3=bee-node-3:7703
+      --peer 4=bee-node-4:7704
+      --peer 5=bee-node-5:7705
+    restart: unless-stopped
+
+  bee-node-3:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: bee-node-3
+    hostname: bee-node-3
+    networks:
+      - bee-net
+    ports:
+      - "7703:7703"
+      - "8703:8703"
+    volumes:
+      - ./volumes/node_3/plugins:/etc/bee/plugins
+    environment:
+      - BEE_PLUGIN_DIR=/etc/bee/plugins
+      - RUST_LOG=info
+    command: >
+      node --id 3
+      --bind 0.0.0.0:7703
+      --admin-bind 0.0.0.0:8703
+      --peer 1=bee-node-1:7701
+      --peer 2=bee-node-2:7702
+      --peer 4=bee-node-4:7704
+      --peer 5=bee-node-5:7705
+    restart: unless-stopped
+
+  bee-node-4:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: bee-node-4
+    hostname: bee-node-4
+    networks:
+      - bee-net
+    ports:
+      - "7704:7704"
+      - "8704:8704"
+    volumes:
+      - ./volumes/node_4/plugins:/etc/bee/plugins
+    environment:
+      - BEE_PLUGIN_DIR=/etc/bee/plugins
+      - RUST_LOG=info
+    command: >
+      node --id 4
+      --bind 0.0.0.0:7704
+      --admin-bind 0.0.0.0:8704
+      --peer 1=bee-node-1:7701
+      --peer 2=bee-node-2:7702
+      --peer 3=bee-node-3:7703
+      --peer 5=bee-node-5:7705
+    restart: unless-stopped
+
+  bee-node-5:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: bee-node-5
+    hostname: bee-node-5
+    networks:
+      - bee-net
+    ports:
+      - "7705:7705"
+      - "8705:8705"
+    volumes:
+      - ./volumes/node_5/plugins:/etc/bee/plugins
+    environment:
+      - BEE_PLUGIN_DIR=/etc/bee/plugins
+      - RUST_LOG=info
+    command: >
+      node --id 5
+      --bind 0.0.0.0:7705
+      --admin-bind 0.0.0.0:8705
+      --peer 1=bee-node-1:7701
+      --peer 2=bee-node-2:7702
+      --peer 3=bee-node-3:7703
+      --peer 4=bee-node-4:7704
+    restart: unless-stopped

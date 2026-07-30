@@ -15,3 +15,10 @@
 
 # Worktree directories (per-feature isolation)
 /.worktrees/
+
+# Built plugin binaries inside the docker per-node plugin volumes.
+# Each volumes/node_N/plugins/ dir keeps a .gitkeep so the directory
+# structure is tracked; the actual .so / .dylib files are deploy output.
+/volumes/*/plugins/*.so
+/volumes/*/plugins/*.dylib
+/volumes/*/plugins/*.dll
