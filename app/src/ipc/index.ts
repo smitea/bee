@@ -8,6 +8,7 @@ export * from "./profiles";
 export * from "./tenant";
 export * from "./applications";
 export * from "./audit";
+export * from "./dashboards";
 export * from "./datasources";
 export * from "./pipelines";
 export * from "./plugins";

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChevronDown, Plus, Server } from "lucide-react";
+import { ChevronDown, Server } from "lucide-react";
 
 import {
   clusterProfileList,
@@ -11,11 +11,7 @@ import { setAddr } from "../ipc/connection";
 import { useConnection } from "../state/connectionStore";
 import { ClusterStatusDot } from "./ClusterStatusDot";
 
-interface Props {
-  onOpenSettings(): void;
-}
-
-export function ClusterSelectorDropdown({ onOpenSettings }: Props) {
+export function ClusterSelectorDropdown() {
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement | null>(null);
@@ -72,6 +68,12 @@ export function ClusterSelectorDropdown({ onOpenSettings }: Props) {
         className="flex items-center gap-1.5 px-2 py-1 rounded text-gray-600 dark:text-neutral-300 hover:bg-gray-100 dark:hover:bg-neutral-700"
         title="Switch cluster"
       >
+        <ClusterStatusDot
+          profileAddr={addr}
+          activeAddr={addr}
+          status={status}
+          size={6}
+        />
         <Server size={12} />
         <span className="font-mono text-[11px]">{label}</span>
         <ChevronDown size={10} />
@@ -79,7 +81,7 @@ export function ClusterSelectorDropdown({ onOpenSettings }: Props) {
       {open && (
         <div
           role="menu"
-          className="absolute right-0 top-full mt-1 z-40 min-w-[18rem] rounded-md border border-gray-200 dark:border-neutral-700 bg-white dark:bg-neutral-800 shadow-lg text-xs"
+          className="absolute left-0 top-full mt-1 z-40 min-w-[18rem] rounded-md border border-gray-200 dark:border-neutral-700 bg-white dark:bg-neutral-800 shadow-lg text-xs"
         >
           <div className="px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-gray-500 dark:text-neutral-400 border-b border-gray-200 dark:border-neutral-700">
             Clusters ({all.length})
@@ -117,20 +119,6 @@ export function ClusterSelectorDropdown({ onOpenSettings }: Props) {
                 </button>
               );
             })}
-          </div>
-          <div className="border-t border-gray-200 dark:border-neutral-700 p-1">
-            <button
-              type="button"
-              role="menuitem"
-              onClick={() => {
-                setOpen(false);
-                onOpenSettings();
-              }}
-              className="w-full flex items-center gap-1.5 px-2 py-1 rounded text-[11px] hover:bg-gray-100 dark:hover:bg-neutral-700"
-            >
-              <Plus size={10} />
-              Add new cluster…
-            </button>
           </div>
         </div>
       )}

@@ -75,10 +75,27 @@ describe("<ClusterSelectorDropdown>", () => {
         createdAt: 0,
       },
     ]);
-    withClient(<ClusterSelectorDropdown onOpenSettings={() => {}} />);
+    withClient(<ClusterSelectorDropdown />);
     fireEvent.click(screen.getByRole("button", { name: /select cluster/i }));
     expect(await screen.findByRole("menuitem", { name: /alpha/i })).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: /beta/i })).toBeInTheDocument();
+  });
+
+  it("does not show an Add cluster action (it lives in Settings)", async () => {
+    mocks.clusterProfileList.mockResolvedValueOnce([
+      {
+        id: 1,
+        label: "alpha",
+        addr: "127.0.0.1:9999",
+        tenant: 0,
+        lastUsedAt: null,
+        createdAt: 0,
+      },
+    ]);
+    withClient(<ClusterSelectorDropdown />);
+    fireEvent.click(screen.getByRole("button", { name: /select cluster/i }));
+    await screen.findByRole("menuitem", { name: /alpha/i });
+    expect(screen.queryByRole("menuitem", { name: /add/i })).toBeNull();
   });
 
   it("activating a cluster calls clusterProfileActivate and setAddr", async () => {
@@ -104,7 +121,7 @@ describe("<ClusterSelectorDropdown>", () => {
       addr: "10.0.0.1:9999",
       status: { kind: "Connected" },
     });
-    withClient(<ClusterSelectorDropdown onOpenSettings={() => {}} />);
+    withClient(<ClusterSelectorDropdown />);
     fireEvent.click(screen.getByRole("button", { name: /select cluster/i }));
     const betaBtn = await screen.findByText("beta");
     fireEvent.click(betaBtn);
@@ -119,7 +136,7 @@ describe("<ClusterSelectorDropdown>", () => {
       status: { kind: "Connected" },
       hydrated: true,
     });
-    withClient(<ClusterSelectorDropdown onOpenSettings={() => {}} />);
+    withClient(<ClusterSelectorDropdown />);
     expect(screen.getByText("10.0.0.1:9999")).toBeInTheDocument();
   });
 });

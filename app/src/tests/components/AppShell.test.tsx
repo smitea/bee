@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 const mocks = vi.hoisted(() => ({
@@ -113,6 +113,30 @@ beforeEach(() => {
 });
 
 describe("<AppShell> tab context menu", () => {
+  it("header row shows Bee brand + cluster dropdown + refresh + settings + theme", async () => {
+    withClient(<AppShell />);
+    expect(await screen.findByTestId("brand-label")).toBeInTheDocument();
+    expect(screen.getByTestId("brand-label").textContent).toBe("Bee");
+    const header = await screen.findByRole("banner");
+    expect(within(header).getByRole("button", { name: /select cluster/i })).toBeInTheDocument();
+    expect(within(header).getByRole("button", { name: /^refresh$/i })).toBeInTheDocument();
+    expect(within(header).getByRole("button", { name: /open settings/i })).toBeInTheDocument();
+    expect(within(header).getByRole("button", { name: /toggle theme/i })).toBeInTheDocument();
+  });
+
+  it("header row contains exactly three icon buttons (refresh, settings, theme)", async () => {
+    withClient(<AppShell />);
+    await screen.findByTestId("brand-label");
+    const header = await screen.findByRole("banner");
+    const headerButtons = within(header).getAllByRole("button");
+    const iconButtons = headerButtons.filter((b) =>
+      ["Refresh", "Open settings", "Toggle theme"].some((label) =>
+        b.getAttribute("aria-label")?.includes(label),
+      ),
+    );
+    expect(iconButtons.length).toBe(3);
+  });
+
   it("right-click on a tab opens the context menu", async () => {
     withClient(<AppShell />);
     const tab = await screen.findByRole("tab", { name: /pipelines/i });

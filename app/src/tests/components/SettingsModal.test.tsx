@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import {
   setAddr as setAddrIpc,
@@ -23,8 +24,30 @@ vi.mock("../../ipc", async () => {
   };
 });
 
+vi.mock("../../ipc/clusters", () => ({
+  clusterProfileList: vi.fn().mockResolvedValue([]),
+  clusterProfileSave: vi.fn(),
+  clusterProfileRemove: vi.fn(),
+  clusterProfileActivate: vi.fn().mockResolvedValue({
+    id: 1,
+    label: "default",
+    addr: "127.0.0.1:9999",
+    tenant: 0,
+    lastUsedAt: null,
+    createdAt: 0,
+  }),
+  clusterProfileMigrateLegacy: vi.fn(),
+}));
+
 import { useConnection } from "../../state/connectionStore";
 import { SettingsModal } from "../../components/SettingsModal";
+
+function withClient(node: React.ReactNode) {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false, gcTime: 0 } },
+  });
+  return render(<QueryClientProvider client={client}>{node}</QueryClientProvider>);
+}
 
 beforeEach(() => {
   vi.mocked(setAddrIpc).mockReset();
@@ -57,17 +80,16 @@ function openTenantSection() {
 
 describe("<SettingsModal>", () => {
   it("renders nothing when closed", () => {
-    const { container } = render(<SettingsModal open={false} onClose={() => {}} />);
+    const { container } = withClient(<SettingsModal open={false} onClose={() => {}} />);
     expect(container.firstChild).toBeNull();
   });
 
-  it("lists every settings category in the sidebar", () => {
-    render(<SettingsModal open onClose={() => {}} />);
+  it("lists every settings category in the sidebar (11 merged entries)", () => {
+    withClient(<SettingsModal open onClose={() => {}} />);
     for (const label of [
       "Client",
       "Connection",
       "Tenant",
-      "Cluster",
       "Appearance",
       "Logging",
       "Diagnostics",
@@ -79,6 +101,16 @@ describe("<SettingsModal>", () => {
     ]) {
       expect(screen.getByRole("button", { name: label })).toBeInTheDocument();
     }
+    expect(screen.queryByRole("button", { name: "Cluster" })).toBeNull();
+  });
+
+  it("Connection section is the default and shows cluster list + address + Test/Connect", () => {
+    withClient(<SettingsModal open onClose={() => {}} />);
+    expect(screen.getByLabelText("AdminServer address")).toBeInTheDocument();
+    expect(screen.getByTestId("clusters-list")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /add cluster/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Test Connection" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Connect" })).toBeInTheDocument();
   });
 
   it("Test Connection does not change the active address", async () => {
@@ -86,7 +118,7 @@ describe("<SettingsModal>", () => {
       addr: "10.0.0.1:9999",
       status: { kind: "Error", reason: "refused" },
     });
-    render(<SettingsModal open onClose={() => {}} />);
+    withClient(<SettingsModal open onClose={() => {}} />);
     fireEvent.change(screen.getByLabelText("AdminServer address"), {
       target: { value: "10.0.0.1:9999" },
     });
@@ -101,7 +133,7 @@ describe("<SettingsModal>", () => {
       status: { kind: "Connected" },
     });
     const onClose = vi.fn();
-    render(<SettingsModal open onClose={onClose} />);
+    withClient(<SettingsModal open onClose={onClose} />);
     fireEvent.click(screen.getByText("Connect"));
     await waitFor(() => expect(setAddrIpc).toHaveBeenCalledWith("127.0.0.1:9999"));
     expect(onClose).toHaveBeenCalled();
@@ -110,7 +142,7 @@ describe("<SettingsModal>", () => {
   it("shows the active tenant loaded from tenantGet", async () => {
     vi.mocked(tenantGetIpc).mockReset();
     vi.mocked(tenantGetIpc).mockResolvedValue(7);
-    render(<SettingsModal open onClose={() => {}} />);
+    withClient(<SettingsModal open onClose={() => {}} />);
     openTenantSection();
     await waitFor(() => expect(screen.getByLabelText("Active tenant")).toBeInTheDocument());
     expect((screen.getByLabelText("Active tenant") as HTMLInputElement).value).toBe("7");
@@ -121,7 +153,7 @@ describe("<SettingsModal>", () => {
     vi.mocked(tenantGetIpc).mockResolvedValue(0);
     vi.mocked(tenantSetIpc).mockReset();
     vi.mocked(tenantSetIpc).mockResolvedValue(42);
-    render(<SettingsModal open onClose={() => {}} />);
+    withClient(<SettingsModal open onClose={() => {}} />);
     openTenantSection();
     const input = await screen.findByLabelText("Active tenant");
     fireEvent.change(input, { target: { value: "42" } });
@@ -129,7 +161,7 @@ describe("<SettingsModal>", () => {
   });
 
   it("rejects an out-of-range tenant and shows an error", async () => {
-    render(<SettingsModal open onClose={() => {}} />);
+    withClient(<SettingsModal open onClose={() => {}} />);
     openTenantSection();
     const input = await screen.findByLabelText("Active tenant");
     fireEvent.change(input, { target: { value: "70000" } });

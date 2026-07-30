@@ -1,5 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { Cog, Moon, Sun, X, Pin, PinOff } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
+import { Cog, Moon, Sun, RefreshCw, X, Pin, PinOff } from "lucide-react";
 
 import { NavTree } from "./NavTree";
 import { StatusBar } from "./StatusBar";
@@ -9,6 +10,7 @@ import { ContextMenu, type ContextMenuItem } from "./ContextMenu";
 import { useUi } from "../state/store";
 import { useTabs } from "../state/tabsStore";
 import { useApplications } from "../state/applicationsStore";
+import { useConnection } from "../state/connectionStore";
 import { ClusterDashboard } from "../pages/ClusterDashboard";
 import { PipelinesPage } from "../pages/PipelinesPage";
 import { PipelineDetail } from "../pages/PipelineDetail";
@@ -26,17 +28,42 @@ export function AppShell({ children }: { children?: ReactNode }) {
 
   const hydrateTabs = useTabs((s) => s.hydrate);
   const hydrateApps = useApplications((s) => s.refresh);
+  const qc = useQueryClient();
+  const addr = useConnection((s) => s.addr);
 
   useEffect(() => {
     void hydrateTabs();
     void hydrateApps();
   }, [hydrateTabs, hydrateApps]);
 
+  const onRefresh = () => {
+    qc.invalidateQueries({ queryKey: ["cluster", addr] });
+    qc.invalidateQueries({ queryKey: ["jobs", addr] });
+    qc.invalidateQueries({ queryKey: ["cluster-profiles"] });
+    qc.invalidateQueries({ queryKey: ["application-jobs"] });
+  };
+
   return (
     <div className="h-full flex flex-col bg-gray-50 dark:bg-neutral-900 text-gray-900 dark:text-neutral-100">
-      <header className="flex items-center gap-2 h-9 px-3 bg-white dark:bg-neutral-800 border-b border-gray-200 dark:border-neutral-700 text-xs">
+      <header className="flex items-center gap-2 h-10 px-3 bg-white dark:bg-neutral-800 border-b border-gray-200 dark:border-neutral-700 text-xs">
+        <span
+          className="font-semibold text-accent-blue tracking-wide"
+          data-testid="brand-label"
+        >
+          Bee
+        </span>
+        <span className="ml-2">
+          <ClusterSelectorDropdown />
+        </span>
         <div className="flex-1" />
-        <ClusterSelectorDropdown onOpenSettings={openSettings} />
+        <button
+          onClick={onRefresh}
+          title="Refresh"
+          aria-label="Refresh"
+          className="p-1.5 rounded text-gray-500 hover:bg-gray-100 dark:hover:bg-neutral-700"
+        >
+          <RefreshCw size={14} />
+        </button>
         <button
           onClick={openSettings}
           className="p-1.5 rounded text-gray-500 hover:bg-gray-100 dark:hover:bg-neutral-700"

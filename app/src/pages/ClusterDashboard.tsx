@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 
 import { useConnection } from "../state/connectionStore";
+import { useUi } from "../state/store";
 import {
   clusterStatus,
   listJobs,
@@ -18,6 +19,7 @@ import {
   type JobSummary,
   type RollingRestartPlan,
 } from "../ipc";
+import { ClusterTopology, type TopologyNode } from "../components/ClusterTopology";
 
 const REFRESH_MS = 5000;
 
@@ -48,6 +50,7 @@ const SECTION_LABEL: Record<SectionKey, string> = {
 
 export function ClusterDashboard() {
   const addr = useConnection((s) => s.addr);
+  const openSettings = useUi((s) => s.openSettings);
   const clusterQ = useQuery<ClusterMetrics>({
     queryKey: ["cluster", addr],
     queryFn: () => clusterStatus(addr),
@@ -161,6 +164,22 @@ export function ClusterDashboard() {
               log length {clusterQ.data?.nodes[0]?.log_length ?? "—"}
             </div>
           </div>
+        </div>
+        <div className="px-4 pb-4">
+          <ClusterTopology
+            nodes={(clusterQ.data?.nodes ?? []).map<TopologyNode>((n) => ({
+              id: n.id,
+              role: n.role as TopologyNode["role"],
+              addr: addr,
+              term: clusterQ.data?.term ?? 0,
+              lag: 0,
+              error: n.role === "Follower" && n.log_length < (clusterQ.data?.commit_index ?? 0)
+                ? `lag ${(clusterQ.data?.commit_index ?? 0) - n.log_length}`
+                : null,
+            }))}
+            leaderId={clusterQ.data?.leader_id ?? null}
+            onSelectCluster={openSettings}
+          />
         </div>
         <div className="px-4 pb-4">
           <table className="w-full text-xs">

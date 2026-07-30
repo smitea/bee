@@ -126,6 +126,8 @@ pub fn run() {
             commands::applications::application_import,
             commands::search::search_local,
             commands::search::search_server,
+            commands::dashboards::dashboard_get,
+            commands::dashboards::dashboard_save,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -31,22 +31,20 @@ const DEBOUNCE_MS = 400;
 type SectionId =
   | "client"
   | "connection"
+  | "tenant"
   | "appearance"
   | "logging"
   | "diagnostics"
-  | "cluster"
   | "raft"
   | "kv"
   | "scheduling"
   | "plugins"
-  | "security"
-  | "tenant";
+  | "security";
 
 const SECTIONS: { id: SectionId; label: string; description: string }[] = [
   { id: "client", label: "Client", description: "Bee Client desktop preferences." },
-  { id: "connection", label: "Connection", description: "AdminServer address and reachability." },
+  { id: "connection", label: "Connection", description: "Saved Bee clusters, AdminServer address, and reachability." },
   { id: "tenant", label: "Tenant", description: "Active tenant for new Applications and Datasources." },
-  { id: "cluster", label: "Cluster", description: "Saved Bee clusters and profile management." },
   { id: "appearance", label: "Appearance", description: "Theme, density, and visual preferences." },
   { id: "logging", label: "Logging", description: "Log verbosity and routing." },
   { id: "diagnostics", label: "Diagnostics", description: "Diagnostic export and troubleshooting." },
@@ -62,7 +60,6 @@ export function SettingsModal({ open, onClose }: Props) {
 
   const addr = useConnection((s) => s.addr);
   const setStoreAddr = useConnection((s) => s.setAddr);
-  const status = useConnection((s) => s.status);
   const [draft, setDraft] = useState(addr);
   const [saveState, setSaveState] = useState<"idle" | "Saving" | "Saved" | "Error">("idle");
   const [testState, setTestState] = useState<string>("");
@@ -166,7 +163,7 @@ export function SettingsModal({ open, onClose }: Props) {
       aria-label="Settings"
     >
       <div className="bg-white dark:bg-neutral-800 rounded-lg shadow-xl w-[640px] max-w-[95vw] h-[520px] flex">
-        <aside className="w-44 border-r border-gray-200 dark:border-neutral-700 p-3 text-xs">
+        <aside className="w-44 border-r border-gray-200 dark:border-neutral-700 p-3 text-xs overflow-y-auto">
           <h2 className="text-sm font-semibold mb-2">Settings</h2>
           <nav className="space-y-1">
             {SECTIONS.map((s) => (
@@ -181,55 +178,26 @@ export function SettingsModal({ open, onClose }: Props) {
         </aside>
         <main className="flex-1 p-4 flex flex-col gap-4 overflow-y-auto">
           {section === "connection" && (
-            <section>
-              <div className="flex items-center justify-between mb-3">
-                <h3 className="text-sm font-medium">Connection</h3>
-                <span
-                  className={
-                    saveState === "Saved"
-                      ? "text-[10px] text-accent-green"
-                      : saveState === "Error"
-                        ? "text-[10px] text-accent-red"
-                        : saveState === "Saving"
-                          ? "text-[10px] text-gray-500"
-                          : "text-[10px] text-transparent"
-                  }
-                  aria-live="polite"
-                >
-                  {saveState === "idle" ? "·" : saveState}
-                </span>
-              </div>
-              <p className="text-[10px] text-gray-500 dark:text-neutral-400 mb-2">
-                AdminServer address.
-              </p>
-              <label className="text-xs text-gray-500 dark:text-neutral-400" htmlFor="addr">
-                AdminServer address
-              </label>
-              <input
-                id="addr"
-                value={draft}
-                onChange={(e) => setDraft(e.target.value)}
-                placeholder="127.0.0.1:8702"
-                className="mt-1 w-full px-2 py-1 text-xs font-mono rounded border border-gray-200 dark:border-neutral-700 bg-white dark:bg-neutral-900"
-              />
-              {testState && (
-                <p className="mt-2 text-[10px] text-gray-500 dark:text-neutral-400">{testState}</p>
-              )}
-              <div className="mt-3 flex items-center gap-2 justify-end">
-                <button
-                  onClick={onTest}
-                  className="px-3 py-1 text-xs rounded border border-gray-200 dark:border-neutral-700 hover:bg-gray-50 dark:hover:bg-neutral-700"
-                >
-                  Test Connection
-                </button>
-                <button
-                  onClick={onConnect}
-                  className="px-3 py-1 text-xs rounded bg-accent-blue text-white hover:bg-accent-blue/90"
-                >
-                  Connect
-                </button>
-              </div>
-            </section>
+            <ConnectionSection
+              addr={addr}
+              draft={draft}
+              setDraft={setDraft}
+              saveState={saveState}
+              testState={testState}
+              onTest={onTest}
+              onConnect={onConnect}
+              onSwitchCluster={async (a) => {
+                setDraft(a);
+                try {
+                  await clusterProfileActivate(a);
+                  await setAddr(a);
+                  setStoreAddr(a);
+                  setInitial(a);
+                } catch {
+                  /* surfaced via store */
+                }
+              }}
+            />
           )}
 
           {section === "tenant" && (
@@ -273,23 +241,7 @@ export function SettingsModal({ open, onClose }: Props) {
             </section>
           )}
 
-          {section === "cluster" && (
-            <ClustersSection
-              activeAddr={addr}
-              activeStatus={status}
-              onConnect={async (a) => {
-                try {
-                  await clusterProfileActivate(a);
-                  await setAddr(a);
-                  setStoreAddr(a);
-                } catch {
-                  /* surfaced via store */
-                }
-              }}
-            />
-          )}
-
-          {!["connection", "tenant", "cluster"].includes(section) && (
+          {!["connection", "tenant"].includes(section) && (
             <PlaceholderSection
               title={SECTIONS.find((s) => s.id === section)?.label ?? ""}
               description={SECTIONS.find((s) => s.id === section)?.description ?? ""}
@@ -347,16 +299,27 @@ function PlaceholderSection({ title, description }: { title: string; description
   );
 }
 
-function ClustersSection({
-  activeAddr,
-  activeStatus,
+function ConnectionSection({
+  addr,
+  draft,
+  setDraft,
+  saveState,
+  testState,
+  onTest,
   onConnect,
+  onSwitchCluster,
 }: {
-  activeAddr: string;
-  activeStatus: import("../ipc/shared").ConnStatus;
-  onConnect(addr: string): Promise<void> | void;
+  addr: string;
+  draft: string;
+  setDraft: (v: string) => void;
+  saveState: "idle" | "Saving" | "Saved" | "Error";
+  testState: string;
+  onTest(): void | Promise<void>;
+  onConnect(): void | Promise<void>;
+  onSwitchCluster(addr: string): void | Promise<void>;
 }) {
   const qc = useQueryClient();
+  const status = useConnection((s) => s.status);
   const listQ = useQuery<ClusterProfileView[]>({
     queryKey: ["cluster-profiles"],
     queryFn: () => clusterProfileList(),
@@ -437,7 +400,7 @@ function ClustersSection({
   return (
     <section>
       <div className="flex items-center justify-between mb-3">
-        <h3 className="text-sm font-medium">Clusters</h3>
+        <h3 className="text-sm font-medium">Connection</h3>
         <button
           type="button"
           onClick={beginAdd}
@@ -449,7 +412,7 @@ function ClustersSection({
         </button>
       </div>
       <p className="text-[10px] text-gray-500 dark:text-neutral-400 mb-2">
-        Saved Bee clusters. Status dots mirror the live connection.
+        Saved Bee clusters. Selecting a row pre-fills the address below.
       </p>
 
       {(adding || editingId !== null) && (
@@ -496,11 +459,13 @@ function ClustersSection({
       )}
 
       {all.length === 0 ? (
-        <p className="text-[11px] text-gray-400 px-2 py-2">no saved clusters</p>
+        <p className="text-[11px] text-gray-400 px-2 py-2" data-testid="clusters-list">
+          no saved clusters
+        </p>
       ) : (
-        <ul className="space-y-1" data-testid="clusters-list">
+        <ul className="space-y-1 mb-3" data-testid="clusters-list">
           {all.map((p) => {
-            const isActive = p.addr.trim() === activeAddr.trim();
+            const isActive = p.addr.trim() === addr.trim();
             return (
               <li
                 key={p.id}
@@ -508,20 +473,29 @@ function ClustersSection({
               >
                 <ClusterStatusDot
                   profileAddr={p.addr}
-                  activeAddr={activeAddr}
-                  status={isActive ? activeStatus : { kind: "Disconnected" }}
+                  activeAddr={addr}
+                  status={isActive ? status : { kind: "Disconnected" }}
                 />
-                <div className="flex-1 min-w-0">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDraft(p.addr);
+                    void onSwitchCluster(p.addr);
+                  }}
+                  className="flex-1 min-w-0 text-left"
+                  aria-label={`Select ${p.label}`}
+                  title={`Switch address to ${p.addr}`}
+                >
                   <div className="text-xs truncate">{p.label}</div>
                   <div className="font-mono text-[10px] text-gray-400 truncate">
                     {p.addr} · t{p.tenant}
                   </div>
-                </div>
+                </button>
                 <button
                   type="button"
                   aria-label={`Connect ${p.label}`}
                   title="Connect"
-                  onClick={() => void onConnect(p.addr)}
+                  onClick={() => void onSwitchCluster(p.addr)}
                   className="p-1 rounded text-gray-400 hover:text-accent-blue"
                 >
                   <Plug size={11} />
@@ -549,6 +523,48 @@ function ClustersSection({
           })}
         </ul>
       )}
+
+      <span
+        className={
+          saveState === "Saved"
+            ? "text-[10px] text-accent-green"
+            : saveState === "Error"
+              ? "text-[10px] text-accent-red"
+              : saveState === "Saving"
+                ? "text-[10px] text-gray-500"
+                : "text-[10px] text-transparent"
+        }
+        aria-live="polite"
+      >
+        {saveState === "idle" ? "·" : saveState}
+      </span>
+      <label className="text-xs text-gray-500 dark:text-neutral-400" htmlFor="addr">
+        AdminServer address
+      </label>
+      <input
+        id="addr"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        placeholder="127.0.0.1:8702"
+        className="mt-1 w-full px-2 py-1 text-xs font-mono rounded border border-gray-200 dark:border-neutral-700 bg-white dark:bg-neutral-900"
+      />
+      {testState && (
+        <p className="mt-2 text-[10px] text-gray-500 dark:text-neutral-400">{testState}</p>
+      )}
+      <div className="mt-3 flex items-center gap-2 justify-end">
+        <button
+          onClick={onTest}
+          className="px-3 py-1 text-xs rounded border border-gray-200 dark:border-neutral-700 hover:bg-gray-50 dark:hover:bg-neutral-700"
+        >
+          Test Connection
+        </button>
+        <button
+          onClick={onConnect}
+          className="px-3 py-1 text-xs rounded bg-accent-blue text-white hover:bg-accent-blue/90"
+        >
+          Connect
+        </button>
+      </div>
     </section>
   );
 }

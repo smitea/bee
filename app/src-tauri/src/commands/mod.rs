@@ -10,6 +10,7 @@ pub mod tabs;
 pub mod tenant;
 pub mod applications;
 pub mod audit;
+pub mod dashboards;
 pub mod datasources;
 pub mod pipelines;
 pub mod search;

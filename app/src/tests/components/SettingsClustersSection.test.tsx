@@ -65,8 +65,8 @@ beforeEach(() => {
 });
 
 describe("<SettingsModal> Clusters section", () => {
-  it("lists saved clusters with status dots and Connect / Edit / Remove controls", async () => {
-    mocks.clusterProfileList.mockResolvedValueOnce([
+  it("lists saved clusters with status dots and Connect / Edit / Remove controls under Connection", async () => {
+    mocks.clusterProfileList.mockResolvedValue([
       {
         id: 1,
         label: "alpha",
@@ -85,9 +85,7 @@ describe("<SettingsModal> Clusters section", () => {
       },
     ]);
     withClient(<SettingsModal open onClose={() => {}} />);
-    fireEvent.click(screen.getByRole("button", { name: "Cluster" }));
-    expect(await screen.findByTestId("clusters-list")).toBeInTheDocument();
-    expect(screen.getByText("alpha")).toBeInTheDocument();
+    expect(await screen.findByText("alpha")).toBeInTheDocument();
     expect(screen.getByText("beta")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /connect alpha/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /edit alpha/i })).toBeInTheDocument();
@@ -99,10 +97,9 @@ describe("<SettingsModal> Clusters section", () => {
   });
 
   it("add cluster invokes clusterProfileSave", async () => {
-    mocks.clusterProfileList.mockResolvedValueOnce([]);
+    mocks.clusterProfileList.mockResolvedValue([]);
     mocks.clusterProfileSave.mockResolvedValueOnce(99);
     withClient(<SettingsModal open onClose={() => {}} />);
-    fireEvent.click(screen.getByRole("button", { name: "Cluster" }));
     fireEvent.click(await screen.findByRole("button", { name: /add cluster/i }));
     fireEvent.change(screen.getByLabelText("Cluster label"), {
       target: { value: "new" },
@@ -115,7 +112,7 @@ describe("<SettingsModal> Clusters section", () => {
   });
 
   it("remove cluster invokes clusterProfileRemove", async () => {
-    mocks.clusterProfileList.mockResolvedValueOnce([
+    mocks.clusterProfileList.mockResolvedValue([
       {
         id: 5,
         label: "del",
@@ -126,9 +123,7 @@ describe("<SettingsModal> Clusters section", () => {
       },
     ]);
     mocks.clusterProfileRemove.mockResolvedValueOnce(undefined);
-    mocks.clusterProfileList.mockResolvedValueOnce([]);
     withClient(<SettingsModal open onClose={() => {}} />);
-    fireEvent.click(screen.getByRole("button", { name: "Cluster" }));
     fireEvent.click(await screen.findByRole("button", { name: /remove del/i }));
     await waitFor(() => expect(mocks.clusterProfileRemove).toHaveBeenCalledWith("10.0.0.5:9999"));
   });

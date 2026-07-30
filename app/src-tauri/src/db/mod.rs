@@ -11,6 +11,7 @@ pub mod audit;
 pub mod pipelines;
 pub mod datasources;
 pub mod clusters;
+pub mod dashboards;
 
 pub struct Database {
     conn: Mutex<Connection>,
@@ -171,6 +172,17 @@ pub const MIGRATIONS: &[Migration] = &[
             );
         "#,
     },
+    Migration {
+        version: 11,
+        name: "dashboards",
+        sql: r#"
+            CREATE TABLE dashboards (
+                application_id INTEGER PRIMARY KEY REFERENCES applications(id) ON DELETE CASCADE,
+                layout_json TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+        "#,
+    },
 ];
 
 impl Database {
@@ -257,7 +269,7 @@ mod tests {
         let db = Database::open(&path).unwrap();
         assert!(path.exists());
         let applied = db.applied_versions().unwrap();
-        assert_eq!(applied, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+        assert_eq!(applied, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
     }
 
     #[test]
@@ -269,7 +281,7 @@ mod tests {
         let db2 = Database::open(&path).unwrap();
         let second = db2.applied_versions().unwrap();
         assert_eq!(first, second);
-        assert_eq!(first, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+        assert_eq!(first, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
     }
 
     #[test]
@@ -281,6 +293,6 @@ mod tests {
             conn.execute_batch("CREATE TABLE migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at INTEGER NOT NULL);").unwrap();
         }
         let db = Database::open(&path).unwrap();
-        assert_eq!(db.applied_versions().unwrap(), vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+        assert_eq!(db.applied_versions().unwrap(), vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
     }
 }
