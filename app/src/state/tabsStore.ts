@@ -65,7 +65,7 @@ export const useTabs = create<TabsStore>((set, get) => ({
         {
           id,
           kind: "cluster",
-          resourceId: null,
+          resource_id: null,
           title: "Cluster",
           pinned: false,
           position: 0,
@@ -80,7 +80,7 @@ export const useTabs = create<TabsStore>((set, get) => ({
       tabs: working.map((t) => ({
         id: t.id,
         kind: asKind(t.kind),
-        resource_id: t.resourceId,
+        resource_id: t.resource_id,
         title: t.title,
         pinned: t.pinned,
         position: t.position,
@@ -97,7 +97,7 @@ export const useTabs = create<TabsStore>((set, get) => ({
       tabs: list.map((t) => ({
         id: t.id,
         kind: asKind(t.kind),
-        resource_id: t.resourceId,
+        resource_id: t.resource_id,
         title: t.title,
         pinned: t.pinned,
         position: t.position,
@@ -117,7 +117,7 @@ export const useTabs = create<TabsStore>((set, get) => ({
       tabs: list.map((t) => ({
         id: t.id,
         kind: asKind(t.kind),
-        resource_id: t.resourceId,
+        resource_id: t.resource_id,
         title: t.title,
         pinned: t.pinned,
         position: t.position,
@@ -133,7 +133,7 @@ export const useTabs = create<TabsStore>((set, get) => ({
       tabs: list.map((t) => ({
         id: t.id,
         kind: asKind(t.kind),
-        resource_id: t.resourceId,
+        resource_id: t.resource_id,
         title: t.title,
         pinned: t.pinned,
         position: t.position,
@@ -155,7 +155,7 @@ export const useTabs = create<TabsStore>((set, get) => ({
       tabs: refreshed.map((t) => ({
         id: t.id,
         kind: asKind(t.kind),
-        resource_id: t.resourceId,
+        resource_id: t.resource_id,
         title: t.title,
         pinned: t.pinned,
         position: t.position,
@@ -175,7 +175,7 @@ export const useTabs = create<TabsStore>((set, get) => ({
       tabs: list.map((t) => ({
         id: t.id,
         kind: asKind(t.kind),
-        resource_id: t.resourceId,
+        resource_id: t.resource_id,
         title: t.title,
         pinned: t.pinned,
         position: t.position,

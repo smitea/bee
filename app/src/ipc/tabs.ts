@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 export interface TabView {
   id: number;
   kind: string;
-  resourceId: string | null;
+  resource_id: string | null;
   title: string;
   pinned: boolean;
   position: number;
@@ -22,7 +22,7 @@ export async function tabOpen(
   resourceId: string | null,
   title: string,
 ): Promise<number> {
-  return invoke<number>("tab_open", { kind, resourceId, title });
+  return invoke<number>("tab_open", { kind, resource_id: resourceId, title });
 }
 
 export async function tabClose(id: number): Promise<void> {
