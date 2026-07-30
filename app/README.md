@@ -275,6 +275,53 @@ The shipped Bee Client image recipe lives at `docker/Dockerfile.bee-client`.
 - **`sqlite` lock errors on Windows.** Ensure no other Bee Client process is running and that the per-user data directory (`%APPDATA%/io.smitea.beeclient/`) is writable. Close any stale shell that started the bundle and retry.
 - **Plugin `.so` not loading.** The Plugin Manager reads Plugin Registry from the configured plugin directory. Verify the plugin's `crate-type` is `["cdylib"]` and that it was built against the same Rust toolchain as Bee Client. See `CONTEXT.md` (Plugin Identity) and ADR-0009 for the binding contract.
 
+## Security & CSP
+
+Bee Client ships with a hardened production Content Security Policy and a minimum-privilege capability manifest. Both are enforced and regression-tested; see `app/src-tauri/tests/csp_validation.rs`.
+
+### CSP policy
+
+Production CSP (declared in `app/src-tauri/tauri.conf.json`):
+
+| Directive | Value | Reason |
+|---|---|---|
+| `default-src` | `'self'` | Anchor the allowlist — everything not explicitly listed falls back to `'self'`. |
+| `script-src` | `'self' 'wasm-unsafe-eval'` | No inline scripts; `wasm-unsafe-eval` is required by some Tauri bundlings. `'unsafe-inline'` is **not** allowed on `script-src`. |
+| `script-src-elem` | `'self' 'unsafe-inline'` | Needed because chart libraries (ECharts, klinecharts) inject `<script>` elements at runtime; source is still restricted to `'self'`. |
+| `style-src` | `'self' 'unsafe-inline'` | Tailwind's JIT and component libraries inject `<style>` tags. |
+| `img-src` | `'self' data: blob: https://*` | K-line thumbnails and chart exports (data URIs / blobs / any HTTPS origin). |
+| `font-src` | `'self' data:` | Bundled fonts plus base64-encoded glyphs. |
+| `connect-src` | `'self' ipc: http://ipc.localhost` | Tauri IPC bridge (JS → Rust). |
+| `worker-src` | `'self' blob:` | ECharts web workers. |
+| `frame-src` | `'none'` | Defeat click-jacking. |
+| `object-src` | `'none'` | No plugins / Flash / legacy objects. |
+| `form-action` | `'none'` | Block exfiltration via form POST. |
+| `base-uri` | `'self'` | Prevent `<base>`-tag injection that rewrites relative URLs. |
+| `manifest-src` | `'self'` | Restrict Web App Manifest origin. |
+
+### Capabilities
+
+The default capability manifest (`app/src-tauri/capabilities/default.json`) grants **only `core:default`**.
+
+**Boundary rule:** *“does not need it” wins over “convenient to have.”* All file I/O — SQLite, the plugin registry, application logs — is performed by the Rust application layer through internal APIs. Tauri capabilities govern IPC invoked **from the WebView**. The WebView does not need `fs`, `shell`, `http`, `dialog`, `clipboard`, `notification`, `process`, `os`, or `path` permissions, so none of them are granted.
+
+### Adding a new origin
+
+If a feature requires loading a script, image, font, or XHR target from a new origin:
+
+1. Edit `app/src-tauri/tauri.conf.json` and widen the relevant CSP directive.
+2. Add a comment in the README table above describing **why** the origin is needed (which library, what resource).
+3. If the origin must be reachable from JS via `fetch` / `invoke`, also add a Tauri capability for the plugin in question (e.g., `http:default`) **only after** confirming no path through the Rust layer is available.
+4. Re-run `cd app/src-tauri && cargo test --test csp_validation` to confirm the policy still parses and is strictly anchored at `default-src 'self'`.
+
+### Adding a new capability
+
+Tauri capabilities are least-privilege: scope them to specific `windows`, `permissions`, and (when supported) `scopes`. If a capability is requested for one feature, document it in this section with the same rationale columns above (why, what for, blast radius).
+
+### Debugging CSP rejections
+
+Open the Bee Client window DevTools (`View → Toggle Developer Tools` in dev builds, or attach a WebView inspector in production via Tauri's remote debugging flag). The console prints the violating directive and the blocked URL. Fix by widening the CSP entry — never by relaxing it globally.
+
 ## License
 
 Bee Client is part of the Bee project and is released under the **Apache License 2.0**. See [LICENSE](../LICENSE) (or the `license = "Apache-2.0"` declaration in the workspace `Cargo.toml`) for the full text.
