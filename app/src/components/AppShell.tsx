@@ -8,6 +8,8 @@ import { ContextMenu, type ContextMenuItem } from "./ContextMenu";
 import { ActivityBar } from "./ActivityBar";
 import { ConnectionStatus } from "./ConnectionStatus";
 import { LoadingBar } from "./LoadingBar";
+import { ErrorBoundary } from "./ErrorBoundary";
+import { ReconnectButton } from "./StatusBar";
 import { useUi } from "../state/store";
 import { useTabs, type TabKind } from "../state/tabsStore";
 import { useApplications } from "../state/applicationsStore";
@@ -163,6 +165,7 @@ function StatusBar({ onActivityNavigate }: StatusBarProps) {
     <footer className="flex items-center gap-4 px-3 h-7 text-[10px] text-gray-500 dark:text-neutral-400 bg-white dark:bg-neutral-800 border-t border-gray-200 dark:border-neutral-700">
       <span className="font-medium text-gray-700 dark:text-neutral-200">Bee Client v0.1.0</span>
       <ConnectionStatus onOpenSettings={() => useUi.getState().openSettings()} />
+      <ReconnectButton />
       <ActivityBar navigate={onActivityNavigate} />
       <span
         className="text-[10px] text-gray-400 font-mono"
@@ -212,26 +215,44 @@ function PageTabs() {
     if (!active) return null;
     switch (active.kind) {
       case "cluster":
-        return <ClusterDashboard />;
+        return (
+          <ErrorBoundary label="Cluster">
+            <ClusterDashboard />
+          </ErrorBoundary>
+        );
       case "application": {
         const id = Number(active.resource_id);
         const app = applications.find((a) => a.id === id);
         if (!app) return <p className="text-xs text-gray-400">application not found</p>;
-        return <ApplicationOverview applicationId={app.id} />;
+        return (
+          <ErrorBoundary label="Application">
+            <ApplicationOverview applicationId={app.id} />
+          </ErrorBoundary>
+        );
       }
       case "application_pipelines":
-        return <PipelinesPage />;
+        return (
+          <ErrorBoundary label="Pipelines">
+            <PipelinesPage />
+          </ErrorBoundary>
+        );
       case "application_datasources":
-        return <DataSources />;
+        return (
+          <ErrorBoundary label="Datasources">
+            <DataSources />
+          </ErrorBoundary>
+        );
       case "application_dashboard": {
         const id = Number(active.resource_id);
         if (!Number.isFinite(id)) {
           return <p className="text-xs text-gray-400">invalid application id</p>;
         }
         return (
-          <Suspense fallback={<LazyFallback label="loading dashboard editor" />}>
-            <DashboardPage applicationId={id} />
-          </Suspense>
+          <ErrorBoundary label="Dashboard">
+            <Suspense fallback={<LazyFallback label="loading dashboard editor" />}>
+              <DashboardPage applicationId={id} />
+            </Suspense>
+          </ErrorBoundary>
         );
       }
       case "pipeline": {
@@ -239,18 +260,28 @@ function PageTabs() {
         if (!Number.isFinite(id)) {
           return <p className="text-xs text-gray-400">invalid pipeline id</p>;
         }
-        return <PipelineDetail pipelineId={id} />;
+        return (
+          <ErrorBoundary label="Pipeline">
+            <PipelineDetail pipelineId={id} />
+          </ErrorBoundary>
+        );
       }
       case "pipeline_editor":
         return (
-          <Suspense fallback={<LazyFallback label="loading pipeline editor" />}>
-            <PipelineEditor />
-          </Suspense>
+          <ErrorBoundary label="Pipeline editor">
+            <Suspense fallback={<LazyFallback label="loading pipeline editor" />}>
+              <PipelineEditor />
+            </Suspense>
+          </ErrorBoundary>
         );
       case "datasource":
         return <p className="text-xs text-gray-400">datasource detail · coming in a later slice</p>;
       case "activity":
-        return <ActivityPage />;
+        return (
+          <ErrorBoundary label="Activity">
+            <ActivityPage />
+          </ErrorBoundary>
+        );
     }
   })();
 
