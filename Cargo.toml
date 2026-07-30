@@ -16,6 +16,7 @@ members = [
     "bee",
     "plugins/bee-plugin-perf-fib",
     "plugins/bee-plugin-onnx-ml",
+    "plugins/sample-kline",
     "plugins/quant/bee-plugin-binance",
     "plugins/quant/bee-plugin-google-news",
     "plugins/quant/bee-plugin-influxdb",

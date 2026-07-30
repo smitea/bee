@@ -151,6 +151,14 @@ impl PluginRegistry {
         guard.get(id).map(|e| e.manifest.clone())
     }
 
+    pub fn manifest_by_name(&self, name: &str) -> Option<PluginManifest> {
+        let guard = self.inner.lock().unwrap();
+        guard
+            .values()
+            .find(|e| e.manifest.name.0 == name)
+            .map(|e| e.manifest.clone())
+    }
+
     pub fn insert_manifest(&self, id: String, manifest: PluginManifest) {
         let mut guard = self.inner.lock().unwrap();
         guard.insert(

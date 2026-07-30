@@ -739,6 +739,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "bee_plugin_sample_kline"
+version = "0.1.0"
+dependencies = [
+ "bee-adapter",
+ "bee-plugin-macro",
+ "bee-plugin-sdk",
+ "bincode",
+ "futures",
+ "serde",
+ "tokio",
+]
+
+[[package]]
 name = "bigdecimal"
 version = "0.4.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"

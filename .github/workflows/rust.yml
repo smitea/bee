@@ -42,8 +42,15 @@ jobs:
             -> bee/target
             -> plugins/*/target
             -> plugins/quant/*/target
+            -> app/src-tauri/target
+      - name: Build sample plugin (release)
+        run: cargo build --release -p bee_plugin_sample_kline --verbose
       - name: Test (release)
         run: cargo test --workspace --release --verbose
+      - name: Test sample plugin Reload from disk
+        working-directory: app/src-tauri
+        run: |
+          cargo test --test sample_plugin_load --release --verbose
 
   tauri-frontend-build:
     name: Tauri frontend build (Node.js + Vite)

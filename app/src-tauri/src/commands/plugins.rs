@@ -41,7 +41,9 @@ pub fn list_summaries() -> Vec<PluginSummary> {
 }
 
 pub fn schema(name: &str) -> PluginSchema {
-    let manifest = registry_static().manifest(name);
+    let manifest = registry_static()
+        .manifest_by_name(name)
+        .or_else(|| registry_static().manifest(name));
     let adapters = match manifest {
         Some(m) => plugin_registry::schema_for(&m),
         None => plugin_registry::placeholder_schema(name),
@@ -162,7 +164,9 @@ pub fn plugin_last_dir(app: AppHandle) -> CmdResult<Option<String>> {
 #[tauri::command]
 pub fn datasource_form_schema(plugin: String) -> DatasourceFormSchema {
     let plugin_str = plugin;
-    let manifest = registry_static().manifest(&plugin_str);
+    let manifest = registry_static()
+        .manifest_by_name(&plugin_str)
+        .or_else(|| registry_static().manifest(&plugin_str));
     let adapters = match manifest.as_ref() {
         Some(m) => plugin_registry::schema_for(m),
         None => plugin_registry::placeholder_schema(&plugin_str),
