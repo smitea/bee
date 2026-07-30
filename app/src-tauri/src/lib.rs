@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use tauri::Manager;
 
 pub mod audit_seed;
+pub mod cli;
 pub mod commands;
 pub mod connection;
 pub mod db;

@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+if [[ -z "${BEE_CLIENT_DB:-}" ]]; then
+  case "$(uname -s)" in
+    Darwin)
+      export BEE_CLIENT_DB="${HOME:?HOME is required}/Library/Application Support/io.smitea.beeclient/bee-client.sqlite"
+      ;;
+    MINGW*|MSYS*|CYGWIN*)
+      export BEE_CLIENT_DB="${APPDATA:?APPDATA is required}/io.smitea.beeclient/bee-client.sqlite"
+      ;;
+    *)
+      export BEE_CLIENT_DB="${XDG_DATA_HOME:-${HOME:?HOME is required}/.local/share}/io.smitea.beeclient/bee-client.sqlite"
+      ;;
+  esac
+fi
+
+exec cargo run --quiet --manifest-path "$ROOT/app/src-tauri/Cargo.toml" --bin bee-cli -- "$@"

@@ -234,6 +234,22 @@ cargo tauri build
 #   app/src-tauri/target/release/bundle/<exe>        (raw binary)
 ```
 
+### Headless CLI
+
+`bee-cli` reads the same SQLite state as Bee Client without starting a WebView. Its output is pipe-friendly: list records use one tab-delimited row per entity, while describe and status commands use tab-delimited key/value rows.
+
+```bash
+scripts/bee-cli list applications
+scripts/bee-cli describe application 1
+BEE_CLIENT_DB=/path/to/bee-client.sqlite scripts/bee-cli list plugins
+scripts/bee-cli list pipelines
+scripts/bee-cli list datasources
+scripts/bee-cli describe connection
+scripts/bee-cli migrate-status
+```
+
+The wrapper selects Bee Client's platform application-data path unless `BEE_CLIENT_DB` overrides it. `scripts/bee-cli reset --force` permanently deletes `bee-client.sqlite` and its `-wal` and `-shm` sidecars; the next GUI or CLI launch creates a fresh database and applies all migrations.
+
 Run Bee in a containerised 5-node cluster for end-to-end testing:
 
 ```bash
