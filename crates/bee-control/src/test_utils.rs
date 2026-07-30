@@ -45,6 +45,7 @@ use crate::raft::admin_server::AdminServer;
 use crate::raft::cluster::{Cluster, ClusterConfig, NodeSpec};
 use crate::raft::node::{AdminReplyRegistrar, NodeConfig};
 use crate::raft::types::NodeId;
+use bee_registry::PluginManager;
 
 /// Short election / heartbeat timings. The 500ms /
 /// 50ms pair matches the existing
@@ -97,11 +98,33 @@ impl TestCluster {
     /// any existing test that just needs an
     /// in-process cluster.
     pub async fn boot_3_node_with_admin() -> Self {
+        Self::boot_3_node_with_admin_and_plugins(None).await
+    }
+
+    /// Boot an n=3 in-memory cluster with one
+    /// `AdminServer` per node and a shared
+    /// `PluginManager` wired into every
+    /// AdminServer's `RegisterDatasource`
+    /// validation chain. Required by e2e tests
+    /// that exercise the Bee Client's
+    /// `application_enable` lifecycle against a
+    /// real cluster: without a plugin manager,
+    /// `AdminServer::validate_register_datasource`
+    /// rejects every `RegisterDatasource` with
+    /// `plugin_manager not wired`.
+    pub async fn boot_3_node_with_admin_and_plugins(
+        plugin_manager: Option<Arc<PluginManager>>,
+    ) -> Self {
+        let cluster_pm = plugin_manager.as_ref().map(|pm| {
+            let mut copy = PluginManager::new();
+            copy.set_expected_abi_majors(pm.expected_abi_majors().to_vec());
+            Arc::new(std::sync::Mutex::new(copy))
+        });
         let config = ClusterConfig {
             n: 3,
             base_election_timeout: FAST_ELECTION_TIMEOUT,
             heartbeat_interval: FAST_HEARTBEAT_INTERVAL,
-            plugin_manager: None,
+            plugin_manager: cluster_pm,
             log_path: None,
             snapshot_dir: None,
             snapshot_threshold: 0,
@@ -123,10 +146,7 @@ impl TestCluster {
         };
         let cluster = Cluster::new_with_specs(config).await;
 
-        // Spin up one AdminServer per node,
-        // mirroring `admin_forwarding_inmem:88-100`.
-        let mut admin_addrs: HashMap<NodeId, SocketAddr> =
-            HashMap::new();
+        let mut admin_addrs: HashMap<NodeId, SocketAddr> = HashMap::new();
         let mut admin_servers: Vec<AdminServer> = Vec::new();
         for i in 1..=3u32 {
             let node = cluster.node(i).expect("node handle");
@@ -135,11 +155,11 @@ impl TestCluster {
             let state = node.state.clone();
             let pending_replies = node.pending_replies.clone();
             let node_transport = node.node_transport.clone();
-            let register_reply: AdminReplyRegistrar =
-                Arc::new(move || {
-                    let pr = pending_replies.clone();
-                    Box::pin(async move { pr.register().await })
-                });
+            let register_reply: AdminReplyRegistrar = Arc::new(move || {
+                let pr = pending_replies.clone();
+                Box::pin(async move { pr.register().await })
+            });
+            let pm = plugin_manager.clone();
             let admin = AdminServer::start(
                 "127.0.0.1:0".parse().unwrap(),
                 kv,
@@ -148,7 +168,7 @@ impl TestCluster {
                 None,
                 Some(node_transport),
                 Some(register_reply),
-                None,
+                pm,
             )
             .await
             .expect("AdminServer::start");

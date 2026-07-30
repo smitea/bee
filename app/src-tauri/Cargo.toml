@@ -46,6 +46,8 @@ tempfile = "3"
 tempdir = "0.3"
 once_cell = "1"
 bee-control = { path = "../../crates/bee-control", features = ["test-utils"] }
+bee-plugin-sdk = { path = "../../crates/bee-plugin-sdk" }
+bee-registry = { path = "../../crates/bee-registry" }
 
 [features]
 default = ["custom-protocol"]

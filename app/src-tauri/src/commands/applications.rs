@@ -95,32 +95,39 @@ pub enum RehydrationError {
 }
 
 pub trait DeployRegistrar {
-    fn deploy_sql(&self, sql_text: &str) -> Result<(), RehydrationError>;
+    fn deploy_pipeline(
+        &self,
+        name: &str,
+        dag_json: &str,
+    ) -> Result<(), RehydrationError>;
     fn register_datasource(
         &self,
         name: &str,
-        adapter: &str,
+        plugin: &str,
         config_json: &str,
-        tenant: u16,
     ) -> Result<(), RehydrationError>;
 }
 
 pub struct AdminServerDeployRegistrar {
     pub addr: std::net::SocketAddr,
+    pub tenant: u16,
 }
 
 pub struct NoopDeployRegistrar;
 
 impl DeployRegistrar for NoopDeployRegistrar {
-    fn deploy_sql(&self, _sql_text: &str) -> Result<(), RehydrationError> {
+    fn deploy_pipeline(
+        &self,
+        _name: &str,
+        _dag_json: &str,
+    ) -> Result<(), RehydrationError> {
         Ok(())
     }
     fn register_datasource(
         &self,
         _name: &str,
-        _adapter: &str,
+        _plugin: &str,
         _config_json: &str,
-        _tenant: u16,
     ) -> Result<(), RehydrationError> {
         Ok(())
     }
@@ -143,44 +150,104 @@ where
     rt.block_on(fut)
 }
 
+fn wait_for_connection(handle: &connection::ConnectionHandle, timeout_secs: u64) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    while std::time::Instant::now() < deadline {
+        if matches!(
+            handle.state(),
+            connection::ConnectionState::Connected
+        ) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    false
+}
+
 impl DeployRegistrar for AdminServerDeployRegistrar {
-    fn deploy_sql(&self, sql_text: &str) -> Result<(), RehydrationError> {
+    fn deploy_pipeline(
+        &self,
+        _name: &str,
+        dag_json: &str,
+    ) -> Result<(), RehydrationError> {
         let handle = connection::ensure_bundle(self.addr);
+        if !wait_for_connection(&handle, 5) {
+            return Err(RehydrationError::Admin(format!(
+                "connection not ready (addr={})",
+                self.addr
+            )));
+        }
         let req = bee_control::raft::AdminRequest::Deploy {
-            sql_text: sql_text.to_string(),
+            sql_text: dag_json.to_string(),
             owner_node: 0,
         };
         let rx = run_call_blocking(async move { handle.call(req).await })
             .map_err(RehydrationError::Admin)?;
-        match rx.blocking_recv() {
-            Ok(Ok(_resp)) => Ok(()),
-            Ok(Err(e)) => Err(RehydrationError::Admin(e)),
-            Err(_) => Err(RehydrationError::Admin("call channel closed".into())),
+        let resp = rx
+            .blocking_recv()
+            .map_err(|_| RehydrationError::Admin("call channel closed".into()))?
+            .map_err(RehydrationError::Admin)?;
+        match resp {
+            bee_control::raft::AdminResponse::DeployAck { error_msg, .. } => {
+                if error_msg.is_empty() {
+                    Ok(())
+                } else {
+                    Err(RehydrationError::Admin(error_msg))
+                }
+            }
+            bee_control::raft::AdminResponse::Error(msg) => {
+                Err(RehydrationError::Admin(msg))
+            }
+            other => Err(RehydrationError::Admin(format!(
+                "unexpected Deploy response: {other:?}"
+            ))),
         }
     }
 
     fn register_datasource(
         &self,
         name: &str,
-        adapter: &str,
+        plugin: &str,
         config_json: &str,
-        tenant: u16,
     ) -> Result<(), RehydrationError> {
         let handle = connection::ensure_bundle(self.addr);
+        if !wait_for_connection(&handle, 5) {
+            return Err(RehydrationError::Admin(format!(
+                "connection not ready (addr={})",
+                self.addr
+            )));
+        }
         let req = bee_control::raft::AdminRequest::RegisterDatasource {
             name: name.to_string(),
-            adapter: adapter.to_string(),
-            plugin_version: "0".to_string(),
+            adapter: plugin.to_string(),
+            plugin_version: "latest".to_string(),
             config_json: config_json.to_string(),
-            tenant,
+            tenant: self.tenant,
             owner_node: 0,
         };
         let rx = run_call_blocking(async move { handle.call(req).await })
             .map_err(RehydrationError::Admin)?;
-        match rx.blocking_recv() {
-            Ok(Ok(_resp)) => Ok(()),
-            Ok(Err(e)) => Err(RehydrationError::Admin(e)),
-            Err(_) => Err(RehydrationError::Admin("call channel closed".into())),
+        let resp = rx
+            .blocking_recv()
+            .map_err(|_| RehydrationError::Admin("call channel closed".into()))?
+            .map_err(RehydrationError::Admin)?;
+        match resp {
+            bee_control::raft::AdminResponse::RegisterDatasourceAck {
+                ok,
+                error_msg,
+            } => {
+                if ok {
+                    Ok(())
+                } else {
+                    Err(RehydrationError::Admin(error_msg))
+                }
+            }
+            bee_control::raft::AdminResponse::Error(msg) => {
+                Err(RehydrationError::Admin(msg))
+            }
+            other => Err(RehydrationError::Admin(format!(
+                "unexpected RegisterDatasource response: {other:?}"
+            ))),
         }
     }
 }
@@ -282,7 +349,7 @@ pub fn execute_rehydration<R: DeployRegistrar>(
 ) -> Vec<ResourceRehydrationOutcome> {
     let mut out = Vec::new();
     for p in &plan.pipelines {
-        let outcome = registrar.deploy_sql(&p.dag_json);
+        let outcome = registrar.deploy_pipeline(&p.name, &p.dag_json);
         let (result, detail) = match outcome {
             Ok(()) => ("Success".to_string(), None),
             Err(RehydrationError::Sql(msg)) => ("Failure".to_string(), Some(msg)),
@@ -296,7 +363,7 @@ pub fn execute_rehydration<R: DeployRegistrar>(
         });
     }
     for d in &plan.datasources {
-        let outcome = registrar.register_datasource(&d.name, &d.plugin, &d.config, d.tenant);
+        let outcome = registrar.register_datasource(&d.name, &d.plugin, &d.config);
         let (result, detail) = match outcome {
             Ok(()) => ("Success".to_string(), None),
             Err(RehydrationError::Sql(msg)) => ("Failure".to_string(), Some(msg)),
@@ -312,6 +379,13 @@ pub fn execute_rehydration<R: DeployRegistrar>(
     out
 }
 
+fn rehydration_err_msg(e: &RehydrationError) -> String {
+    match e {
+        RehydrationError::Sql(m) => format!("sql: {m}"),
+        RehydrationError::Admin(m) => format!("admin: {m}"),
+    }
+}
+
 fn rehydrate_one<R: DeployRegistrar>(
     snap: &db::applications::ResourceSnapshot,
     registrar: &R,
@@ -320,6 +394,7 @@ fn rehydrate_one<R: DeployRegistrar>(
         "pipeline" => {
             #[derive(serde::Deserialize)]
             struct P {
+                #[allow(dead_code)]
                 id: i64,
                 name: String,
                 dag_json: String,
@@ -327,8 +402,8 @@ fn rehydrate_one<R: DeployRegistrar>(
             let p: P = serde_json::from_str(&snap.payload_json)
                 .map_err(|e| format!("enable: parse pipeline payload: {e}"))?;
             registrar
-                .deploy_sql(&p.dag_json)
-                .map_err(|e| format!("deploy pipeline \"{}\"", p.name))?;
+                .deploy_pipeline(&p.name, &p.dag_json)
+                .map_err(|e| format!("deploy pipeline \"{}\": {}", p.name, rehydration_err_msg(&e)))?;
             Ok(())
         }
         "datasource" => {
@@ -337,18 +412,28 @@ fn rehydrate_one<R: DeployRegistrar>(
                 name: String,
                 plugin: String,
                 config: String,
+                #[allow(dead_code)]
                 tenant: Option<i64>,
             }
             let d: D = serde_json::from_str(&snap.payload_json)
                 .map_err(|e| format!("enable: parse datasource payload: {e}"))?;
-            let tenant = d.tenant.unwrap_or(0).clamp(0, u16::MAX as i64) as u16;
             registrar
-                .register_datasource(&d.name, &d.plugin, &d.config, tenant)
-                .map_err(|e| format!("register datasource \"{}\"", d.name))?;
+                .register_datasource(&d.name, &d.plugin, &d.config)
+                .map_err(|e| format!("register datasource \"{}\": {}", d.name, rehydration_err_msg(&e)))?;
             Ok(())
         }
         other => Err(format!("enable: unknown resource_kind {other}")),
     }
+}
+
+pub fn application_enable_with_registrar<R: DeployRegistrar>(
+    conn: &rusqlite::Connection,
+    application_id: i64,
+    registrar: &R,
+) -> Result<db::applications::EnableOutcome, String> {
+    db::applications::application_enable(conn, application_id, |snap| {
+        rehydrate_one(snap, registrar)
+    })
 }
 
 #[tauri::command]
@@ -457,7 +542,10 @@ pub fn application_enable(app: AppHandle, id: i64, addr: Option<String>) -> CmdR
         db::applications::application_enable(&conn, id, |_snap| Ok(()))
             .map_err(CmdError::from)?
     } else {
-        let registrar = AdminServerDeployRegistrar { addr: target_addr.unwrap() };
+        let registrar = AdminServerDeployRegistrar {
+            addr: target_addr.unwrap(),
+            tenant: 0,
+        };
         db::applications::application_enable(&conn, id, |snap| rehydrate_one(snap, &registrar))
             .map_err(CmdError::from)?
     };
@@ -723,8 +811,8 @@ mod tests {
     }
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum MockCall {
-        Deploy(String),
-        RegisterDatasource { name: String, adapter: String, config_json: String, tenant: u16 },
+        Deploy { name: String, dag_json: String },
+        RegisterDatasource { name: String, plugin: String, config_json: String },
     }
     impl MockRegistrar {
         fn new() -> Self {
@@ -735,22 +823,27 @@ mod tests {
         }
     }
     impl DeployRegistrar for MockRegistrar {
-        fn deploy_sql(&self, sql_text: &str) -> Result<(), RehydrationError> {
-            self.log.lock().unwrap().push(MockCall::Deploy(sql_text.to_string()));
+        fn deploy_pipeline(
+            &self,
+            name: &str,
+            dag_json: &str,
+        ) -> Result<(), RehydrationError> {
+            self.log.lock().unwrap().push(MockCall::Deploy {
+                name: name.to_string(),
+                dag_json: dag_json.to_string(),
+            });
             Ok(())
         }
         fn register_datasource(
             &self,
             name: &str,
-            adapter: &str,
+            plugin: &str,
             config_json: &str,
-            tenant: u16,
         ) -> Result<(), RehydrationError> {
             self.log.lock().unwrap().push(MockCall::RegisterDatasource {
                 name: name.to_string(),
-                adapter: adapter.to_string(),
+                plugin: plugin.to_string(),
                 config_json: config_json.to_string(),
-                tenant,
             });
             Ok(())
         }
@@ -758,17 +851,66 @@ mod tests {
 
     struct FailingRegistrar;
     impl DeployRegistrar for FailingRegistrar {
-        fn deploy_sql(&self, _sql_text: &str) -> Result<(), RehydrationError> {
+        fn deploy_pipeline(
+            &self,
+            _name: &str,
+            _dag_json: &str,
+        ) -> Result<(), RehydrationError> {
             Err(RehydrationError::Admin("not connected".into()))
         }
         fn register_datasource(
             &self,
             _name: &str,
-            _adapter: &str,
+            _plugin: &str,
             _config_json: &str,
-            _tenant: u16,
         ) -> Result<(), RehydrationError> {
             Err(RehydrationError::Admin("not connected".into()))
+        }
+    }
+
+    struct PartialFailRegistrar {
+        log: Mutex<Vec<MockCall>>,
+        fail_pipeline: std::collections::HashSet<String>,
+    }
+    impl PartialFailRegistrar {
+        fn new(fail_pipelines: &[&str]) -> Self {
+            Self {
+                log: Mutex::new(Vec::new()),
+                fail_pipeline: fail_pipelines.iter().map(|s| s.to_string()).collect(),
+            }
+        }
+        fn calls(&self) -> Vec<MockCall> {
+            self.log.lock().unwrap().clone()
+        }
+    }
+    impl DeployRegistrar for PartialFailRegistrar {
+        fn deploy_pipeline(
+            &self,
+            name: &str,
+            dag_json: &str,
+        ) -> Result<(), RehydrationError> {
+            if self.fail_pipeline.contains(name) {
+                Err(RehydrationError::Admin(format!("pipeline {name} failed")))
+            } else {
+                self.log.lock().unwrap().push(MockCall::Deploy {
+                    name: name.to_string(),
+                    dag_json: dag_json.to_string(),
+                });
+                Ok(())
+            }
+        }
+        fn register_datasource(
+            &self,
+            name: &str,
+            plugin: &str,
+            config_json: &str,
+        ) -> Result<(), RehydrationError> {
+            self.log.lock().unwrap().push(MockCall::RegisterDatasource {
+                name: name.to_string(),
+                plugin: plugin.to_string(),
+                config_json: config_json.to_string(),
+            });
+            Ok(())
         }
     }
 
@@ -876,9 +1018,9 @@ mod tests {
 
         let calls = registrar.calls();
         assert_eq!(calls.len(), 3);
-        assert!(matches!(&calls[0], MockCall::Deploy(s) if s == "CREATE PIPELINE p1"));
-        assert!(matches!(&calls[1], MockCall::Deploy(s) if s == "CREATE PIPELINE p2"));
-        assert!(matches!(&calls[2], MockCall::RegisterDatasource { name, adapter, .. } if name == "binance" && adapter == "binance_subscribe"));
+        assert!(matches!(&calls[0], MockCall::Deploy { name, dag_json } if name == "p1" && dag_json == "CREATE PIPELINE p1"));
+        assert!(matches!(&calls[1], MockCall::Deploy { name, dag_json } if name == "p2" && dag_json == "CREATE PIPELINE p2"));
+        assert!(matches!(&calls[2], MockCall::RegisterDatasource { name, plugin, .. } if name == "binance" && plugin == "binance_subscribe"));
     }
 
     #[test]
@@ -1042,6 +1184,125 @@ mod tests {
             );
             let events = db::audit::query(&conn, Some(app.id), 10).unwrap();
             assert!(events.iter().any(|e| e.action == "application.disable" && e.summary.contains("1 pipelines")));
+        });
+    }
+
+    #[test]
+    fn enable_uses_registrar_to_deploy_pipelines() {
+        run(|db| {
+            let conn = db.lock().unwrap();
+            let app = db::applications::create(&conn, "alpha").unwrap();
+            db::pipelines::create(&conn, "p1", "CREATE PIPELINE p1 SOURCE binance;").unwrap();
+            db::pipelines::create(&conn, "p2", "CREATE PIPELINE p2 SOURCE binance;").unwrap();
+            db::applications::application_disable(&conn, app.id).unwrap();
+            drop(conn);
+
+            let conn2 = db.lock().unwrap();
+            let registrar = MockRegistrar::new();
+            let outcome = application_enable_with_registrar(&conn2, app.id, &registrar).unwrap();
+            assert_eq!(outcome.outcome, "Success");
+            assert_eq!(outcome.succeeded.len(), 2);
+
+            let calls = registrar.calls();
+            let deploys: Vec<&str> = calls
+                .iter()
+                .filter_map(|c| match c {
+                    MockCall::Deploy { name, .. } => Some(name.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(deploys, vec!["p1", "p2"]);
+            assert!(calls
+                .iter()
+                .all(|c| !matches!(c, MockCall::RegisterDatasource { .. })));
+
+            let app_row = db::applications::get(&conn2, app.id).unwrap().unwrap();
+            assert!(app_row.enabled);
+        });
+    }
+
+    #[test]
+    fn enable_uses_registrar_to_register_datasources() {
+        run(|db| {
+            let conn = db.lock().unwrap();
+            let app = db::applications::create(&conn, "alpha").unwrap();
+            db::datasources::create(&conn, "binance", "binance_subscribe", r#"{"u":"wss"}"#, 0).unwrap();
+            db::datasources::create(&conn, "newsapi", "newsapi_subscribe", r#"{"u":"http"}"#, 0).unwrap();
+            db::applications::application_disable(&conn, app.id).unwrap();
+            drop(conn);
+
+            let conn2 = db.lock().unwrap();
+            let registrar = MockRegistrar::new();
+            let outcome = application_enable_with_registrar(&conn2, app.id, &registrar).unwrap();
+            assert_eq!(outcome.outcome, "Success");
+            assert_eq!(outcome.succeeded.len(), 2);
+
+            let calls = registrar.calls();
+            let registrations: Vec<(&str, &str)> = calls
+                .iter()
+                .filter_map(|c| match c {
+                    MockCall::RegisterDatasource { name, plugin, .. } => {
+                        Some((name.as_str(), plugin.as_str()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                registrations,
+                vec![("binance", "binance_subscribe"), ("newsapi", "newsapi_subscribe")]
+            );
+            assert!(calls
+                .iter()
+                .all(|c| !matches!(c, MockCall::Deploy { .. })));
+
+            let app_row = db::applications::get(&conn2, app.id).unwrap().unwrap();
+            assert!(app_row.enabled);
+        });
+    }
+
+    #[test]
+    fn registrar_failure_does_not_skip_subsequent_resources() {
+        run(|db| {
+            let conn = db.lock().unwrap();
+            let app = db::applications::create(&conn, "alpha").unwrap();
+            db::pipelines::create(&conn, "p1", "CREATE PIPELINE p1 SOURCE binance;").unwrap();
+            db::pipelines::create(&conn, "p2", "CREATE PIPELINE p2 SOURCE binance;").unwrap();
+            db::datasources::create(&conn, "binance", "binance_subscribe", "{}", 0).unwrap();
+            db::applications::application_disable(&conn, app.id).unwrap();
+            drop(conn);
+
+            let conn2 = db.lock().unwrap();
+            let registrar = PartialFailRegistrar::new(&["p1"]);
+            let outcome = application_enable_with_registrar(&conn2, app.id, &registrar).unwrap();
+            assert_eq!(outcome.outcome, "Degraded");
+            assert_eq!(outcome.succeeded.len(), 2);
+            assert_eq!(outcome.failed.len(), 1);
+            assert_eq!(
+                outcome.succeeded.len() + outcome.failed.len(),
+                3,
+                "every resource is attempted even after a failure"
+            );
+            assert_eq!(outcome.failed[0].id, "p1");
+            assert!(outcome.failed[0].reason.contains("p1"));
+
+            let calls = registrar.calls();
+            let successful_attempts: Vec<&str> = calls
+                .iter()
+                .map(|c| match c {
+                    MockCall::Deploy { name, .. } => name.as_str(),
+                    MockCall::RegisterDatasource { name, .. } => name.as_str(),
+                })
+                .collect();
+            assert_eq!(
+                successful_attempts.len(),
+                2,
+                "two non-failing calls were recorded"
+            );
+            assert!(successful_attempts.contains(&"p2"));
+            assert!(successful_attempts.contains(&"binance"));
+
+            let app_row = db::applications::get(&conn2, app.id).unwrap().unwrap();
+            assert!(app_row.enabled, "app is enabled in degraded mode");
         });
     }
 }
