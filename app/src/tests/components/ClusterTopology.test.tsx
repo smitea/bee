@@ -1,13 +1,34 @@
 import { describe, it, expect, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 
-import { ClusterTopology, type TopologyNode } from "../../components/ClusterTopology";
+import {
+  ClusterTopology,
+  type TopologyNode,
+  statusOf,
+  statusColor,
+} from "../../components/ClusterTopology";
 
 const nodes: TopologyNode[] = [
   { id: 1, role: "Leader", addr: "127.0.0.1:9001", term: 4, lag: 0 },
   { id: 2, role: "Follower", addr: "127.0.0.1:9002", term: 4, lag: 1 },
   { id: 3, role: "Follower", addr: "127.0.0.1:9003", term: 4, lag: 2 },
 ];
+
+function pxFromStyle(style: string, prop: string): number {
+  const re = new RegExp(`${prop}\\s*:\\s*(\\d+)\\s*px`, "i");
+  const m = style.match(re);
+  return m ? parseInt(m[1] ?? "0", 10) : 0;
+}
+
+function bgFromStyle(style: string): string {
+  const m = style.match(/background\s*:\s*([^;]+)/i);
+  return (m?.[1] ?? "").trim().toLowerCase();
+}
+
+function borderFromStyle(style: string): string {
+  const m = style.match(/border\s*:\s*([^;]+)/i);
+  return (m?.[1] ?? "").trim().toLowerCase();
+}
 
 describe("<ClusterTopology>", () => {
   it("renders one node group per cluster node", () => {
@@ -61,5 +82,132 @@ describe("<ClusterTopology>", () => {
     render(<ClusterTopology nodes={[]} leaderId={null} onSelectCluster={onSelect} />);
     fireEvent.click(screen.getByRole("button", { name: /select cluster/i }));
     expect(onSelect).toHaveBeenCalled();
+  });
+
+  it("renders exactly one react-flow node per cluster node", () => {
+    render(<ClusterTopology nodes={nodes} leaderId={1} />);
+    expect(screen.getByTestId("rf-node-n-1")).toBeInTheDocument();
+    expect(screen.getByTestId("rf-node-n-2")).toBeInTheDocument();
+    expect(screen.getByTestId("rf-node-n-3")).toBeInTheDocument();
+    expect(screen.getAllByTestId(/^rf-node-n-/).length).toBe(3);
+  });
+
+  it("renders one edge per follower in the leader-follower topology", () => {
+    render(<ClusterTopology nodes={nodes} leaderId={1} />);
+    expect(screen.getByTestId("rf-edge-e-1-2")).toBeInTheDocument();
+    expect(screen.getByTestId("rf-edge-e-1-3")).toBeInTheDocument();
+    expect(screen.getAllByTestId(/^rf-edge-e-/).length).toBe(2);
+  });
+
+  it("applies green stroke and solid style for a healthy edge", () => {
+    render(<ClusterTopology nodes={nodes} leaderId={1} />);
+    const edge = screen.getByTestId("rf-edge-e-1-2").querySelector("path")!;
+    expect(edge.getAttribute("data-stroke")).toBe("#22c55e");
+    expect(edge.getAttribute("data-dasharray")).toBe("");
+    expect(edge.getAttribute("data-marker-color")).toBe("#22c55e");
+  });
+
+  it("applies amber stroke for a candidate-follower edge", () => {
+    const cand: TopologyNode[] = [
+      { id: 1, role: "Leader", addr: "127.0.0.1:9001", term: 4, lag: 0 },
+      { id: 2, role: "Candidate", addr: "127.0.0.1:9002", term: 4, lag: 0 },
+    ];
+    render(<ClusterTopology nodes={cand} leaderId={1} />);
+    const edge = screen.getByTestId("rf-edge-e-1-2").querySelector("path")!;
+    expect(edge.getAttribute("data-stroke")).toBe("#f59e0b");
+    expect(edge.getAttribute("data-marker-color")).toBe("#f59e0b");
+  });
+
+  it("applies red dashed stroke for a down-follower edge", () => {
+    const down: TopologyNode[] = [
+      { id: 1, role: "Leader", addr: "127.0.0.1:9001", term: 4, lag: 0 },
+      { id: 2, role: "Follower", addr: "127.0.0.1:9002", term: 4, lag: 1, error: "refused" },
+    ];
+    render(<ClusterTopology nodes={down} leaderId={1} />);
+    const edge = screen.getByTestId("rf-edge-e-1-2").querySelector("path")!;
+    expect(edge.getAttribute("data-stroke")).toBe("#ef4444");
+    expect(edge.getAttribute("data-dasharray")).toMatch(/4/);
+    expect(edge.getAttribute("data-marker-color")).toBe("#ef4444");
+  });
+
+  it("renders the leader node larger than followers", () => {
+    render(<ClusterTopology nodes={nodes} leaderId={1} />);
+    const leader = screen.getByTestId("topology-node-1");
+    const follower = screen.getByTestId("topology-node-2");
+    const leaderStyle = leader.getAttribute("style") ?? "";
+    const followerStyle = follower.getAttribute("style") ?? "";
+    const leaderW = pxFromStyle(leaderStyle, "width");
+    const leaderH = pxFromStyle(leaderStyle, "height");
+    const followerW = pxFromStyle(followerStyle, "width");
+    const followerH = pxFromStyle(followerStyle, "height");
+    expect(leaderW).toBeGreaterThan(followerW);
+    expect(leaderH).toBeGreaterThan(followerH);
+  });
+
+  it("renders the leader node with an amber border and cream fill", () => {
+    render(<ClusterTopology nodes={nodes} leaderId={1} />);
+    const leader = screen.getByTestId("topology-node-1");
+    const borderEl = leader.querySelector("div")!;
+    const style = borderFromStyle(borderEl.getAttribute("style") ?? "");
+    expect(style).toMatch(/amber|245,\s*158,\s*11/);
+    const bg = bgFromStyle(borderEl.getAttribute("style") ?? "");
+    expect(bg).toMatch(/255,\s*251,\s*235/);
+  });
+
+  it("renders status dots with green for healthy leader and followers", () => {
+    render(<ClusterTopology nodes={nodes} leaderId={1} />);
+    const leaderDot = screen.getByTestId("topology-status-1");
+    const followerDot = screen.getByTestId("topology-status-2");
+    expect(bgFromStyle(leaderDot.getAttribute("style") ?? "")).toMatch(
+      /34,\s*197,\s*94/,
+    );
+    expect(bgFromStyle(followerDot.getAttribute("style") ?? "")).toMatch(
+      /34,\s*197,\s*94/,
+    );
+  });
+
+  it("renders the candidate status dot in amber", () => {
+    const cand: TopologyNode[] = [
+      { id: 1, role: "Leader", addr: "127.0.0.1:9001", term: 4, lag: 0 },
+      { id: 2, role: "Candidate", addr: "127.0.0.1:9002", term: 4, lag: 0 },
+    ];
+    render(<ClusterTopology nodes={cand} leaderId={1} />);
+    const dot = screen.getByTestId("topology-status-2");
+    expect(bgFromStyle(dot.getAttribute("style") ?? "")).toMatch(
+      /245,\s*158,\s*11/,
+    );
+  });
+
+  it("renders the down status dot in red", () => {
+    const down: TopologyNode[] = [
+      { id: 1, role: "Leader", addr: "127.0.0.1:9001", term: 4, lag: 0 },
+      { id: 2, role: "Follower", addr: "127.0.0.1:9002", term: 4, lag: 1, error: "refused" },
+    ];
+    render(<ClusterTopology nodes={down} leaderId={1} />);
+    const dot = screen.getByTestId("topology-status-2");
+    expect(bgFromStyle(dot.getAttribute("style") ?? "")).toMatch(
+      /239,\s*68,\s*68/,
+    );
+  });
+
+  it("falls back to gray for an unknown status color", () => {
+    const unknown = {
+      id: 7,
+      role: "Follower" as const,
+      addr: "127.0.0.1:9007",
+      term: 1,
+      lag: 0,
+    };
+    expect(statusOf(unknown)).toBe("healthy");
+    expect(statusColor("unknown")).toBe("#9ca3af");
+  });
+
+  it("shows the empty state ghost topology when no nodes are reachable", () => {
+    const { container } = render(
+      <ClusterTopology nodes={[]} leaderId={null} onSelectCluster={() => {}} />,
+    );
+    expect(screen.getByTestId("cluster-topology-empty")).toBeInTheDocument();
+    expect(container.querySelector('[data-testid="rf-node-n-1"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="rf-node-n-2"]')).toBeTruthy();
   });
 });
