@@ -3,6 +3,7 @@ pub mod clusters;
 pub mod connection;
 pub mod ping;
 pub mod plugins;
+pub mod plugin_settings;
 pub mod profiles;
 pub mod rolling_restart;
 pub mod settings;
@@ -11,8 +12,10 @@ pub mod tenant;
 pub mod applications;
 pub mod audit;
 pub mod dashboards;
+pub mod dashboard_metrics;
 pub mod datasources;
 pub mod pipelines;
+pub mod pipeline_dumps;
 pub mod search;
 
 use serde::Serialize;

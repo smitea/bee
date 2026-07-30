@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Database, Plus, Trash2, X, Check, Plug } from "lucide-react";
 
@@ -8,13 +8,17 @@ import {
   datasourceDelete,
   type DatasourceView,
 } from "../ipc/datasources";
+import { pluginList, type PluginInfo } from "../ipc/plugins";
 import {
-  pluginList,
-  pluginSchema,
-  type PluginInfo,
-  type PluginSchema,
-  type PluginFieldSchema,
-} from "../ipc/plugins";
+  datasourceFormSchema,
+  type DatasourceFormSchema,
+} from "../ipc/datasource_form_schema";
+import {
+  schemaObjectToFormValue,
+  SchemaForm,
+  type SchemaObject,
+} from "../components/SchemaForm";
+import { useNavigation } from "../state/navigationStore";
 
 const REFRESH_MS = 5000;
 
@@ -31,6 +35,7 @@ export function DatasourcesPage() {
   });
   const [showAdd, setShowAdd] = useState(false);
   const all = listQ.data ?? [];
+  const nav = useNavigation();
 
   const onDelete = async (name: string) => {
     if (!confirm(`Delete datasource "${name}"?`)) return;
@@ -121,9 +126,13 @@ export function DatasourcesPage() {
 
       {showAdd && (
         <AddDatasourceModal
-          onClose={() => setShowAdd(false)}
+          onClose={() => {
+            setShowAdd(false);
+            if (nav.canGoBack) nav.back();
+          }}
           onCreated={async () => {
             setShowAdd(false);
+            if (nav.canGoBack) nav.back();
             await qc.invalidateQueries({ queryKey: ["datasources-local"] });
           }}
         />
@@ -146,26 +155,44 @@ function AddDatasourceModal({
   const [name, setName] = useState("");
   const [plugin, setPlugin] = useState("");
   const [tenant, setTenant] = useState("0");
-  const [configFields, setConfigFields] = useState<Record<string, string>>({});
+  const [formValue, setFormValue] = useState<SchemaObject>({});
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [testState, setTestState] = useState<string>("");
 
-  const schemaQ = useQuery<PluginSchema | null>({
-    queryKey: ["plugins-schema", plugin],
-    queryFn: () => (plugin ? pluginSchema(plugin) : Promise.resolve(null)),
+  const formSchemaQ = useQuery<DatasourceFormSchema | null>({
+    queryKey: ["datasource-form-schema", plugin],
+    queryFn: () => (plugin ? datasourceFormSchema(plugin) : Promise.resolve(null)),
     enabled: plugin.length > 0,
   });
 
   useEffect(() => {
-    setConfigFields({});
+    setFormValue({});
     setError(null);
   }, [plugin]);
 
-  const configJson = JSON.stringify(
-    Object.fromEntries(
-      Object.entries(configFields).filter(([, v]) => v.length > 0),
-    ),
+  const initial = useMemo(
+    () => schemaObjectToFormValue(formSchemaQ.data?.fields ?? []),
+    [formSchemaQ.data],
+  );
+
+  const schemaForForm = useMemo(() => {
+    const fields = formSchemaQ.data?.fields ?? [];
+    if (fields.length === 0) return null;
+    const properties: Record<string, unknown> = {};
+    for (const f of fields) {
+      properties[f.name] = f.schema;
+    }
+    return {
+      type: "object" as const,
+      properties: properties as Record<string, import("../ipc/datasource_form_schema").JsonSchema>,
+      required: fields.filter((f) => f.required).map((f) => f.name),
+    };
+  }, [formSchemaQ.data]);
+
+  const configJson = useMemo(
+    () => JSON.stringify(formValue && Object.keys(formValue).length > 0 ? formValue : initial),
+    [formValue, initial],
   );
 
   const onTest = async () => {
@@ -260,28 +287,21 @@ function AddDatasourceModal({
               <div className="text-[10px] uppercase tracking-wider text-gray-500 dark:text-neutral-400">
                 Plugin Config
               </div>
-              {schemaQ.isFetching && (
+              {formSchemaQ.isFetching && (
                 <span className="text-[10px] text-gray-400">loading schema…</span>
               )}
             </div>
             {!plugin && (
               <p className="text-[10px] text-gray-400">select a plugin to load its schema</p>
             )}
-            {plugin && (schemaQ.data?.fields ?? []).length === 0 && !schemaQ.isFetching && (
+            {plugin && (formSchemaQ.data?.fields ?? []).length === 0 && !formSchemaQ.isFetching && (
               <p className="text-[10px] text-gray-400">no schema fields</p>
             )}
-            {(schemaQ.data?.fields ?? []).map((f: PluginFieldSchema) => (
-              <Field key={f.name} label={f.name + (f.required ? " *" : "")}>
-                <input
-                  value={configFields[f.name] ?? ""}
-                  onChange={(e) =>
-                    setConfigFields((s) => ({ ...s, [f.name]: e.target.value }))
-                  }
-                  placeholder={f.description ?? ""}
-                  className="flex-1 px-2 py-1 rounded border border-gray-200 dark:border-neutral-700 bg-white dark:bg-neutral-900 font-mono"
-                />
-              </Field>
-            ))}
+            <SchemaForm
+              schema={schemaForForm}
+              value={formValue && Object.keys(formValue).length > 0 ? formValue : initial}
+              onChange={setFormValue}
+            />
             <pre className="text-[10px] font-mono text-gray-500 dark:text-neutral-400 bg-gray-50 dark:bg-neutral-900 rounded p-2 overflow-x-auto">
               {configJson}
             </pre>
@@ -321,6 +341,7 @@ function AddDatasourceModal({
           <button
             type="button"
             onClick={onClose}
+            data-testid="datasource-cancel"
             className="px-3 py-1 text-xs rounded border border-gray-200 dark:border-neutral-700"
           >
             Cancel

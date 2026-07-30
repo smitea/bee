@@ -3,20 +3,10 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 const mocks = vi.hoisted(() => ({
-  clusterProfileList: vi.fn(),
-  clusterProfileSave: vi.fn(),
-  clusterProfileRemove: vi.fn(),
-  clusterProfileActivate: vi.fn(),
-  clusterProfileMigrateLegacy: vi.fn(),
   setAddr: vi.fn(),
-}));
-
-vi.mock("../../ipc/clusters", () => ({
-  clusterProfileList: mocks.clusterProfileList,
-  clusterProfileSave: mocks.clusterProfileSave,
-  clusterProfileRemove: mocks.clusterProfileRemove,
-  clusterProfileActivate: mocks.clusterProfileActivate,
-  clusterProfileMigrateLegacy: mocks.clusterProfileMigrateLegacy,
+  pluginList: vi.fn(),
+  pluginSettingsGet: vi.fn(),
+  pluginSettingsSet: vi.fn(),
 }));
 
 vi.mock("../../ipc/connection", () => ({
@@ -37,6 +27,15 @@ vi.mock("../../ipc/tenant", () => ({
   tenantSet: vi.fn().mockResolvedValue(0),
 }));
 
+vi.mock("../../ipc/plugins", () => ({
+  pluginList: mocks.pluginList,
+}));
+
+vi.mock("../../ipc/plugin_settings", () => ({
+  pluginSettingsGet: mocks.pluginSettingsGet,
+  pluginSettingsSet: mocks.pluginSettingsSet,
+}));
+
 import { SettingsModal } from "../../components/SettingsModal";
 import { useConnection } from "../../state/connectionStore";
 
@@ -48,15 +47,13 @@ function withClient(node: React.ReactNode) {
 }
 
 beforeEach(() => {
-  mocks.clusterProfileList.mockReset();
-  mocks.clusterProfileSave.mockReset();
-  mocks.clusterProfileRemove.mockReset();
-  mocks.clusterProfileActivate.mockReset();
-  mocks.clusterProfileMigrateLegacy.mockReset();
   mocks.setAddr.mockReset();
-  mocks.clusterProfileList.mockResolvedValue([]);
-  mocks.clusterProfileMigrateLegacy.mockResolvedValue({ inserted: 0, skipped: [] });
+  mocks.pluginList.mockReset();
+  mocks.pluginSettingsGet.mockReset();
+  mocks.pluginSettingsSet.mockReset();
   mocks.setAddr.mockResolvedValue({ addr: "127.0.0.1:9999", status: { kind: "Connected" } });
+  mocks.pluginList.mockResolvedValue([]);
+  mocks.pluginSettingsGet.mockResolvedValue(null);
   useConnection.setState({
     addr: "127.0.0.1:9999",
     status: { kind: "Connected" },
@@ -64,67 +61,69 @@ beforeEach(() => {
   });
 });
 
-describe("<SettingsModal> Clusters section", () => {
-  it("lists saved clusters with status dots and Connect / Edit / Remove controls under Connection", async () => {
-    mocks.clusterProfileList.mockResolvedValue([
+describe("<SettingsModal> Connection section", () => {
+  it("renders a single connection editor (label + addr) with Test/Connect buttons", async () => {
+    withClient(<SettingsModal open onClose={() => {}} />);
+    expect(await screen.findByLabelText("AdminServer address")).toBeInTheDocument();
+    expect(screen.getByLabelText("Connection label")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Test Connection" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Connect" })).toBeInTheDocument();
+  });
+});
+
+describe("<SettingsModal> Plugins section", () => {
+  it("shows loaded plugins from plugin_list with enable toggle + config schema preview", async () => {
+    mocks.pluginList.mockResolvedValue([
       {
-        id: 1,
-        label: "alpha",
-        addr: "127.0.0.1:9999",
-        tenant: 0,
-        lastUsedAt: null,
-        createdAt: 0,
-      },
-      {
-        id: 2,
-        label: "beta",
-        addr: "10.0.0.1:9999",
-        tenant: 0,
-        lastUsedAt: null,
-        createdAt: 0,
+        id: "p1",
+        name: "binance",
+        version: "1.4.2",
+        adapters: ["subscribe"],
+        handlers: [],
       },
     ]);
+    mocks.pluginSettingsGet.mockResolvedValue({
+      plugin_name: "binance",
+      enabled: true,
+      config_json: "{}",
+      updated_at: 0,
+    });
     withClient(<SettingsModal open onClose={() => {}} />);
-    expect(await screen.findByText("alpha")).toBeInTheDocument();
-    expect(screen.getByText("beta")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /connect alpha/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /edit alpha/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /remove alpha/i })).toBeInTheDocument();
-    const dots = screen.getAllByRole("status");
-    expect(dots.length).toBeGreaterThan(0);
-    expect(dots.some((d) => d.getAttribute("data-status") === "green")).toBe(true);
-    expect(dots.some((d) => d.getAttribute("data-status") === "amber")).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Plugins" }));
+    expect(await screen.findByTestId("plugins-count")).toBeInTheDocument();
+    expect(await screen.findByTestId("plugin-row-binance")).toBeInTheDocument();
+    expect(screen.getByText(/v1.4.2/)).toBeInTheDocument();
   });
 
-  it("add cluster invokes clusterProfileSave", async () => {
-    mocks.clusterProfileList.mockResolvedValue([]);
-    mocks.clusterProfileSave.mockResolvedValueOnce(99);
-    withClient(<SettingsModal open onClose={() => {}} />);
-    fireEvent.click(await screen.findByRole("button", { name: /add cluster/i }));
-    fireEvent.change(screen.getByLabelText("Cluster label"), {
-      target: { value: "new" },
-    });
-    fireEvent.change(screen.getByLabelText("Cluster address"), {
-      target: { value: "1.2.3.4:9999" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
-    await waitFor(() => expect(mocks.clusterProfileSave).toHaveBeenCalledWith("new", "1.2.3.4:9999", 0));
-  });
-
-  it("remove cluster invokes clusterProfileRemove", async () => {
-    mocks.clusterProfileList.mockResolvedValue([
-      {
-        id: 5,
-        label: "del",
-        addr: "10.0.0.5:9999",
-        tenant: 0,
-        lastUsedAt: null,
-        createdAt: 0,
-      },
+  it("invokes pluginSettingsSet when toggling enabled", async () => {
+    mocks.pluginList.mockResolvedValue([
+      { id: "p1", name: "binance", version: "1.0", adapters: ["subscribe"], handlers: [] },
     ]);
-    mocks.clusterProfileRemove.mockResolvedValueOnce(undefined);
+    mocks.pluginSettingsGet.mockResolvedValue({
+      plugin_name: "binance",
+      enabled: true,
+      config_json: "{}",
+      updated_at: 0,
+    });
+    mocks.pluginSettingsSet.mockResolvedValueOnce({
+      plugin_name: "binance",
+      enabled: false,
+      config_json: "{}",
+      updated_at: 1,
+    });
     withClient(<SettingsModal open onClose={() => {}} />);
-    fireEvent.click(await screen.findByRole("button", { name: /remove del/i }));
-    await waitFor(() => expect(mocks.clusterProfileRemove).toHaveBeenCalledWith("10.0.0.5:9999"));
+    fireEvent.click(screen.getByRole("button", { name: "Plugins" }));
+    await screen.findByTestId("plugin-row-binance");
+    fireEvent.click(screen.getByRole("button", { name: /disable plugin/i }));
+    await waitFor(() =>
+      expect(mocks.pluginSettingsSet).toHaveBeenCalledWith("binance", false, "{}"),
+    );
+  });
+
+  it("shows empty state when no plugins are loaded", async () => {
+    mocks.pluginList.mockResolvedValue([]);
+    withClient(<SettingsModal open onClose={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "Plugins" }));
+    expect(await screen.findByText(/no plugins loaded/i)).toBeInTheDocument();
   });
 });

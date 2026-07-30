@@ -104,11 +104,10 @@ describe("<SettingsModal>", () => {
     expect(screen.queryByRole("button", { name: "Cluster" })).toBeNull();
   });
 
-  it("Connection section is the default and shows cluster list + address + Test/Connect", () => {
+  it("Connection section is the default and shows single connection editor (label + address + Test/Connect)", () => {
     withClient(<SettingsModal open onClose={() => {}} />);
     expect(screen.getByLabelText("AdminServer address")).toBeInTheDocument();
-    expect(screen.getByTestId("clusters-list")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /add cluster/i })).toBeInTheDocument();
+    expect(screen.getByLabelText("Connection label")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Test Connection" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Connect" })).toBeInTheDocument();
   });

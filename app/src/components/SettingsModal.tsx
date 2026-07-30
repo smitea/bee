@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus, Trash2, Plug, X, Server } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
+import { Plug, Power, PowerOff } from "lucide-react";
 
 import { useConnection } from "../state/connectionStore";
 import { useTenant } from "../state/tenantStore";
@@ -11,15 +11,13 @@ import {
   settingsPut,
   tenantGet,
   tenantSet,
+  pluginList,
+  pluginSettingsGet,
+  pluginSettingsSet,
+  type PluginSummary,
+  type PluginSettingView,
 } from "../ipc";
-import {
-  clusterProfileList,
-  clusterProfileSave,
-  clusterProfileRemove,
-  clusterProfileActivate,
-  type ClusterProfileView,
-} from "../ipc/clusters";
-import { ClusterStatusDot } from "./ClusterStatusDot";
+import { useNavigation } from "../state/navigationStore";
 
 interface Props {
   open: boolean;
@@ -43,7 +41,7 @@ type SectionId =
 
 const SECTIONS: { id: SectionId; label: string; description: string }[] = [
   { id: "client", label: "Client", description: "Bee Client desktop preferences." },
-  { id: "connection", label: "Connection", description: "Saved Bee clusters, AdminServer address, and reachability." },
+  { id: "connection", label: "Connection", description: "Active Bee AdminServer address and reachability." },
   { id: "tenant", label: "Tenant", description: "Active tenant for new Applications and Datasources." },
   { id: "appearance", label: "Appearance", description: "Theme, density, and visual preferences." },
   { id: "logging", label: "Logging", description: "Log verbosity and routing." },
@@ -51,7 +49,7 @@ const SECTIONS: { id: SectionId; label: string; description: string }[] = [
   { id: "raft", label: "Raft", description: "Raft tunables and quorum behaviour." },
   { id: "kv", label: "KV", description: "KV Cluster storage options." },
   { id: "scheduling", label: "Scheduling", description: "Work-Stealing and rebalancing." },
-  { id: "plugins", label: "Plugins", description: "Plugin registry and Adapter schemas." },
+  { id: "plugins", label: "Plugins", description: "Loaded plugins, enable/disable, configuration." },
   { id: "security", label: "Security", description: "Authentication and redaction rules." },
 ];
 
@@ -60,10 +58,11 @@ export function SettingsModal({ open, onClose }: Props) {
 
   const addr = useConnection((s) => s.addr);
   const setStoreAddr = useConnection((s) => s.setAddr);
-  const [draft, setDraft] = useState(addr);
+  const [draftLabel, setDraftLabel] = useState("default");
+  const [draftAddr, setDraftAddr] = useState(addr);
+  const [initialAddr, setInitialAddr] = useState(addr);
   const [saveState, setSaveState] = useState<"idle" | "Saving" | "Saved" | "Error">("idle");
   const [testState, setTestState] = useState<string>("");
-  const [initial, setInitial] = useState(addr);
 
   const [tenantDraft, setTenantDraft] = useState<string>("0");
   const [tenantInitial, setTenantInitial] = useState<string>("0");
@@ -79,8 +78,8 @@ export function SettingsModal({ open, onClose }: Props) {
     void (async () => {
       const stored = await settingsGet("addr");
       if (!cancelled && stored !== null) {
-        setDraft(stored);
-        setInitial(stored);
+        setDraftAddr(stored);
+        setInitialAddr(stored);
       }
       const t = await tenantGet();
       if (!cancelled) {
@@ -95,19 +94,19 @@ export function SettingsModal({ open, onClose }: Props) {
 
   useEffect(() => {
     if (!open) return;
-    if (draft === initial) return;
+    if (draftAddr === initialAddr) return;
     setSaveState("Saving");
     const t = setTimeout(async () => {
       try {
-        await settingsPut("addr", draft);
+        await settingsPut("addr", draftAddr);
         setSaveState("Saved");
-        setInitial(draft);
+        setInitialAddr(draftAddr);
       } catch {
         setSaveState("Error");
       }
     }, DEBOUNCE_MS);
     return () => clearTimeout(t);
-  }, [draft, open, initial]);
+  }, [draftAddr, open, initialAddr]);
 
   useEffect(() => {
     if (!open) return;
@@ -137,7 +136,7 @@ export function SettingsModal({ open, onClose }: Props) {
   const onTest = async () => {
     setTestState("Testing…");
     try {
-      const view = await testConnection(draft);
+      const view = await testConnection(draftAddr);
       setTestState(view.status.kind === "Connected" ? "Connected" : `${view.status.kind}`);
     } catch (e) {
       setTestState(`Error: ${(e as Error).message}`);
@@ -146,8 +145,8 @@ export function SettingsModal({ open, onClose }: Props) {
 
   const onConnect = async () => {
     try {
-      await setAddr(draft);
-      setStoreAddr(draft);
+      await setAddr(draftAddr);
+      setStoreAddr(draftAddr);
       onClose();
     } catch (e) {
       setTestState(`Error: ${(e as Error).message}`);
@@ -180,23 +179,14 @@ export function SettingsModal({ open, onClose }: Props) {
           {section === "connection" && (
             <ConnectionSection
               addr={addr}
-              draft={draft}
-              setDraft={setDraft}
+              draftLabel={draftLabel}
+              draftAddr={draftAddr}
+              setDraftLabel={setDraftLabel}
+              setDraftAddr={setDraftAddr}
               saveState={saveState}
               testState={testState}
               onTest={onTest}
               onConnect={onConnect}
-              onSwitchCluster={async (a) => {
-                setDraft(a);
-                try {
-                  await clusterProfileActivate(a);
-                  await setAddr(a);
-                  setStoreAddr(a);
-                  setInitial(a);
-                } catch {
-                  /* surfaced via store */
-                }
-              }}
             />
           )}
 
@@ -241,7 +231,9 @@ export function SettingsModal({ open, onClose }: Props) {
             </section>
           )}
 
-          {!["connection", "tenant"].includes(section) && (
+          {section === "plugins" && <PluginsSection />}
+
+          {!["connection", "tenant", "plugins"].includes(section) && (
             <PlaceholderSection
               title={SECTIONS.find((s) => s.id === section)?.label ?? ""}
               description={SECTIONS.find((s) => s.id === section)?.description ?? ""}
@@ -250,16 +242,30 @@ export function SettingsModal({ open, onClose }: Props) {
 
           <div className="mt-auto flex items-center gap-2 justify-end">
             <button
-              onClick={onClose}
+              onClick={() => {
+                const nav = useNavigationStoreBack(onClose);
+                nav();
+              }}
               className="px-3 py-1 text-xs rounded border border-gray-200 dark:border-neutral-700"
             >
-              Close
+              Cancel
             </button>
           </div>
         </main>
       </div>
     </div>
   );
+}
+
+function useNavigationStoreBack(fallback: () => void): () => void {
+  const { back, canGoBack } = useNavigation();
+  return () => {
+    if (canGoBack) {
+      back();
+    } else {
+      fallback();
+    }
+  };
 }
 
 function Section({
@@ -301,228 +307,60 @@ function PlaceholderSection({ title, description }: { title: string; description
 
 function ConnectionSection({
   addr,
-  draft,
-  setDraft,
+  draftLabel,
+  draftAddr,
+  setDraftLabel,
+  setDraftAddr,
   saveState,
   testState,
   onTest,
   onConnect,
-  onSwitchCluster,
 }: {
   addr: string;
-  draft: string;
-  setDraft: (v: string) => void;
+  draftLabel: string;
+  draftAddr: string;
+  setDraftLabel: (v: string) => void;
+  setDraftAddr: (v: string) => void;
   saveState: "idle" | "Saving" | "Saved" | "Error";
   testState: string;
   onTest(): void | Promise<void>;
   onConnect(): void | Promise<void>;
-  onSwitchCluster(addr: string): void | Promise<void>;
 }) {
-  const qc = useQueryClient();
-  const status = useConnection((s) => s.status);
-  const listQ = useQuery<ClusterProfileView[]>({
-    queryKey: ["cluster-profiles"],
-    queryFn: () => clusterProfileList(),
-  });
-  const [adding, setAdding] = useState(false);
-  const [editingId, setEditingId] = useState<number | null>(null);
-  const [draftLabel, setDraftLabel] = useState("");
-  const [draftAddr, setDraftAddr] = useState("");
-  const [draftTenant, setDraftTenant] = useState("0");
-  const [error, setError] = useState<string | null>(null);
-
-  const all = listQ.data ?? [];
-
-  const beginAdd = () => {
-    setEditingId(null);
-    setDraftLabel("");
-    setDraftAddr("");
-    setDraftTenant("0");
-    setError(null);
-    setAdding(true);
-  };
-
-  const beginEdit = (p: ClusterProfileView) => {
-    setAdding(false);
-    setEditingId(p.id);
-    setDraftLabel(p.label);
-    setDraftAddr(p.addr);
-    setDraftTenant(String(p.tenant));
-    setError(null);
-  };
-
-  const cancel = () => {
-    setAdding(false);
-    setEditingId(null);
-    setError(null);
-  };
-
-  const onSave = async () => {
-    setError(null);
-    const label = draftLabel.trim();
-    const addrV = draftAddr.trim();
-    const tenant = Number(draftTenant);
-    if (!label) {
-      setError("label is required");
-      return;
-    }
-    if (!addrV) {
-      setError("addr is required");
-      return;
-    }
-    if (!Number.isFinite(tenant) || tenant < 0 || tenant > 65535) {
-      setError("tenant must be 0..65535");
-      return;
-    }
-    try {
-      if (adding) {
-        await clusterProfileSave(label, addrV, tenant);
-      } else if (editingId !== null) {
-        await clusterProfileRemove(all.find((p) => p.id === editingId)?.addr ?? "");
-        await clusterProfileSave(label, addrV, tenant);
-      }
-      await qc.invalidateQueries({ queryKey: ["cluster-profiles"] });
-      cancel();
-    } catch (e) {
-      setError(String(e));
-    }
-  };
-
-  const onRemove = async (p: ClusterProfileView) => {
-    try {
-      await clusterProfileRemove(p.addr);
-      await qc.invalidateQueries({ queryKey: ["cluster-profiles"] });
-    } catch (e) {
-      setError(String(e));
-    }
-  };
-
   return (
     <section>
       <div className="flex items-center justify-between mb-3">
         <h3 className="text-sm font-medium">Connection</h3>
-        <button
-          type="button"
-          onClick={beginAdd}
-          className="flex items-center gap-1 px-2 py-1 text-[11px] rounded border border-gray-200 dark:border-neutral-700 hover:bg-gray-50 dark:hover:bg-neutral-700"
-          aria-label="Add cluster"
-        >
-          <Plus size={10} />
-          Add cluster
-        </button>
       </div>
-      <p className="text-[10px] text-gray-500 dark:text-neutral-400 mb-2">
-        Saved Bee clusters. Selecting a row pre-fills the address below.
+      <p className="text-[10px] text-gray-500 dark:text-neutral-400 mb-3">
+        Connect to a Bee AdminServer. Topology is auto-discovered from the active address.
       </p>
 
-      {(adding || editingId !== null) && (
-        <div className="space-y-2 p-2 rounded border border-gray-200 dark:border-neutral-700 mb-2">
-          <input
-            aria-label="Cluster label"
-            value={draftLabel}
-            onChange={(e) => setDraftLabel(e.target.value)}
-            placeholder="Label"
-            className="w-full px-2 py-1 text-xs rounded border border-gray-200 dark:border-neutral-700 bg-white dark:bg-neutral-900"
-          />
-          <input
-            aria-label="Cluster address"
-            value={draftAddr}
-            onChange={(e) => setDraftAddr(e.target.value)}
-            placeholder="127.0.0.1:9999"
-            className="w-full px-2 py-1 text-xs font-mono rounded border border-gray-200 dark:border-neutral-700 bg-white dark:bg-neutral-900"
-          />
-          <input
-            aria-label="Cluster tenant"
-            value={draftTenant}
-            onChange={(e) => setDraftTenant(e.target.value)}
-            placeholder="tenant (0..65535)"
-            className="w-full px-2 py-1 text-xs font-mono rounded border border-gray-200 dark:border-neutral-700 bg-white dark:bg-neutral-900"
-          />
-          {error && <p className="text-[10px] text-accent-red">{error}</p>}
-          <div className="flex items-center justify-end gap-1">
-            <button
-              type="button"
-              onClick={cancel}
-              className="px-2 py-0.5 text-[11px] rounded border border-gray-200 dark:border-neutral-700"
-            >
-              <X size={10} />
-            </button>
-            <button
-              type="button"
-              onClick={() => void onSave()}
-              className="px-2 py-0.5 text-[11px] rounded bg-accent-blue text-white"
-            >
-              save
-            </button>
-          </div>
-        </div>
-      )}
+      <label className="text-xs text-gray-500 dark:text-neutral-400" htmlFor="conn-label">
+        Label
+      </label>
+      <input
+        id="conn-label"
+        aria-label="Connection label"
+        value={draftLabel}
+        onChange={(e) => setDraftLabel(e.target.value)}
+        placeholder="default"
+        className="mt-1 mb-3 w-full px-2 py-1 text-xs rounded border border-gray-200 dark:border-neutral-700 bg-white dark:bg-neutral-900"
+      />
 
-      {all.length === 0 ? (
-        <p className="text-[11px] text-gray-400 px-2 py-2" data-testid="clusters-list">
-          no saved clusters
-        </p>
-      ) : (
-        <ul className="space-y-1 mb-3" data-testid="clusters-list">
-          {all.map((p) => {
-            const isActive = p.addr.trim() === addr.trim();
-            return (
-              <li
-                key={p.id}
-                className="flex items-center gap-2 px-2 py-1.5 rounded border border-gray-200 dark:border-neutral-700"
-              >
-                <ClusterStatusDot
-                  profileAddr={p.addr}
-                  activeAddr={addr}
-                  status={isActive ? status : { kind: "Disconnected" }}
-                />
-                <button
-                  type="button"
-                  onClick={() => {
-                    setDraft(p.addr);
-                    void onSwitchCluster(p.addr);
-                  }}
-                  className="flex-1 min-w-0 text-left"
-                  aria-label={`Select ${p.label}`}
-                  title={`Switch address to ${p.addr}`}
-                >
-                  <div className="text-xs truncate">{p.label}</div>
-                  <div className="font-mono text-[10px] text-gray-400 truncate">
-                    {p.addr} · t{p.tenant}
-                  </div>
-                </button>
-                <button
-                  type="button"
-                  aria-label={`Connect ${p.label}`}
-                  title="Connect"
-                  onClick={() => void onSwitchCluster(p.addr)}
-                  className="p-1 rounded text-gray-400 hover:text-accent-blue"
-                >
-                  <Plug size={11} />
-                </button>
-                <button
-                  type="button"
-                  aria-label={`Edit ${p.label}`}
-                  title="Edit"
-                  onClick={() => beginEdit(p)}
-                  className="p-1 rounded text-gray-400 hover:text-accent-blue"
-                >
-                  <Server size={11} />
-                </button>
-                <button
-                  type="button"
-                  aria-label={`Remove ${p.label}`}
-                  title="Remove"
-                  onClick={() => void onRemove(p)}
-                  className="p-1 rounded text-gray-400 hover:text-accent-red"
-                >
-                  <Trash2 size={11} />
-                </button>
-              </li>
-            );
-          })}
-        </ul>
-      )}
+      <label className="text-xs text-gray-500 dark:text-neutral-400" htmlFor="addr">
+        AdminServer address
+      </label>
+      <input
+        id="addr"
+        aria-label="AdminServer address"
+        value={draftAddr}
+        onChange={(e) => setDraftAddr(e.target.value)}
+        placeholder="127.0.0.1:8702"
+        className="mt-1 w-full px-2 py-1 text-xs font-mono rounded border border-gray-200 dark:border-neutral-700 bg-white dark:bg-neutral-900"
+      />
+      <div className="mt-1 text-[10px] text-gray-500 dark:text-neutral-400">
+        current: <span className="font-mono">{addr}</span>
+      </div>
 
       <span
         className={
@@ -538,33 +376,179 @@ function ConnectionSection({
       >
         {saveState === "idle" ? "·" : saveState}
       </span>
-      <label className="text-xs text-gray-500 dark:text-neutral-400" htmlFor="addr">
-        AdminServer address
-      </label>
-      <input
-        id="addr"
-        value={draft}
-        onChange={(e) => setDraft(e.target.value)}
-        placeholder="127.0.0.1:8702"
-        className="mt-1 w-full px-2 py-1 text-xs font-mono rounded border border-gray-200 dark:border-neutral-700 bg-white dark:bg-neutral-900"
-      />
+
       {testState && (
         <p className="mt-2 text-[10px] text-gray-500 dark:text-neutral-400">{testState}</p>
       )}
       <div className="mt-3 flex items-center gap-2 justify-end">
         <button
-          onClick={onTest}
+          onClick={() => void onTest()}
           className="px-3 py-1 text-xs rounded border border-gray-200 dark:border-neutral-700 hover:bg-gray-50 dark:hover:bg-neutral-700"
         >
           Test Connection
         </button>
         <button
-          onClick={onConnect}
-          className="px-3 py-1 text-xs rounded bg-accent-blue text-white hover:bg-accent-blue/90"
+          onClick={() => void onConnect()}
+          className="flex items-center gap-1 px-3 py-1 text-xs rounded bg-accent-blue text-white hover:bg-accent-blue/90"
         >
+          <Plug size={11} />
           Connect
         </button>
       </div>
     </section>
+  );
+}
+
+function PluginsSection() {
+  const pluginsQ = useQuery<PluginSummary[]>({
+    queryKey: ["plugins-list"],
+    queryFn: () => pluginList(),
+  });
+  const all = pluginsQ.data ?? [];
+  return (
+    <section>
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-sm font-medium">Plugins</h3>
+        <span
+          className="text-[10px] text-gray-500 dark:text-neutral-400"
+          data-testid="plugins-count"
+        >
+          {all.length} loaded
+        </span>
+      </div>
+      <p className="text-[10px] text-gray-500 dark:text-neutral-400 mb-2">
+        Plugins loaded via bee_plugin_sdk. Toggle enabled state and edit per-plugin
+        configuration (JSON).
+      </p>
+      {all.length === 0 ? (
+        <p className="text-[11px] text-gray-400 px-2 py-2">no plugins loaded</p>
+      ) : (
+        <ul className="space-y-2">
+          {all.map((p) => (
+            <PluginRow key={p.id} plugin={p} />
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+function PluginRow({ plugin }: { plugin: PluginSummary }) {
+  const [setting, setSetting] = useState<PluginSettingView | null>(null);
+  const [configDraft, setConfigDraft] = useState<string>("{}");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void pluginSettingsGet(plugin.name).then((s) => {
+      if (cancelled) return;
+      if (s) {
+        setSetting(s);
+        setConfigDraft(s.config_json || "{}");
+      } else {
+        setSetting({
+          plugin_name: plugin.name,
+          enabled: true,
+          config_json: "{}",
+          updated_at: 0,
+        });
+        setConfigDraft("{}");
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [plugin.name]);
+
+  const enabled = setting?.enabled ?? true;
+
+  const onToggle = async (next: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const updated = await pluginSettingsSet(plugin.name, next, configDraft);
+      setSetting(updated);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onSaveConfig = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      JSON.parse(configDraft);
+    } catch {
+      setError("config must be valid JSON");
+      setBusy(false);
+      return;
+    }
+    try {
+      const updated = await pluginSettingsSet(plugin.name, enabled, configDraft);
+      setSetting(updated);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <li
+      data-testid={`plugin-row-${plugin.name}`}
+      className="rounded border border-gray-200 dark:border-neutral-700 p-2 space-y-2"
+    >
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          aria-label={enabled ? "Disable plugin" : "Enable plugin"}
+          title={enabled ? "Disable" : "Enable"}
+          disabled={busy}
+          onClick={() => void onToggle(!enabled)}
+          className={[
+            "p-1 rounded",
+            enabled
+              ? "text-accent-green hover:text-accent-green/70"
+              : "text-gray-400 hover:text-accent-blue",
+          ].join(" ")}
+        >
+          {enabled ? <Power size={11} /> : <PowerOff size={11} />}
+        </button>
+        <span className="text-xs font-medium flex-1">{plugin.name}</span>
+        <span className="text-[10px] text-gray-500 dark:text-neutral-400 font-mono">
+          v{plugin.version}
+        </span>
+      </div>
+      <div className="text-[10px] text-gray-500 dark:text-neutral-400">
+        adapters: {plugin.adapters.join(", ") || "—"}
+        {plugin.handlers.length > 0 && ` · handlers: ${plugin.handlers.join(", ")}`}
+      </div>
+      <details className="text-[10px]">
+        <summary className="cursor-pointer text-gray-500 dark:text-neutral-400">
+          configuration (JSON)
+        </summary>
+        <textarea
+          aria-label={`plugin ${plugin.name} config`}
+          value={configDraft}
+          onChange={(e) => setConfigDraft(e.target.value)}
+          rows={4}
+          className="mt-1 w-full px-2 py-1 text-[10px] font-mono rounded border border-gray-200 dark:border-neutral-700 bg-white dark:bg-neutral-900"
+        />
+        <div className="mt-1 flex items-center gap-2">
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => void onSaveConfig()}
+            className="px-2 py-0.5 text-[10px] rounded bg-accent-blue text-white disabled:opacity-50"
+          >
+            save config
+          </button>
+          {error && <span className="text-accent-red text-[10px]">{error}</span>}
+        </div>
+      </details>
+    </li>
   );
 }

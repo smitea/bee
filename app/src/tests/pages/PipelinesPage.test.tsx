@@ -2,6 +2,10 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, fireEvent } from "@testing-library/react";
 
+vi.mock("echarts-for-react", () => ({
+  default: () => <div data-testid="echarts-mock" />,
+}));
+
 const mocks = vi.hoisted(() => ({
   pipelineList: vi.fn(),
   pipelineCreate: vi.fn(),
@@ -81,24 +85,14 @@ describe("<PipelinesPage>", () => {
     expect(screen.getByText(/#4/)).toBeInTheDocument();
   });
 
-  it("create-new button opens a pipeline tab when name is provided", async () => {
-    mocks.pipelineCreate.mockResolvedValueOnce({
-      id: 11,
-      name: "btc_kline",
-      dag_json: "{}",
-      updated_at: 0,
-    });
+  it("new pipeline button opens a pipeline_editor tab", async () => {
     const { PipelinesPage } = await import("../../pages/PipelinesPage");
     withClient(<PipelinesPage />);
-    const nameInput = await screen.findByPlaceholderText("btc_kline");
-    fireEvent.change(nameInput, { target: { value: "btc_kline" } });
-    fireEvent.click(screen.getByRole("button", { name: /create.*pipeline/i }));
-    await new Promise((r) => setTimeout(r, 50));
+    fireEvent.click(await screen.findByRole("button", { name: /new pipeline/i }));
     expect(mocks.openFn).toHaveBeenCalled();
     const arg = mocks.openFn.mock.calls[0][0];
-    expect(arg.kind).toBe("pipeline");
-    expect(arg.resourceId).toBe("11");
-    expect(arg.title).toBe("btc_kline");
+    expect(arg.kind).toBe("pipeline_editor");
+    expect(arg.title).toBe("New Pipeline");
   });
 
   it("opens a tab when clicking an existing pipeline row", async () => {
@@ -114,7 +108,7 @@ describe("<PipelinesPage>", () => {
     expect(arg.resourceId).toBe("42");
   });
 
-  it("renders all four lifecycle sections inside an overflow-x-auto container so the right-side buttons never clip", async () => {
+  it("renders all four lifecycle sections inside an overflow-x-auto container", async () => {
     const { PipelinesPage } = await import("../../pages/PipelinesPage");
     const { container } = withClient(<PipelinesPage />);
     await screen.findByText(/^Queued/);
@@ -123,6 +117,6 @@ describe("<PipelinesPage>", () => {
     expect(root?.className).toMatch(/min-w-0/);
     expect(root?.className).toMatch(/overflow-x-auto/);
     expect(screen.getByRole("button", { name: /new pipeline/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /create.*pipeline/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /create.*pipeline/i })).toBeNull();
   });
 });

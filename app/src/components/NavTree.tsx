@@ -141,13 +141,6 @@ export function NavTree() {
 
   return (
     <div className="h-full flex flex-col">
-      <div className="flex items-center justify-between px-3 py-2 border-b border-gray-200 dark:border-neutral-700">
-        <div className="flex items-center gap-2">
-          <Hexagon size={14} className="text-accent-blue" />
-          <span className="text-sm font-semibold">Bee</span>
-        </div>
-      </div>
-
       <div className="px-2 pt-2">
         <SearchBox query={query} onQueryChange={setQuery} onPick={onPickHit} addr={addr} />
       </div>

@@ -5,7 +5,6 @@ import { Cog, Moon, Sun, RefreshCw, X, Pin, PinOff } from "lucide-react";
 import { NavTree } from "./NavTree";
 import { StatusBar } from "./StatusBar";
 import { SettingsModal } from "./SettingsModal";
-import { ClusterSelectorDropdown } from "./ClusterSelectorDropdown";
 import { ContextMenu, type ContextMenuItem } from "./ContextMenu";
 import { useUi } from "../state/store";
 import { useTabs } from "../state/tabsStore";
@@ -39,8 +38,8 @@ export function AppShell({ children }: { children?: ReactNode }) {
   const onRefresh = () => {
     qc.invalidateQueries({ queryKey: ["cluster", addr] });
     qc.invalidateQueries({ queryKey: ["jobs", addr] });
-    qc.invalidateQueries({ queryKey: ["cluster-profiles"] });
     qc.invalidateQueries({ queryKey: ["application-jobs"] });
+    qc.invalidateQueries({ queryKey: ["dashboard-metrics"] });
   };
 
   return (
@@ -51,9 +50,6 @@ export function AppShell({ children }: { children?: ReactNode }) {
           data-testid="brand-label"
         >
           Bee
-        </span>
-        <span className="ml-2">
-          <ClusterSelectorDropdown />
         </span>
         <div className="flex-1" />
         <button

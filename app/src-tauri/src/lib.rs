@@ -115,6 +115,9 @@ pub fn run() {
             commands::datasources::datasource_delete,
             commands::plugins::plugin_list,
             commands::plugins::plugin_schema,
+            commands::plugins::datasource_form_schema,
+            commands::plugin_settings::plugin_settings_get,
+            commands::plugin_settings::plugin_settings_set,
             commands::rolling_restart::rolling_restart_apply,
             commands::pipelines::pipelines_list,
             commands::pipelines::pipeline_list,
@@ -122,12 +125,18 @@ pub fn run() {
             commands::pipelines::pipeline_get,
             commands::pipelines::pipeline_delete,
             commands::pipelines::pipeline_latest_result,
+            commands::pipeline_dumps::pipeline_dump_list,
+            commands::pipeline_dumps::pipeline_dump_record,
             commands::applications::application_export,
             commands::applications::application_import,
             commands::search::search_local,
             commands::search::search_server,
             commands::dashboards::dashboard_get,
             commands::dashboards::dashboard_save,
+            commands::dashboard_metrics::dashboard_metric_get,
+            commands::dashboard_metrics::dashboard_metric_list,
+            commands::dashboard_metrics::dashboard_metric_save,
+            commands::dashboard_metrics::dashboard_metric_delete,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

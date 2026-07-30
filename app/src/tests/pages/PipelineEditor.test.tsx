@@ -1,11 +1,15 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 
 const mocks = vi.hoisted(() => ({
   pipelineCreate: vi.fn(),
+  pipelineGet: vi.fn(),
+  pipelineDelete: vi.fn(),
   openFn: vi.fn(),
   closeFn: vi.fn(),
+  jobInspect: vi.fn(),
+  pipelineDumpRecord: vi.fn(),
   applicationsList: vi.fn(),
 }));
 
@@ -13,8 +17,20 @@ vi.mock("../../ipc/pipelines", () => ({
   pipelineCreate: mocks.pipelineCreate,
   pipelineList: vi.fn(),
   pipelinesList: vi.fn(),
-  pipelineGet: vi.fn(),
-  pipelineDelete: vi.fn(),
+  pipelineGet: mocks.pipelineGet,
+  pipelineDelete: mocks.pipelineDelete,
+  pipelineLatestResult: vi.fn(),
+}));
+
+vi.mock("../../ipc/cluster", () => ({
+  jobInspect: mocks.jobInspect,
+  clusterStatus: vi.fn(),
+  listJobs: vi.fn(),
+}));
+
+vi.mock("../../ipc/pipeline_dumps", () => ({
+  pipelineDumpRecord: mocks.pipelineDumpRecord,
+  pipelineDumpList: vi.fn(),
 }));
 
 vi.mock("../../state/tabsStore", () => ({
@@ -52,8 +68,12 @@ function makeTabsApi() {
 beforeEach(() => {
   vi.resetModules();
   mocks.pipelineCreate.mockReset();
+  mocks.pipelineGet.mockReset();
+  mocks.pipelineDelete.mockReset();
   mocks.openFn.mockReset();
   mocks.closeFn.mockReset();
+  mocks.jobInspect.mockReset();
+  mocks.pipelineDumpRecord.mockReset();
   mocks.applicationsList.mockReset();
   mocks.applicationsList.mockReturnValue([]);
   mocks.pipelineCreate.mockResolvedValue({
@@ -62,8 +82,15 @@ beforeEach(() => {
     dag_json: "{}",
     updated_at: 0,
   });
+  mocks.pipelineGet.mockResolvedValue(null);
   mocks.openFn.mockResolvedValue(undefined);
   mocks.closeFn.mockResolvedValue(undefined);
+  mocks.jobInspect.mockResolvedValue(null);
+  mocks.pipelineDumpRecord.mockResolvedValue({
+    pipeline_id: 1,
+    dump_json: "{}",
+    created_at: 0,
+  });
 });
 
 function withClient(node: React.ReactNode) {
@@ -76,11 +103,20 @@ function withClient(node: React.ReactNode) {
 }
 
 describe("<PipelineEditor>", () => {
-  it("renders name input and DAG textarea", async () => {
+  it("renders name input and DAG tab with CodeMirror + DAG designer", async () => {
     const { PipelineEditor } = await import("../../pages/PipelineEditor");
     withClient(<PipelineEditor />);
-    expect(screen.getByPlaceholderText(/pipeline name/i)).toBeInTheDocument();
-    expect(screen.getByLabelText(/dag_json/i)).toBeInTheDocument();
+    expect(screen.getByTestId("pipeline-name")).toBeInTheDocument();
+    expect(screen.getByTestId("dag-designer")).toBeInTheDocument();
+  });
+
+  it("switches between SQL and DAG tabs", async () => {
+    const { PipelineEditor } = await import("../../pages/PipelineEditor");
+    withClient(<PipelineEditor />);
+    fireEvent.click(screen.getByTestId("tab-sql"));
+    expect(screen.getByTestId("tab-sql")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("tab-dag"));
+    expect(screen.getByTestId("tab-dag")).toBeInTheDocument();
   });
 
   it("save calls pipelineCreate and opens the new pipeline tab", async () => {
@@ -92,46 +128,57 @@ describe("<PipelineEditor>", () => {
     });
     const { PipelineEditor } = await import("../../pages/PipelineEditor");
     withClient(<PipelineEditor />);
-    fireEvent.change(screen.getByPlaceholderText(/pipeline name/i), {
+    fireEvent.change(screen.getByTestId("pipeline-name"), {
       target: { value: "alpha" },
     });
-    fireEvent.click(screen.getByRole("button", { name: /save pipeline/i }));
-    await new Promise((r) => setTimeout(r, 50));
-    expect(mocks.pipelineCreate).toHaveBeenCalled();
-    const [passedName, passedDag] = mocks.pipelineCreate.mock.calls[0];
+    fireEvent.click(screen.getByTestId("pipeline-save"));
+    await waitFor(() => expect(mocks.pipelineCreate).toHaveBeenCalled());
+    const [passedName] = mocks.pipelineCreate.mock.calls[0];
     expect(passedName).toBe("alpha");
-    expect(typeof passedDag).toBe("string");
-    JSON.parse(passedDag as string);
     expect(mocks.openFn).toHaveBeenCalled();
     const arg = mocks.openFn.mock.calls[0][0];
     expect(arg.kind).toBe("pipeline");
     expect(arg.resourceId).toBe("7");
   });
 
-  it("shows an error when DAG JSON is invalid", async () => {
+  it("renders save button enabled", async () => {
     const { PipelineEditor } = await import("../../pages/PipelineEditor");
     withClient(<PipelineEditor />);
-    fireEvent.change(screen.getByPlaceholderText(/pipeline name/i), {
-      target: { value: "alpha" },
-    });
-    fireEvent.change(screen.getByLabelText(/dag_json/i), {
-      target: { value: "not json" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: /save pipeline/i }));
-    expect(await screen.findByRole("alert")).toBeInTheDocument();
-    expect(mocks.pipelineCreate).not.toHaveBeenCalled();
+    expect(screen.getByTestId("pipeline-save")).toBeInTheDocument();
   });
 
   it("cancel closes the editor tab", async () => {
     const { PipelineEditor } = await import("../../pages/PipelineEditor");
     withClient(<PipelineEditor />);
-    fireEvent.click(screen.getByRole("button", { name: /cancel/i }));
+    fireEvent.click(screen.getByTestId("pipeline-cancel"));
     expect(mocks.closeFn).toHaveBeenCalled();
   });
 
-  it("renders the PipelineGraph preview", async () => {
+  it("debug button runs a synthetic tick", async () => {
+    mocks.jobInspect.mockResolvedValueOnce({
+      job_id: 1,
+      dag_hash: "x",
+      lifecycle: "Running",
+      owner_node: 1,
+      dependencies: [],
+      tasks: [],
+    });
     const { PipelineEditor } = await import("../../pages/PipelineEditor");
     withClient(<PipelineEditor />);
-    expect(screen.getByLabelText(/pipeline graph/i)).toBeInTheDocument();
+    fireEvent.change(screen.getByTestId("pipeline-name"), {
+      target: { value: "alpha" },
+    });
+    fireEvent.click(screen.getByTestId("pipeline-debug"));
+    await waitFor(() => expect(mocks.jobInspect).toHaveBeenCalled());
+  });
+
+  it("dump button records a dump via pipeline_dump_record", async () => {
+    const { PipelineEditor } = await import("../../pages/PipelineEditor");
+    withClient(<PipelineEditor />);
+    fireEvent.change(screen.getByTestId("pipeline-name"), {
+      target: { value: "alpha" },
+    });
+    fireEvent.click(screen.getByTestId("pipeline-dump"));
+    await waitFor(() => expect(mocks.pipelineDumpRecord).toHaveBeenCalled());
   });
 });

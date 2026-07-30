@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { MoreVertical, GripHorizontal, MoveRight } from "lucide-react";
+import { MoreVertical, MoveRight } from "lucide-react";
 
 import { ClusterTopology } from "./ClusterTopology";
 import {
@@ -9,6 +9,14 @@ import {
   type DashboardLayout,
   type DashboardPanel as Panel,
 } from "../ipc/dashboards";
+import {
+  dashboardMetricDelete,
+  dashboardMetricList,
+  type DashboardMetricView,
+} from "../ipc/dashboard_metrics";
+import { LineChart, BarChart, GaugeChart, StatNumber } from "./widgets";
+import type { SeriesPoint } from "./widgets";
+import { MetricConfigDialog } from "./MetricConfigDialog";
 
 interface Props {
   applicationId: number;
@@ -95,6 +103,7 @@ export function DashboardEditor({ applicationId }: Props) {
   const [savedOnce, setSavedOnce] = useState(false);
   const [editing, setEditing] = useState(true);
   const [menuFor, setMenuFor] = useState<string | null>(null);
+  const [metricFor, setMetricFor] = useState<string | null>(null);
   const layoutRef = useRef<DashboardLayout | null>(null);
 
   useEffect(() => {
@@ -151,6 +160,7 @@ export function DashboardEditor({ applicationId }: Props) {
   const removePanel = (id: string) => {
     if (!layout) return;
     void saveLayout({ panels: layout.panels.filter((p) => p.id !== id) });
+    void dashboardMetricDelete(applicationId, id).catch(() => {});
   };
 
   const updatePanel = (id: string, patch: Partial<Panel>) => {
@@ -231,6 +241,7 @@ export function DashboardEditor({ applicationId }: Props) {
             key={p.id}
             panel={p}
             editing={editing}
+            applicationId={applicationId}
             onMove={(dx, dy) => {
               const nx = clamp(p.x + dx, 0, GRID_COLS - p.w);
               const ny = clamp(p.y + dy, 0, GRID_ROWS - p.h);
@@ -243,11 +254,25 @@ export function DashboardEditor({ applicationId }: Props) {
             }}
             onCommit={() => commitPanel(p.id)}
             onRemove={() => removePanel(p.id)}
+            onBindMetric={() => setMetricFor(p.id)}
             menuOpen={menuFor === p.id}
             onMenuToggle={() => setMenuFor(menuFor === p.id ? null : p.id)}
           />
         ))}
       </div>
+
+      {metricFor !== null && layout !== null && (
+        <MetricConfigDialog
+          applicationId={applicationId}
+          panelId={metricFor}
+          onClose={() => {
+            setMetricFor(null);
+            void qc.invalidateQueries({
+              queryKey: ["dashboard-metrics", applicationId],
+            });
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -278,10 +303,12 @@ function titleFor(kind: Panel["kind"]): string {
 interface FrameProps {
   panel: Panel;
   editing: boolean;
+  applicationId: number;
   onMove(dx: number, dy: number): void;
   onResize(dw: number, dh: number): void;
   onCommit(): void;
   onRemove(): void;
+  onBindMetric(): void;
   menuOpen: boolean;
   onMenuToggle(): void;
 }
@@ -289,10 +316,12 @@ interface FrameProps {
 function PanelFrame({
   panel,
   editing,
+  applicationId,
   onMove,
   onResize,
   onCommit,
   onRemove,
+  onBindMetric,
   menuOpen,
   onMenuToggle,
 }: FrameProps) {
@@ -370,6 +399,18 @@ function PanelFrame({
               >
                 <button
                   type="button"
+                  data-testid={`panel-bind-${panel.id}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onBindMetric();
+                    onMenuToggle();
+                  }}
+                  className="block w-full text-left px-3 py-1.5 hover:bg-gray-100 dark:hover:bg-neutral-700"
+                >
+                  Bind metric
+                </button>
+                <button
+                  type="button"
                   data-testid={`panel-remove-${panel.id}`}
                   onClick={(e) => {
                     e.stopPropagation();
@@ -384,8 +425,8 @@ function PanelFrame({
           </>
         )}
       </header>
-      <div className="p-1 text-[10px] text-gray-400 h-[calc(100%-1.4rem)]">
-        <PanelBody panel={panel} />
+      <div className="p-1 h-[calc(100%-1.4rem)]">
+        <PanelBody panel={panel} applicationId={applicationId} />
       </div>
       {editing && (
         <button
@@ -402,25 +443,81 @@ function PanelFrame({
   );
 }
 
-function PanelBody({ panel }: { panel: Panel }) {
-  switch (panel.kind) {
+function PanelBody({
+  panel,
+  applicationId,
+}: {
+  panel: Panel;
+  applicationId: number;
+}) {
+  return (
+    <MetricPanelContent
+      applicationId={applicationId}
+      panelId={panel.id}
+      kind={panel.kind}
+    />
+  );
+}
+
+function MetricPanelContent({
+  applicationId,
+  panelId,
+  kind,
+}: {
+  applicationId: number;
+  panelId: string;
+  kind: Panel["kind"];
+}) {
+  const metricsQ = useQuery<DashboardMetricView[]>({
+    queryKey: ["dashboard-metrics", applicationId],
+    queryFn: () => dashboardMetricList(applicationId),
+  });
+  const metric = metricsQ.data?.find((m) => m.panel_id === panelId);
+  if (metric) {
+    return <MetricWidget metric={metric} />;
+  }
+  return <StaticWidget kind={kind} />;
+}
+
+function MetricWidget({ metric }: { metric: DashboardMetricView }) {
+  const cfg = parseConfig(metric.chart_config_json);
+  if (metric.widget_kind === "line_chart") {
+    return <LineChart points={sampleKlinePoints()} title={cfg.title} color={cfg.color} />;
+  }
+  if (metric.widget_kind === "bar_chart") {
+    return <BarChart data={sampleBar()} title={cfg.title} color={cfg.color} />;
+  }
+  if (metric.widget_kind === "gauge") {
+    return (
+      <GaugeChart
+        value={cfg.value ?? 50}
+        unit={cfg.unit ?? "%"}
+        title={cfg.title}
+        color={cfg.color}
+      />
+    );
+  }
+  return <StatNumber value={cfg.value ?? 0} label={cfg.title ?? metric.source_field} />;
+}
+
+function StaticWidget({ kind }: { kind: Panel["kind"] }) {
+  switch (kind) {
     case "kline":
-      return (
-        <div className="h-full">
-          <GripHorizontal size={40} className="mx-auto mt-2 text-gray-300" />
-          <p className="text-center text-[10px]">kline chart placeholder</p>
-        </div>
-      );
+      return <LineChart points={sampleKlinePoints()} title="K-line" />;
     case "active_jobs":
-      return <p>42 jobs</p>;
+      return <StatNumber value={42} label="Active Jobs" />;
     case "tasks_per_sec":
-      return <p>1.4 K/sec</p>;
+      return <GaugeChart value={1.4} min={0} max={5} unit="/s" title="Tasks/sec" />;
     case "cpu":
-      return <p>23%</p>;
+      return <GaugeChart value={23} unit="%" title="CPU" />;
     case "pipeline_status":
-      return <p>3 running / 0 failed</p>;
+      return <StatNumber value={3} label="Running / Failed" unit="/0" />;
     case "audit_feed":
-      return <p>audit feed placeholder</p>;
+      return (
+        <p className="text-[10px] text-gray-400 px-2 py-4 text-center">
+          Audit feed placeholder
+        </p>
+      );
     case "cluster_topology":
       return (
         <div className="h-full -m-1">
@@ -435,4 +532,43 @@ function PanelBody({ panel }: { panel: Panel }) {
         </div>
       );
   }
+}
+
+function parseConfig(json: string): {
+  title?: string;
+  color?: string;
+  value?: number;
+  unit?: string;
+} {
+  try {
+    return JSON.parse(json) as {
+      title?: string;
+      color?: string;
+      value?: number;
+      unit?: string;
+    };
+  } catch {
+    return {};
+  }
+}
+
+function sampleKlinePoints(): SeriesPoint[] {
+  const out: SeriesPoint[] = [];
+  const now = Date.now();
+  for (let i = 0; i < 40; i += 1) {
+    out.push({
+      ts: now - (40 - i) * 60_000,
+      value: 100 + Math.sin(i / 3) * 5 + i * 0.2,
+    });
+  }
+  return out;
+}
+
+function sampleBar(): { label: string; value: number }[] {
+  return [
+    { label: "queued", value: 1 },
+    { label: "running", value: 3 },
+    { label: "historical", value: 12 },
+    { label: "failed", value: 0 },
+  ];
 }

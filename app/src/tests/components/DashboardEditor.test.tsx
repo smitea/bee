@@ -2,14 +2,31 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
+vi.mock("echarts-for-react", () => ({
+  default: (props: { option?: unknown }) => (
+    <div data-testid="echarts-mock" data-option={JSON.stringify(props.option ?? {})} />
+  ),
+}));
+
 const mocks = vi.hoisted(() => ({
   dashboardGet: vi.fn(),
   dashboardSave: vi.fn(),
+  dashboardMetricList: vi.fn().mockResolvedValue([]),
+  dashboardMetricGet: vi.fn().mockResolvedValue(null),
+  dashboardMetricSave: vi.fn(),
+  dashboardMetricDelete: vi.fn(),
 }));
 
 vi.mock("../../ipc/dashboards", () => ({
   dashboardGet: mocks.dashboardGet,
   dashboardSave: mocks.dashboardSave,
+}));
+
+vi.mock("../../ipc/dashboard_metrics", () => ({
+  dashboardMetricList: mocks.dashboardMetricList,
+  dashboardMetricGet: mocks.dashboardMetricGet,
+  dashboardMetricSave: mocks.dashboardMetricSave,
+  dashboardMetricDelete: mocks.dashboardMetricDelete,
 }));
 
 import { DashboardEditor } from "../../components/DashboardEditor";
@@ -25,12 +42,28 @@ beforeEach(() => {
   vi.resetModules();
   mocks.dashboardGet.mockReset();
   mocks.dashboardSave.mockReset();
+  mocks.dashboardMetricList.mockReset();
+  mocks.dashboardMetricGet.mockReset();
+  mocks.dashboardMetricSave.mockReset();
+  mocks.dashboardMetricDelete.mockReset();
   mocks.dashboardGet.mockResolvedValue(null);
   mocks.dashboardSave.mockResolvedValue({
     application_id: 1,
     layout_json: "{}",
     updated_at: 0,
   });
+  mocks.dashboardMetricList.mockResolvedValue([]);
+  mocks.dashboardMetricGet.mockResolvedValue(null);
+  mocks.dashboardMetricSave.mockResolvedValue({
+    dashboard_id: 1,
+    panel_id: "p1",
+    pipeline_job_id: null,
+    source_field: "x",
+    widget_kind: "line_chart",
+    chart_config_json: "{}",
+    updated_at: 0,
+  });
+  mocks.dashboardMetricDelete.mockResolvedValue(undefined);
 });
 
 describe("<DashboardEditor>", () => {

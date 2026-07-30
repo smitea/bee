@@ -7,7 +7,7 @@ const mocks = vi.hoisted(() => ({
   datasourceCreate: vi.fn(),
   datasourceDelete: vi.fn(),
   pluginList: vi.fn(),
-  pluginSchema: vi.fn(),
+  datasourceFormSchema: vi.fn(),
 }));
 
 vi.mock("../../ipc/datasources", () => ({
@@ -18,8 +18,17 @@ vi.mock("../../ipc/datasources", () => ({
 
 vi.mock("../../ipc/plugins", () => ({
   pluginList: mocks.pluginList,
-  pluginSchema: mocks.pluginSchema,
 }));
+
+vi.mock("../../ipc/datasource_form_schema", async () => {
+  const actual = await vi.importActual<typeof import("../../ipc/datasource_form_schema")>(
+    "../../ipc/datasource_form_schema",
+  );
+  return {
+    ...actual,
+    datasourceFormSchema: mocks.datasourceFormSchema,
+  };
+});
 
 beforeEach(() => {
   vi.resetModules();
@@ -27,7 +36,7 @@ beforeEach(() => {
   mocks.datasourceCreate.mockReset();
   mocks.datasourceDelete.mockReset();
   mocks.pluginList.mockReset();
-  mocks.pluginSchema.mockReset();
+  mocks.datasourceFormSchema.mockReset();
 
   mocks.datasourceList.mockResolvedValue([]);
   mocks.datasourceCreate.mockResolvedValue({
@@ -40,11 +49,12 @@ beforeEach(() => {
   });
   mocks.datasourceDelete.mockResolvedValue(undefined);
   mocks.pluginList.mockResolvedValue([]);
-  mocks.pluginSchema.mockResolvedValue({
-    name: "static",
+  mocks.datasourceFormSchema.mockResolvedValue({
+    plugin_name: "binance_subscribe",
+    adapter: "binance_subscribe",
     fields: [
-      { name: "url", kind: "string", required: true, description: "endpoint URL" },
-      { name: "api_key", kind: "string", required: false, description: null },
+      { name: "url", schema: { type: "string", required: true }, required: true },
+      { name: "api_key", schema: { type: "string", required: false }, required: false },
     ],
   });
   if (typeof window !== "undefined" && typeof window.confirm === "function") {
@@ -70,8 +80,8 @@ describe("<DatasourcesPage>", () => {
   it("renders the plugins registered badge with count", async () => {
     mocks.pluginList.mockReset();
     mocks.pluginList.mockResolvedValue([
-      { name: "binance_subscribe", adapter: "binance_subscribe", kind: "input" },
-      { name: "kafka_emit", adapter: "kafka_emit", kind: "output" },
+      { id: "p1", name: "binance_subscribe", version: "1.0.0", adapters: [], handlers: [] },
+      { id: "p2", name: "kafka_emit", version: "1.0.0", adapters: [], handlers: [] },
     ]);
     const { DatasourcesPage } = await import("../../pages/DatasourcesPage");
     withClient(<DatasourcesPage />);
@@ -110,7 +120,7 @@ describe("<DatasourcesPage>", () => {
 
   it("Add button opens modal and renders schema fields when plugin is selected", async () => {
     mocks.pluginList.mockResolvedValue([
-      { name: "binance_subscribe", adapter: "binance_subscribe", kind: "input" },
+      { id: "p1", name: "binance_subscribe", version: "1.0.0", adapters: [], handlers: [] },
     ]);
     const { DatasourcesPage } = await import("../../pages/DatasourcesPage");
     withClient(<DatasourcesPage />);
@@ -131,7 +141,7 @@ describe("<DatasourcesPage>", () => {
 
   it("Connect and Save calls datasource_create with name + plugin + config_json", async () => {
     mocks.pluginList.mockResolvedValue([
-      { name: "binance_subscribe", adapter: "binance_subscribe", kind: "input" },
+      { id: "p1", name: "binance_subscribe", version: "1.0.0", adapters: [], handlers: [] },
     ]);
     const { DatasourcesPage } = await import("../../pages/DatasourcesPage");
     withClient(<DatasourcesPage />);

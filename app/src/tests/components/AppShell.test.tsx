@@ -113,12 +113,12 @@ beforeEach(() => {
 });
 
 describe("<AppShell> tab context menu", () => {
-  it("header row shows Bee brand + cluster dropdown + refresh + settings + theme", async () => {
+  it("header row shows Bee brand + refresh + settings + theme (no cluster dropdown)", async () => {
     withClient(<AppShell />);
     expect(await screen.findByTestId("brand-label")).toBeInTheDocument();
     expect(screen.getByTestId("brand-label").textContent).toBe("Bee");
     const header = await screen.findByRole("banner");
-    expect(within(header).getByRole("button", { name: /select cluster/i })).toBeInTheDocument();
+    expect(within(header).queryByRole("button", { name: /select cluster/i })).toBeNull();
     expect(within(header).getByRole("button", { name: /^refresh$/i })).toBeInTheDocument();
     expect(within(header).getByRole("button", { name: /open settings/i })).toBeInTheDocument();
     expect(within(header).getByRole("button", { name: /toggle theme/i })).toBeInTheDocument();

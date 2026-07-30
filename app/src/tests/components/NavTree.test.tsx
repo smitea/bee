@@ -129,12 +129,11 @@ describe("<NavTree>", () => {
     expect(screen.queryByText(/toggle pinned/i)).toBeNull();
   });
 
-  it("renders the Add-application control inside the Applications row (not the Bee header)", async () => {
+  it("renders the Add-application control inside the Applications row", async () => {
     const { NavTree } = await import("../../components/NavTree");
     withClient(<NavTree />);
     const appsHeading = screen.getByText(/Applications \(0\)/);
     const add = screen.getByRole("button", { name: /add application/i });
     expect(appsHeading.parentElement?.contains(add)).toBe(true);
-    expect(screen.getByText("Bee").closest("div")?.querySelector('[aria-label="Add application"]')).toBeNull();
   });
 });

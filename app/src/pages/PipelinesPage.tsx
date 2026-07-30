@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Plus, Workflow, AlertTriangle, Trash2 } from "lucide-react";
 
@@ -6,7 +6,6 @@ import { useConnection } from "../state/connectionStore";
 import { useTabs } from "../state/tabsStore";
 import {
   pipelineList,
-  pipelineCreate,
   pipelineDelete,
   listJobs,
   type PipelineDefinitionView,
@@ -57,10 +56,6 @@ export function PipelinesPage() {
     queryFn: () => pipelineList(),
   });
 
-  const [draft, setDraft] = useState({ name: "", dag_json: "{}" });
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-
   const sections = useMemo(() => {
     const out: Record<SectionKey, JobSummary[]> = {
       queued: [],
@@ -74,36 +69,6 @@ export function PipelinesPage() {
     return out;
   }, [jobsQ.data]);
 
-  const onCreate = async () => {
-    setError(null);
-    const name = draft.name.trim();
-    if (!name) {
-      setError("name is required");
-      return;
-    }
-    try {
-      JSON.parse(draft.dag_json);
-    } catch {
-      setError("dag_json must be valid JSON");
-      return;
-    }
-    setBusy(true);
-    try {
-      const created = await pipelineCreate(name, draft.dag_json);
-      setDraft({ name: "", dag_json: "{}" });
-      await defsQ.refetch();
-      await openTab({
-        kind: "pipeline",
-        resourceId: String(created.id),
-        title: created.name,
-      });
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
   const onDelete = async (id: number) => {
     if (!confirm(`Delete pipeline #${id}?`)) return;
     await pipelineDelete(id);
@@ -114,25 +79,20 @@ export function PipelinesPage() {
     <div className="space-y-6 min-w-0 overflow-x-auto">
       <header className="flex items-center justify-between">
         <h1 className="text-xl font-semibold">Pipelines</h1>
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={() => void openTab({ kind: "pipeline_editor", resourceId: null, title: "New Pipeline" })}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md border border-gray-200 dark:border-neutral-700 hover:bg-gray-50 dark:hover:bg-neutral-700"
-          >
-            <Plus size={14} />
-            New Pipeline
-          </button>
-          <button
-            type="button"
-            onClick={() => void onCreate()}
-            disabled={busy}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md bg-accent-blue text-white hover:bg-accent-blue/90 disabled:opacity-50"
-          >
-            <Plus size={14} />
-            Create pipeline
-          </button>
-        </div>
+        <button
+          type="button"
+          onClick={() =>
+            void openTab({
+              kind: "pipeline_editor",
+              resourceId: null,
+              title: "New Pipeline",
+            })
+          }
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md bg-accent-blue text-white hover:bg-accent-blue/90"
+        >
+          <Plus size={14} />
+          New Pipeline
+        </button>
       </header>
 
       {(jobsQ.error || defsQ.error) && (
@@ -144,39 +104,13 @@ export function PipelinesPage() {
 
       <div className="bg-white dark:bg-neutral-800 rounded-lg border border-gray-200 dark:border-neutral-700">
         <h2 className="px-4 py-3 text-sm font-medium border-b border-gray-200 dark:border-neutral-700">
-          New Pipeline Definition
-        </h2>
-        <div className="p-4 grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
-          <label className="flex flex-col gap-1">
-            <span className="text-gray-500 dark:text-neutral-400">Name</span>
-            <input
-              value={draft.name}
-              onChange={(e) => setDraft({ ...draft, name: e.target.value })}
-              placeholder="btc_kline"
-              className="px-2 py-1 rounded border border-gray-200 dark:border-neutral-700 bg-white dark:bg-neutral-900"
-            />
-          </label>
-          <label className="flex flex-col gap-1 md:col-span-2">
-            <span className="text-gray-500 dark:text-neutral-400">dag_json</span>
-            <input
-              value={draft.dag_json}
-              onChange={(e) => setDraft({ ...draft, dag_json: e.target.value })}
-              className="px-2 py-1 rounded border border-gray-200 dark:border-neutral-700 bg-white dark:bg-neutral-900 font-mono"
-            />
-          </label>
-          {error && (
-            <div className="md:col-span-3 text-accent-red">{error}</div>
-          )}
-        </div>
-      </div>
-
-      <div className="bg-white dark:bg-neutral-800 rounded-lg border border-gray-200 dark:border-neutral-700">
-        <h2 className="px-4 py-3 text-sm font-medium border-b border-gray-200 dark:border-neutral-700">
           Definitions ({defsQ.data?.length ?? 0})
         </h2>
         <div className="p-4">
           {(defsQ.data?.length ?? 0) === 0 ? (
-            <p className="text-xs text-gray-400 text-center py-4">no saved pipelines</p>
+            <p className="text-xs text-gray-400 text-center py-4">
+              no saved pipelines — click New Pipeline
+            </p>
           ) : (
             <ul className="text-xs space-y-1">
               {defsQ.data?.map((d) => (

@@ -12,6 +12,9 @@ pub mod pipelines;
 pub mod datasources;
 pub mod clusters;
 pub mod dashboards;
+pub mod plugin_settings;
+pub mod dashboard_metrics;
+pub mod pipeline_dumps;
 
 pub struct Database {
     conn: Mutex<Connection>,
@@ -183,6 +186,46 @@ pub const MIGRATIONS: &[Migration] = &[
             );
         "#,
     },
+    Migration {
+        version: 12,
+        name: "plugin_settings",
+        sql: r#"
+            CREATE TABLE plugin_settings (
+                plugin_name TEXT PRIMARY KEY,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                config_json TEXT NOT NULL DEFAULT '{}',
+                updated_at INTEGER NOT NULL
+            );
+        "#,
+    },
+    Migration {
+        version: 13,
+        name: "dashboard_metrics",
+        sql: r#"
+            CREATE TABLE dashboard_metrics (
+                dashboard_id INTEGER NOT NULL,
+                panel_id TEXT NOT NULL,
+                pipeline_job_id INTEGER,
+                source_field TEXT NOT NULL,
+                widget_kind TEXT NOT NULL,
+                chart_config_json TEXT NOT NULL DEFAULT '{}',
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (dashboard_id, panel_id)
+            );
+        "#,
+    },
+    Migration {
+        version: 14,
+        name: "pipeline_dumps",
+        sql: r#"
+            CREATE TABLE pipeline_dumps (
+                pipeline_id INTEGER NOT NULL,
+                dump_json TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY (pipeline_id, created_at)
+            );
+        "#,
+    },
 ];
 
 impl Database {
@@ -269,7 +312,7 @@ mod tests {
         let db = Database::open(&path).unwrap();
         assert!(path.exists());
         let applied = db.applied_versions().unwrap();
-        assert_eq!(applied, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+        assert_eq!(applied, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
     }
 
     #[test]
@@ -281,7 +324,7 @@ mod tests {
         let db2 = Database::open(&path).unwrap();
         let second = db2.applied_versions().unwrap();
         assert_eq!(first, second);
-        assert_eq!(first, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+        assert_eq!(first, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
     }
 
     #[test]
@@ -293,6 +336,6 @@ mod tests {
             conn.execute_batch("CREATE TABLE migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at INTEGER NOT NULL);").unwrap();
         }
         let db = Database::open(&path).unwrap();
-        assert_eq!(db.applied_versions().unwrap(), vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+        assert_eq!(db.applied_versions().unwrap(), vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
     }
 }
