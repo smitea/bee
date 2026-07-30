@@ -9,6 +9,7 @@ import {
 } from "../ipc/dashboard_metrics";
 import { listJobs } from "../ipc/cluster";
 import { useConnection } from "../state/connectionStore";
+import type { KLineMode, KLineInterval } from "./widgets";
 
 interface Props {
   applicationId: number;
@@ -18,12 +19,25 @@ interface Props {
 
 const WIDGET_KINDS = [
   { id: "line_chart", label: "Line Chart" },
+  { id: "kline", label: "K-Line" },
   { id: "bar_chart", label: "Bar Chart" },
   { id: "gauge", label: "Gauge" },
   { id: "stat", label: "Stat Number" },
 ] as const;
 
 type WidgetKind = (typeof WIDGET_KINDS)[number]["id"];
+
+const KLINE_MODES: { id: KLineMode; label: string }[] = [
+  { id: "candlestick", label: "Candlestick" },
+  { id: "line", label: "Line" },
+];
+
+const KLINE_INTERVALS: { id: KLineInterval; label: string }[] = [
+  { id: "1m", label: "1 minute" },
+  { id: "5m", label: "5 minutes" },
+  { id: "1h", label: "1 hour" },
+  { id: "1d", label: "1 day" },
+];
 
 export function MetricConfigDialog({ applicationId, panelId, onClose }: Props) {
   const addr = useConnection((s) => s.addr);
@@ -39,6 +53,8 @@ export function MetricConfigDialog({ applicationId, panelId, onClose }: Props) {
   const [title, setTitle] = useState<string>("");
   const [color, setColor] = useState<string>("#3b82f6");
   const [unit, setUnit] = useState<string>("");
+  const [klineMode, setKlineMode] = useState<KLineMode>("candlestick");
+  const [klineInterval, setKlineInterval] = useState<KLineInterval>("1m");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -55,6 +71,17 @@ export function MetricConfigDialog({ applicationId, panelId, onClose }: Props) {
         if (cfg.title) setTitle(String(cfg.title));
         if (cfg.color) setColor(String(cfg.color));
         if (cfg.unit) setUnit(String(cfg.unit));
+        if (cfg.mode === "candlestick" || cfg.mode === "line") {
+          setKlineMode(cfg.mode);
+        }
+        if (
+          cfg.interval === "1m" ||
+          cfg.interval === "5m" ||
+          cfg.interval === "1h" ||
+          cfg.interval === "1d"
+        ) {
+          setKlineInterval(cfg.interval);
+        }
       } catch {}
     });
     return () => {
@@ -72,7 +99,13 @@ export function MetricConfigDialog({ applicationId, panelId, onClose }: Props) {
         jobId ? Number(jobId) : null,
         sourceField,
         widgetKind,
-        JSON.stringify({ title, color, unit }),
+        JSON.stringify({
+          title,
+          color,
+          unit,
+          mode: klineMode,
+          interval: klineInterval,
+        }),
       );
       setBusy(false);
       onClose();
@@ -172,6 +205,40 @@ export function MetricConfigDialog({ applicationId, panelId, onClose }: Props) {
               className="flex-1 px-2 py-1 rounded border border-gray-200 dark:border-neutral-700 bg-white dark:bg-neutral-900 font-mono"
             />
           </Field>
+
+          {widgetKind === "kline" && (
+            <Field label="K-Line Mode">
+              <select
+                aria-label="kline mode"
+                value={klineMode}
+                onChange={(e) => setKlineMode(e.target.value as KLineMode)}
+                className="flex-1 px-2 py-1 rounded border border-gray-200 dark:border-neutral-700 bg-white dark:bg-neutral-900"
+              >
+                {KLINE_MODES.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.label}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          )}
+
+          {widgetKind === "kline" && (
+            <Field label="Time Interval">
+              <select
+                aria-label="kline interval"
+                value={klineInterval}
+                onChange={(e) => setKlineInterval(e.target.value as KLineInterval)}
+                className="flex-1 px-2 py-1 rounded border border-gray-200 dark:border-neutral-700 bg-white dark:bg-neutral-900"
+              >
+                {KLINE_INTERVALS.map((i) => (
+                  <option key={i.id} value={i.id}>
+                    {i.label}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          )}
 
           {error && <div className="text-accent-red">{error}</div>}
         </div>

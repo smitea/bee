@@ -8,6 +8,22 @@ vi.mock("echarts-for-react", () => ({
   ),
 }));
 
+const klinechartMock = {
+  setSymbol: vi.fn(),
+  setPeriod: vi.fn(),
+  setDataLoader: vi.fn(),
+  setStyles: vi.fn(),
+  setFormatter: vi.fn(),
+  subscribeAction: vi.fn(),
+  resetData: vi.fn(),
+  getDataList: vi.fn(() => []),
+};
+
+vi.mock("klinecharts", () => ({
+  init: vi.fn(() => klinechartMock),
+  dispose: vi.fn(),
+}));
+
 const mocks = vi.hoisted(() => ({
   dashboardGet: vi.fn(),
   dashboardSave: vi.fn(),

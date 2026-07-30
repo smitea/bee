@@ -15,7 +15,7 @@ import {
   type DashboardMetricView,
 } from "../ipc/dashboard_metrics";
 import { LineChart, BarChart, GaugeChart, StatNumber } from "./widgets";
-import type { SeriesPoint } from "./widgets";
+import type { OhlcPoint, SeriesPoint, KLineMode, KLineInterval } from "./widgets";
 import { MetricConfigDialog } from "./MetricConfigDialog";
 
 interface Props {
@@ -482,7 +482,22 @@ function MetricPanelContent({
 function MetricWidget({ metric }: { metric: DashboardMetricView }) {
   const cfg = parseConfig(metric.chart_config_json);
   if (metric.widget_kind === "line_chart") {
-    return <LineChart points={sampleKlinePoints()} title={cfg.title} color={cfg.color} />;
+    return (
+      <LineChart
+        points={sampleKlinePoints()}
+        mode={cfg.mode ?? "line"}
+        interval={cfg.interval ?? "1m"}
+      />
+    );
+  }
+  if (metric.widget_kind === "kline") {
+    return (
+      <LineChart
+        points={sampleKlineOhlc()}
+        mode={cfg.mode ?? "candlestick"}
+        interval={cfg.interval ?? "1m"}
+      />
+    );
   }
   if (metric.widget_kind === "bar_chart") {
     return <BarChart data={sampleBar()} title={cfg.title} color={cfg.color} />;
@@ -503,7 +518,7 @@ function MetricWidget({ metric }: { metric: DashboardMetricView }) {
 function StaticWidget({ kind }: { kind: Panel["kind"] }) {
   switch (kind) {
     case "kline":
-      return <LineChart points={sampleKlinePoints()} title="K-line" />;
+      return <LineChart points={sampleKlineOhlc()} mode="candlestick" />;
     case "active_jobs":
       return <StatNumber value={42} label="Active Jobs" />;
     case "tasks_per_sec":
@@ -539,6 +554,8 @@ function parseConfig(json: string): {
   color?: string;
   value?: number;
   unit?: string;
+  mode?: KLineMode;
+  interval?: KLineInterval;
 } {
   try {
     return JSON.parse(json) as {
@@ -546,6 +563,8 @@ function parseConfig(json: string): {
       color?: string;
       value?: number;
       unit?: string;
+      mode?: KLineMode;
+      interval?: KLineInterval;
     };
   } catch {
     return {};
@@ -560,6 +579,29 @@ function sampleKlinePoints(): SeriesPoint[] {
       ts: now - (40 - i) * 60_000,
       value: 100 + Math.sin(i / 3) * 5 + i * 0.2,
     });
+  }
+  return out;
+}
+
+function sampleKlineOhlc(): OhlcPoint[] {
+  const out: OhlcPoint[] = [];
+  const now = Date.now();
+  let prev = 100;
+  for (let i = 0; i < 40; i += 1) {
+    const drift = Math.sin(i / 3) * 5 + i * 0.2;
+    const open = prev;
+    const close = prev + drift;
+    const high = Math.max(open, close) + Math.abs(Math.cos(i / 2)) * 3;
+    const low = Math.min(open, close) - Math.abs(Math.sin(i / 2)) * 2;
+    out.push({
+      ts: now - (40 - i) * 60_000,
+      open,
+      high,
+      low,
+      close,
+      volume: 1000 + i * 10,
+    });
+    prev = close;
   }
   return out;
 }
