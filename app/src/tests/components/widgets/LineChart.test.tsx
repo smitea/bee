@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 
 const chartMock = {
   setSymbol: vi.fn(),
@@ -8,8 +8,10 @@ const chartMock = {
   setStyles: vi.fn(),
   setFormatter: vi.fn(),
   subscribeAction: vi.fn(),
+  unsubscribeAction: vi.fn(),
   resetData: vi.fn(),
   getDataList: vi.fn(() => []),
+  setBarSpace: vi.fn(),
 };
 
 const mocks = vi.hoisted(() => ({
@@ -144,5 +146,98 @@ describe("<LineChart>", () => {
 
     rerender(<LineChart points={sampleOhlc} mode="candlestick" interval="1d" />);
     expect(chartMock.setPeriod).toHaveBeenLastCalledWith({ type: "day", span: 1 });
+  });
+
+  it("hides the last price mark by default and shows it when crosshair becomes visible", () => {
+    const calls: Array<{ type: string; cb: (payload: unknown) => void }> = [];
+    chartMock.subscribeAction.mockImplementation(
+      (type: string, cb: (payload: unknown) => void) => {
+        calls.push({ type, cb });
+      },
+    );
+
+    render(<LineChart points={sampleOhlc} mode="candlestick" />);
+    const firstStyles = chartMock.setStyles.mock.calls[0][0];
+    expect(firstStyles.candle.priceMark.last.show).toBe(false);
+
+    const sub = calls.find((c) => c.type === "onCrosshairChange");
+    expect(sub).toBeDefined();
+
+    sub!.cb({ visible: true });
+    const visibleStyles = chartMock.setStyles.mock.calls[chartMock.setStyles.mock.calls.length - 1][0];
+    expect(visibleStyles.candle.priceMark.last.show).toBe(true);
+
+    sub!.cb({ visible: false });
+    const hiddenStyles = chartMock.setStyles.mock.calls[chartMock.setStyles.mock.calls.length - 1][0];
+    expect(hiddenStyles.candle.priceMark.last.show).toBe(false);
+  });
+
+  it("configures a bar space and bar-space-limit so candles never collapse to zero spacing", () => {
+    render(<LineChart points={sampleOhlc} mode="candlestick" />);
+    expect(chartMock.setBarSpace).toHaveBeenCalled();
+    const barSpaceArg = chartMock.setBarSpace.mock.calls[0][0];
+    expect(typeof barSpaceArg).toBe("number");
+    expect(barSpaceArg).toBeGreaterThan(0);
+
+    const initOptions = (mocks.init.mock.calls[0] as unknown as [
+      unknown,
+      { layout?: { barSpaceLimit?: { min?: number; max?: number } } } | undefined,
+    ])?.[1];
+    expect(initOptions?.layout?.barSpaceLimit?.min).toBeGreaterThanOrEqual(2);
+  });
+
+  it("marks the container as narrow when its rendered width is below the threshold", () => {
+    const observed: Array<{ cb: ResizeObserverCallback; el: Element }> = [];
+    const realRO = globalThis.ResizeObserver;
+    class CaptureRO {
+      cb: ResizeObserverCallback;
+      constructor(cb: ResizeObserverCallback) {
+        this.cb = cb;
+      }
+      observe(el: Element) {
+        observed.push({ cb: this.cb, el });
+      }
+      unobserve() {}
+      disconnect() {}
+    }
+    globalThis.ResizeObserver = CaptureRO as unknown as typeof ResizeObserver;
+
+    try {
+      const { container } = render(<LineChart points={sampleOhlc} mode="candlestick" />);
+      const host = container.querySelector('[data-testid="klinechart"]') as HTMLElement;
+      Object.defineProperty(host, "getBoundingClientRect", {
+        value: () =>
+          ({
+            width: 150,
+            height: 200,
+            top: 0,
+            left: 0,
+            right: 150,
+            bottom: 200,
+            x: 0,
+            y: 0,
+            toJSON: () => "",
+          }) as DOMRect,
+      });
+      const ro = observed[0];
+      act(() => {
+        ro.cb(
+          [
+            {
+              target: host,
+              contentRect: host.getBoundingClientRect(),
+            },
+          ] as unknown as ResizeObserverEntry[],
+          ro as unknown as ResizeObserver,
+        );
+      });
+      expect(host.getAttribute("data-narrow")).toBe("true");
+
+      const narrowStyles = chartMock.setStyles.mock.calls[chartMock.setStyles.mock.calls.length - 1][0];
+      expect(narrowStyles.xAxis.tickText.show).toBe(false);
+      expect(narrowStyles.yAxis.tickText.show).toBe(false);
+    } finally {
+      globalThis.ResizeObserver = realRO;
+    }
   });
 });

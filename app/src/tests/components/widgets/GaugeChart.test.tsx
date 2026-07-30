@@ -130,4 +130,21 @@ describe("<GaugeChart>", () => {
     const { unmount } = render(<GaugeChart value={75} />);
     expect(() => unmount()).not.toThrow();
   });
+
+  it("reduces the gauge tick count to five and hides axis labels by default", () => {
+    const { container } = render(<GaugeChart value={75} />);
+    const raw = container.querySelector('[data-testid="echarts-mock"]')?.getAttribute("data-option") ?? "{}";
+    const option = JSON.parse(raw) as {
+      series?: Array<{
+        splitNumber?: number;
+        axisLabel?: { show?: boolean };
+        progress?: { width?: number };
+        axisLine?: { lineStyle?: { width?: number } };
+      }>;
+    };
+    expect(option.series?.[0]?.splitNumber).toBe(4);
+    expect(option.series?.[0]?.axisLabel?.show).toBe(false);
+    expect(option.series?.[0]?.progress?.width).toBeGreaterThanOrEqual(18);
+    expect(option.series?.[0]?.axisLine?.lineStyle?.width).toBeGreaterThanOrEqual(18);
+  });
 });

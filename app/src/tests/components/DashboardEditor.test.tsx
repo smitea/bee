@@ -15,8 +15,10 @@ const klinechartMock = {
   setStyles: vi.fn(),
   setFormatter: vi.fn(),
   subscribeAction: vi.fn(),
+  unsubscribeAction: vi.fn(),
   resetData: vi.fn(),
   getDataList: vi.fn(() => []),
+  setBarSpace: vi.fn(),
 };
 
 vi.mock("klinecharts", () => ({
@@ -89,8 +91,6 @@ describe("<DashboardEditor>", () => {
     expect(screen.getByTestId("panel-kline")).toBeInTheDocument();
     expect(screen.getByTestId("panel-active_jobs")).toBeInTheDocument();
     expect(screen.getByTestId("panel-tasks_per_sec")).toBeInTheDocument();
-    expect(screen.getByTestId("panel-cpu")).toBeInTheDocument();
-    expect(screen.getByTestId("panel-pipeline_status")).toBeInTheDocument();
   });
 
   it("saves the default layout to dashboard_save on first save", async () => {
@@ -100,7 +100,17 @@ describe("<DashboardEditor>", () => {
     const saved = mocks.dashboardSave.mock.calls[0][1];
     const parsed = JSON.parse(saved);
     expect(Array.isArray(parsed.panels)).toBe(true);
-    expect(parsed.panels.length).toBe(5);
+    expect(parsed.panels.length).toBe(3);
+  });
+
+  it("ships a default layout with exactly three panels (kline, active_jobs, tasks_per_sec)", async () => {
+    withClient(<DashboardEditor applicationId={1} />);
+    await screen.findByTestId("dashboard-editor");
+    await waitFor(() => expect(mocks.dashboardSave).toHaveBeenCalled());
+    const saved = mocks.dashboardSave.mock.calls[0][1];
+    const parsed = JSON.parse(saved);
+    const kinds = parsed.panels.map((p: { kind: string }) => p.kind).sort();
+    expect(kinds).toEqual(["active_jobs", "kline", "tasks_per_sec"]);
   });
 
   it("adds a panel and saves the updated layout", async () => {
