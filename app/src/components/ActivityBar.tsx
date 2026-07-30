@@ -4,7 +4,11 @@ import { Activity, ChevronUp } from "lucide-react";
 import { useAudit, summary } from "../state/auditStore";
 import { ActivityDialog } from "./ActivityDialog";
 
-export function ActivityBar() {
+export interface ActivityBarProps {
+  navigate?: (kind: string, resourceId: string | null) => void;
+}
+
+export function ActivityBar({ navigate }: ActivityBarProps = {}) {
   const events = useAudit((s) => s.events);
   const loaded = useAudit((s) => s.loaded);
   const refresh = useAudit((s) => s.refresh);
@@ -35,7 +39,12 @@ export function ActivityBar() {
         <span className="max-w-[28rem] truncate">{text}</span>
         <ChevronUp size={10} />
       </button>
-      {open && <ActivityDialog onClose={() => setOpen(false)} />}
+      {open && (
+        <ActivityDialog
+          onClose={() => setOpen(false)}
+          navigate={navigate}
+        />
+      )}
     </>
   );
 }

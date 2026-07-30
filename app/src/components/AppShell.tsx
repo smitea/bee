@@ -3,11 +3,12 @@ import { useQueryClient } from "@tanstack/react-query";
 import { Cog, Moon, Sun, RefreshCw, X, Pin, PinOff } from "lucide-react";
 
 import { NavTree } from "./NavTree";
-import { StatusBar } from "./StatusBar";
 import { SettingsModal } from "./SettingsModal";
 import { ContextMenu, type ContextMenuItem } from "./ContextMenu";
+import { ActivityBar } from "./ActivityBar";
+import { ConnectionStatus } from "./ConnectionStatus";
 import { useUi } from "../state/store";
-import { useTabs } from "../state/tabsStore";
+import { useTabs, type TabKind } from "../state/tabsStore";
 import { useApplications } from "../state/applicationsStore";
 import { useConnection } from "../state/connectionStore";
 import { ClusterDashboard } from "../pages/ClusterDashboard";
@@ -18,6 +19,38 @@ import { DataSources } from "../pages/DataSources";
 import { ApplicationOverview } from "../pages/ApplicationOverview";
 import { DashboardPage } from "../pages/DashboardPage";
 
+const TAB_KINDS: ReadonlySet<TabKind> = new Set([
+  "cluster",
+  "application",
+  "application_pipelines",
+  "application_datasources",
+  "application_dashboard",
+  "pipeline",
+  "datasource",
+  "pipeline_editor",
+]);
+
+function titleFor(kind: TabKind, resourceId: string | null): string {
+  switch (kind) {
+    case "cluster":
+      return "Cluster";
+    case "application":
+      return resourceId ? `Application ${resourceId}` : "Application";
+    case "application_pipelines":
+      return resourceId ? `${resourceId} · Pipelines` : "Pipelines";
+    case "application_datasources":
+      return resourceId ? `${resourceId} · Datasources` : "Datasources";
+    case "application_dashboard":
+      return resourceId ? `${resourceId} · Dashboard` : "Dashboard";
+    case "pipeline":
+      return resourceId ? `Pipeline ${resourceId}` : "Pipeline";
+    case "datasource":
+      return resourceId ? `Datasource ${resourceId}` : "Datasource";
+    case "pipeline_editor":
+      return "New Pipeline";
+  }
+}
+
 export function AppShell({ children }: { children?: ReactNode }) {
   const settingsOpen = useUi((s) => s.settingsOpen);
   const closeSettings = useUi((s) => s.closeSettings);
@@ -25,6 +58,7 @@ export function AppShell({ children }: { children?: ReactNode }) {
   const theme = useUi((s) => s.theme);
   const toggleTheme = useUi((s) => s.toggleTheme);
 
+  const openTab = useTabs((s) => s.open);
   const hydrateTabs = useTabs((s) => s.hydrate);
   const hydrateApps = useApplications((s) => s.refresh);
   const qc = useQueryClient();
@@ -40,6 +74,20 @@ export function AppShell({ children }: { children?: ReactNode }) {
     qc.invalidateQueries({ queryKey: ["jobs", addr] });
     qc.invalidateQueries({ queryKey: ["application-jobs"] });
     qc.invalidateQueries({ queryKey: ["dashboard-metrics"] });
+  };
+
+  const onActivityNavigate = (kind: string, resourceId: string | null) => {
+    if (kind === "settings.connection") {
+      openSettings("connection");
+      return;
+    }
+    if (TAB_KINDS.has(kind as TabKind)) {
+      void openTab({
+        kind: kind as TabKind,
+        resourceId,
+        title: titleFor(kind as TabKind, resourceId),
+      });
+    }
   };
 
   return (
@@ -61,7 +109,7 @@ export function AppShell({ children }: { children?: ReactNode }) {
           <RefreshCw size={14} />
         </button>
         <button
-          onClick={openSettings}
+          onClick={() => openSettings()}
           className="p-1.5 rounded text-gray-500 hover:bg-gray-100 dark:hover:bg-neutral-700"
           title="Open settings"
           aria-label="Open settings"
@@ -86,9 +134,47 @@ export function AppShell({ children }: { children?: ReactNode }) {
           {children && <div className="flex-1 overflow-auto p-6">{children}</div>}
         </main>
       </div>
-      <StatusBar />
+      <StatusBar onActivityNavigate={onActivityNavigate} />
       {settingsOpen && <SettingsModal open={settingsOpen} onClose={closeSettings} />}
     </div>
+  );
+}
+
+interface StatusBarProps {
+  onActivityNavigate(kind: string, resourceId: string | null): void;
+}
+
+function StatusBar({ onActivityNavigate }: StatusBarProps) {
+  const theme = useUi((s) => s.theme);
+  const toggleTheme = useUi((s) => s.toggleTheme);
+  const status = useConnection((s) => s.status);
+
+  return (
+    <footer className="flex items-center gap-4 px-3 h-7 text-[10px] text-gray-500 dark:text-neutral-400 bg-white dark:bg-neutral-800 border-t border-gray-200 dark:border-neutral-700">
+      <span className="font-medium text-gray-700 dark:text-neutral-200">Bee Client v0.1.0</span>
+      <ConnectionStatus onOpenSettings={() => useUi.getState().openSettings()} />
+      <ActivityBar navigate={onActivityNavigate} />
+      <span
+        className="text-[10px] text-gray-400 font-mono"
+        data-testid="footer-cluster-detail"
+      >
+        {status.kind === "Connected"
+          ? "cluster reachable"
+          : status.kind === "Connecting"
+            ? "connecting…"
+            : status.kind === "Error"
+              ? `error: ${status.reason}`
+              : "no cluster"}
+      </span>
+      <div className="flex-1" />
+      <button
+        onClick={toggleTheme}
+        title={theme === "light" ? "Switch to Dark" : "Switch to Light"}
+        className="p-1 rounded text-gray-500 hover:bg-gray-100 dark:hover:bg-neutral-700"
+      >
+        {theme === "light" ? <Moon size={12} /> : <Sun size={12} />}
+      </button>
+    </footer>
   );
 }
 

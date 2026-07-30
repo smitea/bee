@@ -2,10 +2,24 @@ import { create } from "zustand";
 
 export type ThemeKind = "light" | "dark";
 
+export type SettingsSection =
+  | "client"
+  | "connection"
+  | "tenant"
+  | "appearance"
+  | "logging"
+  | "diagnostics"
+  | "raft"
+  | "kv"
+  | "scheduling"
+  | "plugins"
+  | "security";
+
 export interface UiState {
   theme: ThemeKind;
   settingsOpen: boolean;
-  openSettings(): void;
+  settingsSection: SettingsSection;
+  openSettings(section?: SettingsSection): void;
   closeSettings(): void;
   setTheme(t: ThemeKind): void;
   toggleTheme(): void;
@@ -34,7 +48,9 @@ function lsSet(key: string, v: unknown) {
 export const useUi = create<UiState>((set, get) => ({
   theme: lsGet<ThemeKind>(LS_THEME, "light"),
   settingsOpen: false,
-  openSettings: () => set({ settingsOpen: true }),
+  settingsSection: "connection",
+  openSettings: (section) =>
+    set({ settingsOpen: true, settingsSection: section ?? "connection" }),
   closeSettings: () => set({ settingsOpen: false }),
   setTheme: (t) => {
     lsSet(LS_THEME, t);

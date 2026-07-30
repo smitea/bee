@@ -4,6 +4,7 @@ import { Plug, Power, PowerOff, RefreshCw } from "lucide-react";
 
 import { useConnection } from "../state/connectionStore";
 import { useTenant } from "../state/tenantStore";
+import { useUi } from "../state/store";
 import {
   setAddr,
   testConnection,
@@ -56,8 +57,15 @@ const SECTIONS: { id: SectionId; label: string; description: string }[] = [
 ];
 
 export function SettingsModal({ open, onClose }: Props) {
-  const [section, setSection] = useState<SectionId>("connection");
+  const settingsSection = useUi((s) => s.settingsSection);
+  const [section, setSection] = useState<SectionId>(settingsSection);
   const cancelAction = useNavigationStoreBack(onClose);
+
+  useEffect(() => {
+    if (open) {
+      setSection(settingsSection);
+    }
+  }, [open, settingsSection]);
 
   const addr = useConnection((s) => s.addr);
   const setStoreAddr = useConnection((s) => s.setAddr);
