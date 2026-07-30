@@ -7,6 +7,8 @@ const applicationDelete = vi.fn();
 const applicationEnable = vi.fn();
 const applicationDisable = vi.fn();
 
+const seedDemo = vi.fn();
+
 vi.mock("../../ipc/applications", () => ({
   applicationsList,
   applicationCreate,
@@ -14,6 +16,9 @@ vi.mock("../../ipc/applications", () => ({
   applicationDelete,
   applicationEnable,
   applicationDisable,
+}));
+vi.mock("../../ipc/seed", () => ({
+  seedDemo,
 }));
 
 beforeEach(() => {
@@ -24,6 +29,7 @@ beforeEach(() => {
   applicationDelete.mockReset();
   applicationEnable.mockReset();
   applicationDisable.mockReset();
+  seedDemo.mockReset();
 });
 
 function makeApp(id: number, name = "alpha", enabled = true, tenant = 0) {
@@ -163,5 +169,47 @@ describe("useApplications.enable / disable", () => {
     expect(out.pipelines).toEqual(["p1"]);
     expect(out.datasources).toEqual(["binance"]);
     expect(useApplications.getState().items[0].enabled).toBe(false);
+  });
+});
+
+describe("useApplications.seedDemo", () => {
+  it("invokes the seed IPC and refreshes the list with the seeded application", async () => {
+    applicationsList
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([makeApp(1, "Demo", true, 0)]);
+    seedDemo.mockResolvedValueOnce({
+      created: true,
+      application_id: 1,
+      pipeline_id: 1,
+      datasource_name: "kline-sample",
+      audit_events: 4,
+    });
+
+    const { useApplications } = await import("../../state/applicationsStore");
+    await useApplications.getState().refresh();
+    const report = await useApplications.getState().seedDemo();
+
+    expect(seedDemo).toHaveBeenCalledTimes(1);
+    expect(report.created).toBe(true);
+    expect(report.application_id).toBe(1);
+    expect(report.datasource_name).toBe("kline-sample");
+    expect(useApplications.getState().items.map((a) => a.id)).toEqual([1]);
+    expect(useApplications.getState().items[0].name).toBe("Demo");
+  });
+
+  it("returns the IPC report even when no items exist yet", async () => {
+    applicationsList.mockResolvedValue([]);
+    seedDemo.mockResolvedValueOnce({
+      created: false,
+      application_id: null,
+      pipeline_id: null,
+      datasource_name: null,
+      audit_events: 0,
+    });
+
+    const { useApplications } = await import("../../state/applicationsStore");
+    const report = await useApplications.getState().seedDemo();
+    expect(report.created).toBe(false);
+    expect(useApplications.getState().items).toEqual([]);
   });
 });

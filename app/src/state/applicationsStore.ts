@@ -6,6 +6,7 @@ import type {
   DisableReport,
   EnableReport,
 } from "../ipc/applications";
+import { seedDemo, type SeedReportView } from "../ipc/seed";
 
 export interface ApplicationsStore {
   items: ApplicationView[];
@@ -16,6 +17,7 @@ export interface ApplicationsStore {
   enable(id: number): Promise<EnableReport>;
   disable(id: number): Promise<DisableReport>;
   delete(id: number): Promise<void>;
+  seedDemo(): Promise<SeedReportView>;
 }
 
 export const useApplications = create<ApplicationsStore>((set) => ({
@@ -53,5 +55,11 @@ export const useApplications = create<ApplicationsStore>((set) => ({
   async delete(id) {
     await ipc.applicationDelete(id);
     set((s) => ({ items: s.items.filter((a) => a.id !== id) }));
+  },
+  async seedDemo() {
+    const report = await seedDemo();
+    const items = await ipc.applicationsList();
+    set({ items, loaded: true });
+    return report;
   },
 }));

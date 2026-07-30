@@ -9,6 +9,7 @@ pub mod db;
 pub mod import_export;
 pub mod plugin_registry;
 pub mod rolling_restart;
+pub mod seed;
 pub mod settings_io;
 pub mod tenant;
 
@@ -53,8 +54,8 @@ pub fn run() {
 
             app.manage(database);
 
-            if let Err(e) = audit_seed::seed(app.state::<db::Database>().inner()) {
-                log::warn!("audit seed: {e}");
+            if let Err(e) = seed::seed_demo_db(app.state::<db::Database>().inner()) {
+                log::warn!("demo seed: {e}");
             }
 
             let startup_addr = {
@@ -144,6 +145,7 @@ pub fn run() {
             commands::dashboard_metrics::dashboard_metric_list,
             commands::dashboard_metrics::dashboard_metric_save,
             commands::dashboard_metrics::dashboard_metric_delete,
+            commands::seed::seed_demo,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

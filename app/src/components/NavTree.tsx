@@ -11,6 +11,7 @@ import {
   Power,
   PowerOff,
   ScrollText,
+  Sparkles,
 } from "lucide-react";
 
 import { useApplications } from "../state/applicationsStore";
@@ -62,12 +63,14 @@ export function NavTree() {
   const tabs = useTabs((s) => s.tabs);
   const activeId = useTabs((s) => s.activeId);
   const addr = useConnection((s) => s.addr);
+  const seedDemo = useApplications((s) => s.seedDemo);
 
   const [query, setQuery] = useState("");
   const [adding, setAdding] = useState(false);
   const [draftName, setDraftName] = useState("");
   const [draftTenant, setDraftTenant] = useState("");
   const [expanded, setExpanded] = useState<Record<number, boolean>>({});
+  const [seeding, setSeeding] = useState(false);
   const activeTenant = useTenant((s) => s.tenant);
   const tenantHydrated = useTenant((s) => s.hydrated);
   const refreshTenant = useTenant((s) => s.refresh);
@@ -141,6 +144,18 @@ export function NavTree() {
     setDraftName("");
     setDraftTenant("");
     setAdding(false);
+  };
+
+  const onSeedDemo = async () => {
+    if (seeding) return;
+    setSeeding(true);
+    try {
+      await seedDemo();
+    } catch (e) {
+      console.error("seed demo failed", e);
+    } finally {
+      setSeeding(false);
+    }
   };
 
   return (
@@ -226,11 +241,36 @@ export function NavTree() {
         )}
 
         {filtered.length === 0 && !adding && (
-          <p className="px-2 py-3 text-[11px] text-gray-400">
-            {applications.length === 0
-              ? "No applications yet — click + to add"
-              : "no matches"}
-          </p>
+          <div className="px-2 py-3 space-y-2">
+            {applications.length === 0 ? (
+              <>
+                <p className="text-[11px] text-gray-400">
+                  No applications yet
+                </p>
+                <div className="flex flex-col gap-1">
+                  <button
+                    onClick={() => setAdding(true)}
+                    className="flex items-center gap-1.5 px-2 py-1 text-[11px] rounded border border-gray-200 dark:border-neutral-700 text-gray-700 dark:text-neutral-200 hover:bg-gray-100 dark:hover:bg-neutral-700"
+                  >
+                    <Plus size={10} />
+                    <span>Create</span>
+                  </button>
+                  <button
+                    onClick={() => void onSeedDemo()}
+                    disabled={seeding}
+                    data-testid="nav-seed-demo"
+                    aria-label="Seed demo application"
+                    className="flex items-center gap-1.5 px-2 py-1 text-[11px] rounded border border-accent-blue/30 bg-accent-blue/5 text-accent-blue hover:bg-accent-blue/10 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <Sparkles size={10} />
+                    <span>{seeding ? "Seeding…" : "Seed demo"}</span>
+                  </button>
+                </div>
+              </>
+            ) : (
+              <p className="text-[11px] text-gray-400">no matches</p>
+            )}
+          </div>
         )}
 
         {filtered.map((app) => {

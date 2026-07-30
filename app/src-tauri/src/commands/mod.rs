@@ -17,6 +17,7 @@ pub mod datasources;
 pub mod pipelines;
 pub mod pipeline_dumps;
 pub mod search;
+pub mod seed;
 
 use serde::Serialize;
 

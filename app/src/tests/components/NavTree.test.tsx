@@ -1,11 +1,13 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 const applicationsList = vi.fn();
 const applicationCreate = vi.fn();
 const applicationSetEnabled = vi.fn();
 const applicationDelete = vi.fn();
+
+const seedDemo = vi.fn();
 
 const tabsList = vi.fn();
 const tabOpen = vi.fn();
@@ -28,6 +30,9 @@ vi.mock("../../ipc/applications", () => ({
   applicationCreate,
   applicationSetEnabled,
   applicationDelete,
+}));
+vi.mock("../../ipc/seed", () => ({
+  seedDemo,
 }));
 vi.mock("../../ipc/tabs", () => ({
   tabsList,
@@ -55,6 +60,7 @@ beforeEach(() => {
   applicationCreate.mockReset();
   applicationSetEnabled.mockReset();
   applicationDelete.mockReset();
+  seedDemo.mockReset();
   tabsList.mockReset();
   tabOpen.mockReset();
   tabClose.mockReset();
@@ -77,6 +83,13 @@ beforeEach(() => {
   tenantSet.mockResolvedValue(0);
   clusterProfileList.mockResolvedValue([]);
   clusterProfileMigrateLegacy.mockResolvedValue({ inserted: 0, skipped: [] });
+  seedDemo.mockResolvedValue({
+    created: true,
+    application_id: 1,
+    pipeline_id: 1,
+    datasource_name: "kline-sample",
+    audit_events: 4,
+  });
 
   if (typeof window !== "undefined" && typeof window.confirm === "function") {
     vi.spyOn(window, "confirm").mockReturnValue(true);
@@ -135,5 +148,42 @@ describe("<NavTree>", () => {
     const appsHeading = screen.getByText(/Applications \(0\)/);
     const add = screen.getByRole("button", { name: /add application/i });
     expect(appsHeading.parentElement?.contains(add)).toBe(true);
+  });
+
+  it("renders the Seed demo button in the empty state", async () => {
+    const { NavTree } = await import("../../components/NavTree");
+    withClient(<NavTree />);
+    const seedBtn = await screen.findByTestId("nav-seed-demo");
+    expect(seedBtn).toBeInTheDocument();
+    expect(seedBtn).toHaveTextContent(/Seed demo/);
+  });
+
+  it("clicking the Seed demo button invokes seedDemo and refreshes the list", async () => {
+    applicationsList
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        { id: 1, name: "Demo", enabled: true, display_order: 1, tenant: 0, created_at: 0 },
+      ]);
+    const { NavTree } = await import("../../components/NavTree");
+    withClient(<NavTree />);
+    const seedBtn = await screen.findByTestId("nav-seed-demo");
+    fireEvent.click(seedBtn);
+    await waitFor(() => expect(seedDemo).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(screen.getByText(/Applications \(1\)/)).toBeInTheDocument(),
+    );
+    expect(await screen.findByText("Demo")).toBeInTheDocument();
+  });
+
+  it("does not render the Seed demo button when applications already exist", async () => {
+    applicationsList.mockResolvedValue([
+      { id: 1, name: "alpha", enabled: true, display_order: 1, tenant: 0, created_at: 0 },
+    ]);
+    const { useApplications } = await import("../../state/applicationsStore");
+    await useApplications.getState().refresh();
+    const { NavTree } = await import("../../components/NavTree");
+    withClient(<NavTree />);
+    await screen.findByText("alpha");
+    expect(screen.queryByTestId("nav-seed-demo")).toBeNull();
   });
 });

@@ -17,3 +17,4 @@ export * from "./pipeline_dumps";
 export * from "./plugins";
 export * from "./rolling_restart";
 export * from "./search";
+export * from "./seed";
