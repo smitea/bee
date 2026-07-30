@@ -1,8 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { Suspense, lazy, useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { MoreVertical, MoveRight } from "lucide-react";
 
-import { ClusterTopology } from "./ClusterTopology";
 import {
   dashboardGet,
   dashboardSave,
@@ -14,9 +13,27 @@ import {
   dashboardMetricList,
   type DashboardMetricView,
 } from "../ipc/dashboard_metrics";
-import { LineChart, BarChart, GaugeChart, StatNumber } from "./widgets";
 import type { OhlcPoint, SeriesPoint, KLineMode, KLineInterval } from "./widgets";
-import { MetricConfigDialog } from "./MetricConfigDialog";
+import { LoadingBar } from "./LoadingBar";
+
+const LineChart = lazy(() =>
+  import("./widgets/LineChart").then((m) => ({ default: m.LineChart })),
+);
+const BarChart = lazy(() =>
+  import("./widgets/BarChart").then((m) => ({ default: m.BarChart })),
+);
+const GaugeChart = lazy(() =>
+  import("./widgets/GaugeChart").then((m) => ({ default: m.GaugeChart })),
+);
+const StatNumber = lazy(() =>
+  import("./widgets/StatNumber").then((m) => ({ default: m.StatNumber })),
+);
+const ClusterTopology = lazy(() =>
+  import("./ClusterTopology").then((m) => ({ default: m.ClusterTopology })),
+);
+const MetricConfigDialog = lazy(() =>
+  import("./MetricConfigDialog").then((m) => ({ default: m.MetricConfigDialog })),
+);
 
 interface Props {
   applicationId: number;
@@ -262,16 +279,18 @@ export function DashboardEditor({ applicationId }: Props) {
       </div>
 
       {metricFor !== null && layout !== null && (
-        <MetricConfigDialog
-          applicationId={applicationId}
-          panelId={metricFor}
-          onClose={() => {
-            setMetricFor(null);
-            void qc.invalidateQueries({
-              queryKey: ["dashboard-metrics", applicationId],
-            });
-          }}
-        />
+        <Suspense fallback={<WidgetFallback label="loading dialog" />}>
+          <MetricConfigDialog
+            applicationId={applicationId}
+            panelId={metricFor}
+            onClose={() => {
+              setMetricFor(null);
+              void qc.invalidateQueries({
+                queryKey: ["dashboard-metrics", applicationId],
+              });
+            }}
+          />
+        </Suspense>
       )}
     </div>
   );
@@ -483,50 +502,84 @@ function MetricWidget({ metric }: { metric: DashboardMetricView }) {
   const cfg = parseConfig(metric.chart_config_json);
   if (metric.widget_kind === "line_chart") {
     return (
-      <LineChart
-        points={sampleKlinePoints()}
-        mode={cfg.mode ?? "line"}
-        interval={cfg.interval ?? "1m"}
-      />
+      <Suspense fallback={<WidgetFallback label="loading chart" />}>
+        <LineChart
+          points={sampleKlinePoints()}
+          mode={cfg.mode ?? "line"}
+          interval={cfg.interval ?? "1m"}
+        />
+      </Suspense>
     );
   }
   if (metric.widget_kind === "kline") {
     return (
-      <LineChart
-        points={sampleKlineOhlc()}
-        mode={cfg.mode ?? "candlestick"}
-        interval={cfg.interval ?? "1m"}
-      />
+      <Suspense fallback={<WidgetFallback label="loading chart" />}>
+        <LineChart
+          points={sampleKlineOhlc()}
+          mode={cfg.mode ?? "candlestick"}
+          interval={cfg.interval ?? "1m"}
+        />
+      </Suspense>
     );
   }
   if (metric.widget_kind === "bar_chart") {
-    return <BarChart data={sampleBar()} title={cfg.title} color={cfg.color} />;
+    return (
+      <Suspense fallback={<WidgetFallback label="loading chart" />}>
+        <BarChart data={sampleBar()} title={cfg.title} color={cfg.color} />
+      </Suspense>
+    );
   }
   if (metric.widget_kind === "gauge") {
     return (
-      <GaugeChart
-        value={cfg.value ?? 50}
-        unit={cfg.unit ?? "%"}
-        title={cfg.title}
-        color={cfg.color}
-      />
+      <Suspense fallback={<WidgetFallback label="loading chart" />}>
+        <GaugeChart
+          value={cfg.value ?? 50}
+          unit={cfg.unit ?? "%"}
+          title={cfg.title}
+          color={cfg.color}
+        />
+      </Suspense>
     );
   }
-  return <StatNumber value={cfg.value ?? 0} label={cfg.title ?? metric.source_field} />;
+  return (
+    <Suspense fallback={<WidgetFallback label="loading stat" />}>
+      <StatNumber value={cfg.value ?? 0} label={cfg.title ?? metric.source_field} />
+    </Suspense>
+  );
 }
 
 function StaticWidget({ kind }: { kind: Panel["kind"] }) {
   switch (kind) {
     case "kline":
-      return <LineChart points={sampleKlineOhlc()} mode="candlestick" />;
+      return (
+        <Suspense fallback={<WidgetFallback label="loading kline" />}>
+          <LineChart points={sampleKlineOhlc()} mode="candlestick" />
+        </Suspense>
+      );
     case "active_jobs":
-      return <StatNumber value={42} label="Active Jobs" />;
+      return (
+        <Suspense fallback={<WidgetFallback label="loading stat" />}>
+          <StatNumber value={42} label="Active Jobs" />
+        </Suspense>
+      );
     case "tasks_per_sec":
-      return <GaugeChart value={1.4} min={0} max={5} unit="/s" title="Tasks/sec" />;
+      return (
+        <Suspense fallback={<WidgetFallback label="loading gauge" />}>
+          <GaugeChart value={1.4} min={0} max={5} unit="/s" title="Tasks/sec" />
+        </Suspense>
+      );
     case "cpu":
-      return <GaugeChart value={23} unit="%" title="CPU" />;
+      return (
+        <Suspense fallback={<WidgetFallback label="loading gauge" />}>
+          <GaugeChart value={23} unit="%" title="CPU" />
+        </Suspense>
+      );
     case "pipeline_status":
-      return <StatNumber value={3} label="Running / Failed" unit="/0" />;
+      return (
+        <Suspense fallback={<WidgetFallback label="loading stat" />}>
+          <StatNumber value={3} label="Running / Failed" unit="/0" />
+        </Suspense>
+      );
     case "audit_feed":
       return (
         <p className="text-[10px] text-gray-400 px-2 py-4 text-center">
@@ -536,17 +589,32 @@ function StaticWidget({ kind }: { kind: Panel["kind"] }) {
     case "cluster_topology":
       return (
         <div className="h-full -m-1">
-          <ClusterTopology
-            nodes={[
-              { id: 1, role: "Leader", addr: "127.0.0.1:9001", term: 4, lag: 0 },
-              { id: 2, role: "Follower", addr: "127.0.0.1:9002", term: 4, lag: 1 },
-              { id: 3, role: "Follower", addr: "127.0.0.1:9003", term: 4, lag: 2 },
-            ]}
-            leaderId={1}
-          />
+          <Suspense fallback={<WidgetFallback label="loading topology" />}>
+            <ClusterTopology
+              nodes={[
+                { id: 1, role: "Leader", addr: "127.0.0.1:9001", term: 4, lag: 0 },
+                { id: 2, role: "Follower", addr: "127.0.0.1:9002", term: 4, lag: 1 },
+                { id: 3, role: "Follower", addr: "127.0.0.1:9003", term: 4, lag: 2 },
+              ]}
+              leaderId={1}
+            />
+          </Suspense>
         </div>
       );
   }
+}
+
+function WidgetFallback({ label }: { label: string }) {
+  return (
+    <div
+      className="flex flex-col gap-1 h-full w-full"
+      data-testid="widget-fallback"
+      data-fallback-label={label}
+    >
+      <LoadingBar label={label} />
+      <span className="text-[10px] text-gray-400 text-center">{label}</span>
+    </div>
+  );
 }
 
 function parseConfig(json: string): {

@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { Suspense, lazy, useEffect, useState, type ReactNode } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Cog, Moon, Sun, RefreshCw, X, Pin, PinOff } from "lucide-react";
 
@@ -7,6 +7,7 @@ import { SettingsModal } from "./SettingsModal";
 import { ContextMenu, type ContextMenuItem } from "./ContextMenu";
 import { ActivityBar } from "./ActivityBar";
 import { ConnectionStatus } from "./ConnectionStatus";
+import { LoadingBar } from "./LoadingBar";
 import { useUi } from "../state/store";
 import { useTabs, type TabKind } from "../state/tabsStore";
 import { useApplications } from "../state/applicationsStore";
@@ -14,11 +15,16 @@ import { useConnection } from "../state/connectionStore";
 import { ClusterDashboard } from "../pages/ClusterDashboard";
 import { PipelinesPage } from "../pages/PipelinesPage";
 import { PipelineDetail } from "../pages/PipelineDetail";
-import { PipelineEditor } from "../pages/PipelineEditor";
 import { DataSources } from "../pages/DataSources";
 import { ApplicationOverview } from "../pages/ApplicationOverview";
-import { DashboardPage } from "../pages/DashboardPage";
 import { ActivityPage } from "../pages/ActivityPage";
+
+const DashboardPage = lazy(() =>
+  import("../pages/DashboardPage").then((m) => ({ default: m.DashboardPage })),
+);
+const PipelineEditor = lazy(() =>
+  import("../pages/PipelineEditor").then((m) => ({ default: m.PipelineEditor })),
+);
 
 const TAB_KINDS: ReadonlySet<TabKind> = new Set([
   "cluster",
@@ -222,7 +228,11 @@ function PageTabs() {
         if (!Number.isFinite(id)) {
           return <p className="text-xs text-gray-400">invalid application id</p>;
         }
-        return <DashboardPage applicationId={id} />;
+        return (
+          <Suspense fallback={<LazyFallback label="loading dashboard editor" />}>
+            <DashboardPage applicationId={id} />
+          </Suspense>
+        );
       }
       case "pipeline": {
         const id = Number(active.resource_id);
@@ -232,7 +242,11 @@ function PageTabs() {
         return <PipelineDetail pipelineId={id} />;
       }
       case "pipeline_editor":
-        return <PipelineEditor />;
+        return (
+          <Suspense fallback={<LazyFallback label="loading pipeline editor" />}>
+            <PipelineEditor />
+          </Suspense>
+        );
       case "datasource":
         return <p className="text-xs text-gray-400">datasource detail · coming in a later slice</p>;
       case "activity":
@@ -330,6 +344,19 @@ function PageTabs() {
           onClose={() => setMenu(null)}
         />
       )}
+    </div>
+  );
+}
+
+function LazyFallback({ label }: { label: string }) {
+  return (
+    <div
+      className="flex flex-col gap-2"
+      data-testid="lazy-fallback"
+      data-fallback-label={label}
+    >
+      <LoadingBar label={label} />
+      <span className="text-[10px] text-gray-400">{label}</span>
     </div>
   );
 }

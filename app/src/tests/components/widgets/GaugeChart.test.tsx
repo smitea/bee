@@ -19,12 +19,14 @@ vi.mock("echarts-for-react", () => ({
 
 import {
   GaugeChart,
+} from "../../../components/widgets/GaugeChart";
+import {
   bandColorFor,
   GAUGE_BAND_GREEN,
   GAUGE_BAND_AMBER,
   GAUGE_BAND_RED,
   GAUGE_BAND_NEUTRAL,
-} from "../../../components/widgets/GaugeChart";
+} from "../../../components/widgets/colors";
 
 function readSeriesColor(container: HTMLElement): string | undefined {
   const el = container.querySelector('[data-testid="echarts-mock"]');

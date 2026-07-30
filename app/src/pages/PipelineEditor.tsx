@@ -1,22 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import CodeMirror from "@uiw/react-codemirror";
-import { sql } from "@codemirror/lang-sql";
-import { oneDark } from "@codemirror/theme-one-dark";
-import {
-  ReactFlow,
-  Background,
-  Controls,
-  MiniMap,
-  addEdge,
-  applyEdgeChanges,
-  applyNodeChanges,
-  type Connection,
-  type Edge,
-  type EdgeChange,
-  type Node,
-  type NodeChange,
-} from "@xyflow/react";
-import "@xyflow/react/dist/style.css";
+import { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
 import { Save, X, Play, Download, AlertTriangle } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 
@@ -27,6 +9,14 @@ import { pipelineCreate, pipelineGet, pipelineDelete, type PipelineDefinitionVie
 import { pipelineDumpRecord } from "../ipc/pipeline_dumps";
 import { jobInspect } from "../ipc/cluster";
 import { useConnection } from "../state/connectionStore";
+import { LoadingBar } from "../components/LoadingBar";
+
+const PipelineCodePane = lazy(() =>
+  import("./PipelineCodePane").then((m) => ({ default: m.PipelineCodePane })),
+);
+const PipelineDagPane = lazy(() =>
+  import("./PipelineDagPane").then((m) => ({ default: m.PipelineDagPane })),
+);
 
 interface PipelineDag {
   input?: {
@@ -84,46 +74,6 @@ SELECT 'binance.subscribe' AS input, 'in' AS into;
 SELECT 'indicator_ema' AS handler, ARRAY['in'] AS upstream, 'out' AS into;
 `;
 
-function dagToNodesEdges(dag: PipelineDag, fallback: string): { nodes: Node[]; edges: Edge[] } {
-  const nodes: Node[] = [];
-  const edges: Edge[] = [];
-  const inId = dag.input?.output ?? "in";
-  nodes.push({
-    id: "input",
-    type: "default",
-    position: { x: 40, y: 40 },
-    data: {
-      label: `Input · ${dag.input?.datasource ?? "?"}.${dag.input?.method ?? "?"}`,
-    },
-    style: { background: "#dbeafe", border: "1px solid #3b82f6", borderRadius: 4 },
-  });
-  let y = 120;
-  for (const h of dag.handlers ?? []) {
-    nodes.push({
-      id: h.id,
-      type: "default",
-      position: { x: 240, y },
-      data: { label: `Handler · ${h.id}\n${h.name}` },
-      style: { background: "#fff", border: "1px solid #9ca3af", borderRadius: 4 },
-    });
-    for (const up of h.upstream ?? []) {
-      edges.push({ id: `${up}->${h.id}`, source: up, target: h.id });
-    }
-    y += 80;
-  }
-  const outId = `output-${fallback}`;
-  nodes.push({
-    id: outId,
-    type: "default",
-    position: { x: 480, y: 40 },
-    data: { label: `Output · ${dag.output?.adapter ?? "?"}.${dag.output?.method ?? "?"}` },
-    style: { background: "#dcfce7", border: "1px solid #22c55e", borderRadius: 4 },
-  });
-  const lastUp = dag.output?.upstream ?? inId;
-  edges.push({ id: `${lastUp}->${outId}`, source: lastUp, target: outId });
-  return { nodes, edges };
-}
-
 export function PipelineEditor({ pipelineId }: Props = {}) {
   const openTab = useTabs((s) => s.open);
   const close = useTabs((s) => s.close);
@@ -171,33 +121,25 @@ export function PipelineEditor({ pipelineId }: Props = {}) {
     }
   }, [dagJson]);
 
-  const initial = useMemo(() => dagToNodesEdges(parsed ?? DEFAULT_DAG, "1"), [parsed]);
-  const [nodes, setNodes] = useState<Node[]>(initial.nodes);
-  const [edges, setEdges] = useState<Edge[]>(initial.edges);
-  const initializedRef = useRef(false);
-  useEffect(() => {
-    if (!initializedRef.current) {
-      initializedRef.current = true;
-      return;
+  const onCodeChange = (v: string) => {
+    if (tab === "dag") {
+      setDagJson(v);
+      try {
+        const parsedDag = JSON.parse(v) as PipelineDag;
+        setSqlText(buildSqlFromDag(parsedDag));
+      } catch {}
+    } else {
+      setSqlText(v);
     }
-    const next = dagToNodesEdges(parsed ?? DEFAULT_DAG, "1");
-    setNodes(next.nodes);
-    setEdges(next.edges);
-  }, [parsed]);
+  };
 
-  const onNodesChange = useCallback(
-    (changes: NodeChange[]) => setNodes((nds) => applyNodeChanges(changes, nds)),
-    [],
-  );
-  const onEdgesChange = useCallback(
-    (changes: EdgeChange[]) => setEdges((eds) => applyEdgeChanges(changes, eds)),
-    [],
-  );
-  const onConnect = useCallback(
-    (c: Connection) =>
-      setEdges((eds) => addEdge({ ...c, id: `${c.source}->${c.target}` }, eds)),
-    [],
-  );
+  const onDagChange = (next: PipelineDag) => {
+    const json = JSON.stringify(next, null, 2);
+    setDagJson(json);
+    try {
+      setSqlText(buildSqlFromDag(next));
+    } catch {}
+  };
 
   const onSave = async () => {
     setError(null);
@@ -398,29 +340,13 @@ export function PipelineEditor({ pipelineId }: Props = {}) {
             </button>
           </div>
 
-          {tab === "dag" ? (
-            <CodeMirror
-              value={dagJson}
-              height="380px"
-              theme={theme === "dark" ? oneDark : "light"}
-              extensions={[sql()]}
-              onChange={(v) => {
-                setDagJson(v);
-                try {
-                  const parsedDag = JSON.parse(v) as PipelineDag;
-                  setSqlText(buildSqlFromDag(parsedDag));
-                } catch {}
-              }}
+          <Suspense fallback={<EditorFallback label="loading code editor" />}>
+            <PipelineCodePane
+              value={tab === "dag" ? dagJson : sqlText}
+              onChange={onCodeChange}
+              theme={theme}
             />
-          ) : (
-            <CodeMirror
-              value={sqlText}
-              height="380px"
-              theme={theme === "dark" ? oneDark : "light"}
-              extensions={[sql()]}
-              onChange={(v) => setSqlText(v)}
-            />
-          )}
+          </Suspense>
           {error && (
             <div
               role="alert"
@@ -443,20 +369,30 @@ export function PipelineEditor({ pipelineId }: Props = {}) {
           style={{ height: 460 }}
           data-testid="dag-designer"
         >
-          <ReactFlow
-            nodes={nodes}
-            edges={edges}
-            onNodesChange={onNodesChange}
-            onEdgesChange={onEdgesChange}
-            onConnect={onConnect}
-            fitView
-          >
-            <Background gap={20} />
-            <Controls />
-            <MiniMap pannable zoomable />
-          </ReactFlow>
+          <Suspense fallback={<EditorFallback label="loading dag designer" />}>
+            {parsed ? (
+              <PipelineDagPane dag={parsed} onDagChange={onDagChange} />
+            ) : (
+              <div className="flex items-center justify-center h-full text-xs text-gray-400">
+                invalid DAG JSON
+              </div>
+            )}
+          </Suspense>
         </section>
       </div>
+    </div>
+  );
+}
+
+function EditorFallback({ label }: { label: string }) {
+  return (
+    <div
+      className="flex flex-col gap-2"
+      data-testid="pipeline-editor-fallback"
+      data-fallback-label={label}
+    >
+      <LoadingBar label={label} />
+      <span className="text-[10px] text-gray-400">{label}</span>
     </div>
   );
 }

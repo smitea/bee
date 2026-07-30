@@ -31,3 +31,12 @@ body {
 .dark body {
   color: #f5f5f7;
 }
+
+@keyframes bee-loading-bar {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
