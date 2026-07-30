@@ -15,12 +15,11 @@ import {
   pluginScanDirectory,
   pluginDefaultDir,
   pluginLastDir,
-  pluginSettingsGet,
   pluginSettingsSet,
   type PluginSummary,
-  type PluginSettingView,
 } from "../ipc";
 import { useNavigation } from "../state/navigationStore";
+import { usePluginSettings } from "../state/pluginSettingsStore";
 
 interface Props {
   open: boolean;
@@ -436,6 +435,14 @@ function PluginsSection() {
   }, []);
 
   const all = pluginsQ.data ?? [];
+  const enabledMap = usePluginSettings((s) => s.enabled);
+  const hydrate = usePluginSettings((s) => s.hydrate);
+  const setEnabledStore = usePluginSettings((s) => s.setEnabled);
+
+  useEffect(() => {
+    if (all.length === 0) return;
+    void hydrate(all.map((p) => p.name));
+  }, [all, hydrate]);
 
   const onReload = async () => {
     if (!pluginDir) return;
@@ -452,16 +459,48 @@ function PluginsSection() {
     }
   };
 
+  const isPluginEnabled = (name: string): boolean => {
+    const v = enabledMap[name];
+    return v === undefined ? true : v;
+  };
+  const allEnabled = all.length > 0 && all.every((p) => isPluginEnabled(p.name));
+  const onToggleAll = async () => {
+    const next = !allEnabled;
+    setScanError("");
+    try {
+      for (const p of all) {
+        if (isPluginEnabled(p.name) !== next) {
+          await setEnabledStore(p.name, next);
+        }
+      }
+    } catch (e) {
+      setScanError(String((e as Error).message ?? e));
+    }
+  };
+
   return (
     <section>
       <div className="flex items-center justify-between mb-3">
         <h3 className="text-sm font-medium">Plugins</h3>
-        <span
-          className="text-[10px] text-gray-500 dark:text-neutral-400"
-          data-testid="plugins-count"
-        >
-          {all.length} loaded
-        </span>
+        <div className="flex items-center gap-2">
+          {all.length > 0 && (
+            <button
+              type="button"
+              onClick={() => void onToggleAll()}
+              data-testid="plugin-toggle-all"
+              aria-label={allEnabled ? "Disable all plugins" : "Enable all plugins"}
+              className="px-2 py-0.5 text-[10px] rounded border border-gray-200 dark:border-neutral-700 hover:bg-gray-50 dark:hover:bg-neutral-700"
+            >
+              {allEnabled ? "Disable all" : "Enable all"}
+            </button>
+          )}
+          <span
+            className="text-[10px] text-gray-500 dark:text-neutral-400"
+            data-testid="plugins-count"
+          >
+            {all.length} loaded
+          </span>
+        </div>
       </div>
       <p className="text-[10px] text-gray-500 dark:text-neutral-400 mb-2">
         Plugins loaded via bee_plugin_sdk. Toggle enabled state and edit per-plugin
@@ -533,41 +572,29 @@ function PluginsSection() {
 }
 
 function PluginRow({ plugin }: { plugin: PluginSummary }) {
-  const [setting, setSetting] = useState<PluginSettingView | null>(null);
   const [configDraft, setConfigDraft] = useState<string>("{}");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  useEffect(() => {
-    let cancelled = false;
-    void pluginSettingsGet(plugin.name).then((s) => {
-      if (cancelled) return;
-      if (s) {
-        setSetting(s);
-        setConfigDraft(s.config_json || "{}");
-      } else {
-        setSetting({
-          plugin_name: plugin.name,
-          enabled: true,
-          config_json: "{}",
-          updated_at: 0,
-        });
-        setConfigDraft("{}");
-      }
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [plugin.name]);
+  const enabled = usePluginSettings(
+    (s) => (s.enabled[plugin.name] === undefined ? true : s.enabled[plugin.name]),
+  );
+  const storeConfig = usePluginSettings((s) => s.config[plugin.name]);
+  const setEnabledStore = usePluginSettings((s) => s.setEnabled);
+  const setSettingsFromView = usePluginSettings((s) => s.setSettingsFromView);
 
-  const enabled = setting?.enabled ?? true;
+  useEffect(() => {
+    if (storeConfig !== undefined) {
+      setConfigDraft(storeConfig);
+    }
+  }, [storeConfig]);
 
   const onToggle = async (next: boolean) => {
     setBusy(true);
     setError(null);
     try {
-      const updated = await pluginSettingsSet(plugin.name, next, configDraft);
-      setSetting(updated);
+      const updated = await setEnabledStore(plugin.name, next);
+      setConfigDraft(updated.config_json || "{}");
     } catch (e) {
       setError(String(e));
     } finally {
@@ -587,7 +614,8 @@ function PluginRow({ plugin }: { plugin: PluginSummary }) {
     }
     try {
       const updated = await pluginSettingsSet(plugin.name, enabled, configDraft);
-      setSetting(updated);
+      setSettingsFromView(updated);
+      setConfigDraft(updated.config_json || "{}");
     } catch (e) {
       setError(String(e));
     } finally {
@@ -598,7 +626,11 @@ function PluginRow({ plugin }: { plugin: PluginSummary }) {
   return (
     <li
       data-testid={`plugin-row-${plugin.name}`}
-      className="rounded border border-gray-200 dark:border-neutral-700 p-2 space-y-2"
+      data-enabled={enabled ? "true" : "false"}
+      className={[
+        "rounded border border-gray-200 dark:border-neutral-700 p-2 space-y-2",
+        enabled ? "" : "opacity-50",
+      ].join(" ")}
     >
       <div className="flex items-center gap-2">
         <button
@@ -620,6 +652,14 @@ function PluginRow({ plugin }: { plugin: PluginSummary }) {
         <span className="text-[10px] text-gray-500 dark:text-neutral-400 font-mono">
           v{plugin.version}
         </span>
+        {enabled ? null : (
+          <span
+            data-testid={`plugin-disabled-badge-${plugin.name}`}
+            className="px-1.5 py-0.5 text-[9px] uppercase tracking-wider rounded bg-gray-200 dark:bg-neutral-700 text-gray-600 dark:text-neutral-300"
+          >
+            disabled
+          </span>
+        )}
       </div>
       <div className="text-[10px] text-gray-500 dark:text-neutral-400">
         adapters: {plugin.adapters.join(", ") || "—"}

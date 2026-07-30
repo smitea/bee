@@ -35,6 +35,8 @@ vi.mock("../../ipc/plugins", () => ({
   pluginScanDirectory: mocks.pluginScanDirectory,
   pluginDefaultDir: mocks.pluginDefaultDir,
   pluginLastDir: mocks.pluginLastDir,
+  pluginSettingsGet: mocks.pluginSettingsGet,
+  pluginSettingsSet: mocks.pluginSettingsSet,
 }));
 
 vi.mock("../../ipc/plugin_settings", () => ({

@@ -15,6 +15,5 @@ export * from "./datasource_form_schema";
 export * from "./pipelines";
 export * from "./pipeline_dumps";
 export * from "./plugins";
-export * from "./plugin_settings";
 export * from "./rolling_restart";
 export * from "./search";

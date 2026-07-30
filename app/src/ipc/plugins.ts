@@ -46,3 +46,9 @@ export async function pluginDefaultDir(): Promise<string> {
 export async function pluginLastDir(): Promise<string | null> {
   return invoke<string | null>("plugin_last_dir");
 }
+
+export {
+  pluginSettingsGet,
+  pluginSettingsSet,
+  type PluginSettingView,
+} from "./plugin_settings";
