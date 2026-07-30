@@ -55,6 +55,7 @@ const SECTIONS: { id: SectionId; label: string; description: string }[] = [
 
 export function SettingsModal({ open, onClose }: Props) {
   const [section, setSection] = useState<SectionId>("connection");
+  const cancelAction = useNavigationStoreBack(onClose);
 
   const addr = useConnection((s) => s.addr);
   const setStoreAddr = useConnection((s) => s.setAddr);
@@ -242,10 +243,7 @@ export function SettingsModal({ open, onClose }: Props) {
 
           <div className="mt-auto flex items-center gap-2 justify-end">
             <button
-              onClick={() => {
-                const nav = useNavigationStoreBack(onClose);
-                nav();
-              }}
+              onClick={cancelAction}
               className="px-3 py-1 text-xs rounded border border-gray-200 dark:border-neutral-700"
             >
               Cancel
