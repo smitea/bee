@@ -167,4 +167,82 @@ describe("<DashboardEditor>", () => {
       expect(last.panels.map((p: { id: string }) => p.id)).toEqual(["p2"]);
     });
   });
+
+  it("renders panels with dashed outlines while in edit mode (the default)", async () => {
+    withClient(<DashboardEditor applicationId={1} />);
+    const panel = await screen.findByTestId("panel-kline");
+    expect(panel.className).toMatch(/border-dashed/);
+  });
+
+  it("switches to view mode and renders panels with solid outlines", async () => {
+    withClient(<DashboardEditor applicationId={1} />);
+    await screen.findByTestId("panel-kline");
+    fireEvent.click(screen.getByTestId("toggle-edit"));
+    const panel = screen.getByTestId("panel-kline");
+    expect(panel.className).not.toMatch(/border-dashed/);
+    expect(panel.className).toMatch(/border-gray-200/);
+  });
+
+  it("switches back into edit mode and re-applies the dashed outlines", async () => {
+    withClient(<DashboardEditor applicationId={1} />);
+    const panel = await screen.findByTestId("panel-kline");
+    expect(panel.className).toMatch(/border-dashed/);
+    fireEvent.click(screen.getByTestId("toggle-edit"));
+    expect(panel.className).not.toMatch(/border-dashed/);
+    fireEvent.click(screen.getByTestId("toggle-edit"));
+    expect(panel.className).toMatch(/border-dashed/);
+  });
+
+  it("hides panel resize handles and menu buttons while in view mode", async () => {
+    withClient(<DashboardEditor applicationId={1} />);
+    await screen.findByTestId("panel-kline");
+    expect(screen.getByTestId("panel-menu-kline")).toBeInTheDocument();
+    expect(screen.getByTestId("panel-resize-kline")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("toggle-edit"));
+    expect(screen.queryByTestId("panel-menu-kline")).toBeNull();
+    expect(screen.queryByTestId("panel-resize-kline")).toBeNull();
+  });
+
+  it("opens the MetricConfigDialog when the user picks 'Bind metric' on a panel", async () => {
+    withClient(<DashboardEditor applicationId={1} />);
+    await screen.findByTestId("panel-kline");
+    fireEvent.click(screen.getByTestId("panel-menu-kline"));
+    fireEvent.click(screen.getByTestId("panel-bind-kline"));
+    expect(await screen.findByTestId("metric-config-dialog")).toBeInTheDocument();
+    expect(screen.getByText(/Bind metric · kline/)).toBeInTheDocument();
+  });
+
+  it("persists the layout via dashboard_save when a panel is added", async () => {
+    withClient(<DashboardEditor applicationId={1} />);
+    await screen.findByTestId("dashboard-editor");
+    await waitFor(() => expect(mocks.dashboardSave).toHaveBeenCalled());
+    const callsBefore = mocks.dashboardSave.mock.calls.length;
+
+    const select = await screen.findByTestId("add-panel-select");
+    fireEvent.change(select, { target: { value: "cluster_topology" } });
+
+    await waitFor(() =>
+      expect(mocks.dashboardSave.mock.calls.length).toBeGreaterThan(callsBefore),
+    );
+    const calls = mocks.dashboardSave.mock.calls;
+    const last = JSON.parse(calls[calls.length - 1][1]);
+    expect(last.panels.some((p: { kind: string }) => p.kind === "cluster_topology")).toBe(true);
+  });
+
+  it("persists the layout via dashboard_save when a panel is removed via the context menu", async () => {
+    withClient(<DashboardEditor applicationId={1} />);
+    await screen.findByTestId("panel-kline");
+    await waitFor(() => expect(mocks.dashboardSave).toHaveBeenCalled());
+    const callsBefore = mocks.dashboardSave.mock.calls.length;
+
+    fireEvent.click(screen.getByTestId("panel-menu-kline"));
+    fireEvent.click(screen.getByTestId("panel-remove-kline"));
+
+    await waitFor(() =>
+      expect(mocks.dashboardSave.mock.calls.length).toBeGreaterThan(callsBefore),
+    );
+    const calls = mocks.dashboardSave.mock.calls;
+    const last = JSON.parse(calls[calls.length - 1][1]);
+    expect(last.panels.some((p: { id: string }) => p.id === "kline")).toBe(false);
+  });
 });

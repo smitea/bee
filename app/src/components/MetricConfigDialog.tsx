@@ -39,6 +39,31 @@ const KLINE_INTERVALS: { id: KLineInterval; label: string }[] = [
   { id: "1d", label: "1 day" },
 ];
 
+const STAT_TRENDS = [
+  { id: "up", label: "Up ▲" },
+  { id: "down", label: "Down ▼" },
+  { id: "flat", label: "Flat —" },
+] as const;
+
+type StatTrend = (typeof STAT_TRENDS)[number]["id"];
+
+interface ChartConfig {
+  title?: string;
+  color?: string;
+  unit?: string;
+  mode?: KLineMode;
+  interval?: KLineInterval;
+  xAxisField?: string;
+  xAxisLabel?: string;
+  yAxisField?: string;
+  yAxisLabel?: string;
+  min?: number;
+  max?: number;
+  value?: number;
+  delta?: number;
+  trend?: StatTrend;
+}
+
 export function MetricConfigDialog({ applicationId, panelId, onClose }: Props) {
   const addr = useConnection((s) => s.addr);
   const jobsQ = useQuery({
@@ -55,6 +80,16 @@ export function MetricConfigDialog({ applicationId, panelId, onClose }: Props) {
   const [unit, setUnit] = useState<string>("");
   const [klineMode, setKlineMode] = useState<KLineMode>("candlestick");
   const [klineInterval, setKlineInterval] = useState<KLineInterval>("1m");
+  const [xAxisField, setXAxisField] = useState<string>("");
+  const [xAxisLabel, setXAxisLabel] = useState<string>("");
+  const [yAxisField, setYAxisField] = useState<string>("");
+  const [yAxisLabel, setYAxisLabel] = useState<string>("");
+  const [gaugeMin, setGaugeMin] = useState<string>("0");
+  const [gaugeMax, setGaugeMax] = useState<string>("100");
+  const [gaugeValue, setGaugeValue] = useState<string>("");
+  const [statValue, setStatValue] = useState<string>("");
+  const [statDelta, setStatDelta] = useState<string>("");
+  const [statTrend, setStatTrend] = useState<StatTrend>("flat");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -67,7 +102,7 @@ export function MetricConfigDialog({ applicationId, panelId, onClose }: Props) {
       setSourceField(m.source_field);
       setWidgetKind(m.widget_kind as WidgetKind);
       try {
-        const cfg = JSON.parse(m.chart_config_json);
+        const cfg = JSON.parse(m.chart_config_json) as ChartConfig;
         if (cfg.title) setTitle(String(cfg.title));
         if (cfg.color) setColor(String(cfg.color));
         if (cfg.unit) setUnit(String(cfg.unit));
@@ -82,6 +117,20 @@ export function MetricConfigDialog({ applicationId, panelId, onClose }: Props) {
         ) {
           setKlineInterval(cfg.interval);
         }
+        if (cfg.xAxisField !== undefined) setXAxisField(String(cfg.xAxisField));
+        if (cfg.xAxisLabel !== undefined) setXAxisLabel(String(cfg.xAxisLabel));
+        if (cfg.yAxisField !== undefined) setYAxisField(String(cfg.yAxisField));
+        if (cfg.yAxisLabel !== undefined) setYAxisLabel(String(cfg.yAxisLabel));
+        if (typeof cfg.min === "number") setGaugeMin(String(cfg.min));
+        if (typeof cfg.max === "number") setGaugeMax(String(cfg.max));
+        if (typeof cfg.value === "number") {
+          setGaugeValue(String(cfg.value));
+          setStatValue(String(cfg.value));
+        }
+        if (typeof cfg.delta === "number") setStatDelta(String(cfg.delta));
+        if (cfg.trend === "up" || cfg.trend === "down" || cfg.trend === "flat") {
+          setStatTrend(cfg.trend);
+        }
       } catch {}
     });
     return () => {
@@ -93,19 +142,36 @@ export function MetricConfigDialog({ applicationId, panelId, onClose }: Props) {
     setBusy(true);
     setError(null);
     try {
+      const cfg: ChartConfig = {
+        title,
+        color,
+        unit,
+        mode: klineMode,
+        interval: klineInterval,
+      };
+      if (widgetKind === "bar_chart") {
+        cfg.xAxisField = xAxisField;
+        cfg.xAxisLabel = xAxisLabel;
+        cfg.yAxisField = yAxisField;
+        cfg.yAxisLabel = yAxisLabel;
+      }
+      if (widgetKind === "gauge") {
+        cfg.min = Number(gaugeMin);
+        cfg.max = Number(gaugeMax);
+        cfg.value = gaugeValue === "" ? undefined : Number(gaugeValue);
+      }
+      if (widgetKind === "stat") {
+        cfg.value = statValue === "" ? undefined : Number(statValue);
+        cfg.delta = statDelta === "" ? undefined : Number(statDelta);
+        cfg.trend = statTrend;
+      }
       await dashboardMetricSave(
         applicationId,
         panelId,
         jobId ? Number(jobId) : null,
         sourceField,
         widgetKind,
-        JSON.stringify({
-          title,
-          color,
-          unit,
-          mode: klineMode,
-          interval: klineInterval,
-        }),
+        JSON.stringify(cfg),
       );
       setBusy(false);
       onClose();
@@ -238,6 +304,114 @@ export function MetricConfigDialog({ applicationId, panelId, onClose }: Props) {
                 ))}
               </select>
             </Field>
+          )}
+
+          {widgetKind === "bar_chart" && (
+            <>
+              <Field label="X-Axis Field">
+                <input
+                  aria-label="x axis field"
+                  value={xAxisField}
+                  onChange={(e) => setXAxisField(e.target.value)}
+                  placeholder="label / category"
+                  className="flex-1 px-2 py-1 rounded border border-gray-200 dark:border-neutral-700 bg-white dark:bg-neutral-900 font-mono"
+                />
+              </Field>
+              <Field label="X-Axis Label">
+                <input
+                  aria-label="x axis label"
+                  value={xAxisLabel}
+                  onChange={(e) => setXAxisLabel(e.target.value)}
+                  className="flex-1 px-2 py-1 rounded border border-gray-200 dark:border-neutral-700 bg-white dark:bg-neutral-900"
+                />
+              </Field>
+              <Field label="Y-Axis Field">
+                <input
+                  aria-label="y axis field"
+                  value={yAxisField}
+                  onChange={(e) => setYAxisField(e.target.value)}
+                  placeholder="value / count"
+                  className="flex-1 px-2 py-1 rounded border border-gray-200 dark:border-neutral-700 bg-white dark:bg-neutral-900 font-mono"
+                />
+              </Field>
+              <Field label="Y-Axis Label">
+                <input
+                  aria-label="y axis label"
+                  value={yAxisLabel}
+                  onChange={(e) => setYAxisLabel(e.target.value)}
+                  className="flex-1 px-2 py-1 rounded border border-gray-200 dark:border-neutral-700 bg-white dark:bg-neutral-900"
+                />
+              </Field>
+            </>
+          )}
+
+          {widgetKind === "gauge" && (
+            <>
+              <Field label="Min">
+                <input
+                  aria-label="gauge min"
+                  type="number"
+                  value={gaugeMin}
+                  onChange={(e) => setGaugeMin(e.target.value)}
+                  className="flex-1 px-2 py-1 rounded border border-gray-200 dark:border-neutral-700 bg-white dark:bg-neutral-900 font-mono"
+                />
+              </Field>
+              <Field label="Max">
+                <input
+                  aria-label="gauge max"
+                  type="number"
+                  value={gaugeMax}
+                  onChange={(e) => setGaugeMax(e.target.value)}
+                  className="flex-1 px-2 py-1 rounded border border-gray-200 dark:border-neutral-700 bg-white dark:bg-neutral-900 font-mono"
+                />
+              </Field>
+              <Field label="Value (preview)">
+                <input
+                  aria-label="gauge value"
+                  type="number"
+                  value={gaugeValue}
+                  onChange={(e) => setGaugeValue(e.target.value)}
+                  className="flex-1 px-2 py-1 rounded border border-gray-200 dark:border-neutral-700 bg-white dark:bg-neutral-900 font-mono"
+                />
+              </Field>
+            </>
+          )}
+
+          {widgetKind === "stat" && (
+            <>
+              <Field label="Value (preview)">
+                <input
+                  aria-label="stat value"
+                  type="number"
+                  value={statValue}
+                  onChange={(e) => setStatValue(e.target.value)}
+                  className="flex-1 px-2 py-1 rounded border border-gray-200 dark:border-neutral-700 bg-white dark:bg-neutral-900 font-mono"
+                />
+              </Field>
+              <Field label="Delta">
+                <input
+                  aria-label="stat delta"
+                  type="number"
+                  value={statDelta}
+                  onChange={(e) => setStatDelta(e.target.value)}
+                  className="flex-1 px-2 py-1 rounded border border-gray-200 dark:border-neutral-700 bg-white dark:bg-neutral-900 font-mono"
+                />
+              </Field>
+              <Field label="Trend">
+                <select
+                  aria-label="stat trend"
+                  value={statTrend}
+                  onChange={(e) => setStatTrend(e.target.value as StatTrend)}
+                  className="flex-1 px-2 py-1 rounded border border-gray-200 dark:border-neutral-700 bg-white dark:bg-neutral-900"
+                >
+                  {STAT_TRENDS.map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.label}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            </>
           )}
 
           {error && <div className="text-accent-red">{error}</div>}
