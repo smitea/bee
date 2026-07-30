@@ -1,4 +1,5 @@
 import { useEffect, type ReactNode } from "react";
+import { Cog, Moon, Sun, X, Pin, PinOff } from "lucide-react";
 
 import { NavTree } from "./NavTree";
 import { StatusBar } from "./StatusBar";
@@ -13,11 +14,13 @@ import { PipelineEditor } from "../pages/PipelineEditor";
 import { DataSources } from "../pages/DataSources";
 import { ApplicationOverview } from "../pages/ApplicationOverview";
 import { DashboardPage } from "../pages/DashboardPage";
-import { X, Pin, PinOff } from "lucide-react";
 
 export function AppShell({ children }: { children?: ReactNode }) {
   const settingsOpen = useUi((s) => s.settingsOpen);
   const closeSettings = useUi((s) => s.closeSettings);
+  const openSettings = useUi((s) => s.openSettings);
+  const theme = useUi((s) => s.theme);
+  const toggleTheme = useUi((s) => s.toggleTheme);
 
   const hydrateTabs = useTabs((s) => s.hydrate);
   const hydrateApps = useApplications((s) => s.refresh);
@@ -29,6 +32,25 @@ export function AppShell({ children }: { children?: ReactNode }) {
 
   return (
     <div className="h-full flex flex-col bg-gray-50 dark:bg-neutral-900 text-gray-900 dark:text-neutral-100">
+      <header className="flex items-center h-9 px-3 bg-white dark:bg-neutral-800 border-b border-gray-200 dark:border-neutral-700 text-xs">
+        <div className="flex-1" />
+        <button
+          onClick={openSettings}
+          className="p-1.5 rounded text-gray-500 hover:bg-gray-100 dark:hover:bg-neutral-700"
+          title="Open settings"
+          aria-label="Open settings"
+        >
+          <Cog size={14} />
+        </button>
+        <button
+          onClick={toggleTheme}
+          title={theme === "light" ? "Switch to Dark" : "Switch to Light"}
+          aria-label="Toggle theme"
+          className="ml-1 p-1.5 rounded text-gray-500 hover:bg-gray-100 dark:hover:bg-neutral-700"
+        >
+          {theme === "light" ? <Moon size={14} /> : <Sun size={14} />}
+        </button>
+      </header>
       <div className="flex-1 flex overflow-hidden">
         <aside className="w-64 border-r border-gray-200 dark:border-neutral-700 bg-white dark:bg-neutral-800">
           <NavTree />
