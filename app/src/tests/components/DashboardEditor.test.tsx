@@ -361,4 +361,27 @@ describe("<DashboardEditor>", () => {
     const last = JSON.parse(calls[calls.length - 1][1]);
     expect(last.panels.some((p: { id: string }) => p.id === "kline")).toBe(false);
   });
+
+  it("renders the Pipeline Status panel side-by-side with running (green) and failed (red)", async () => {
+    mocks.dashboardGet.mockResolvedValue({
+      application_id: 1,
+      layout_json: JSON.stringify({
+        panels: [
+          { id: "ps", kind: "pipeline_status", x: 0, y: 0, w: 4, h: 2, title: "Pipeline Status" },
+        ],
+      }),
+      updated_at: 0,
+    });
+    withClient(<DashboardEditor applicationId={1} />);
+    const panel = await screen.findByTestId("panel-ps");
+    expect(panel).toBeInTheDocument();
+    expect(await screen.findByTestId("pipeline-status")).toBeInTheDocument();
+    expect(await screen.findByTestId("pipeline-status-running")).toBeInTheDocument();
+    expect(await screen.findByTestId("pipeline-status-failed")).toBeInTheDocument();
+    const runningValue = screen.getByText("3");
+    const failedValue = screen.getByText("0");
+    expect(runningValue.closest("div")?.className).toMatch(/text-accent-green/);
+    expect(failedValue.closest("div")?.className).toMatch(/text-accent-red/);
+    expect(screen.getByTestId("pipeline-status").className).toMatch(/grid-cols-2/);
+  });
 });

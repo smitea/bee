@@ -28,6 +28,9 @@ const GaugeChart = lazy(() =>
 const StatNumber = lazy(() =>
   import("./widgets/StatNumber").then((m) => ({ default: m.StatNumber })),
 );
+const PipelineStatus = lazy(() =>
+  import("./widgets/PipelineStatus").then((m) => ({ default: m.PipelineStatus })),
+);
 const ClusterTopology = lazy(() =>
   import("./ClusterTopology").then((m) => ({ default: m.ClusterTopology })),
 );
@@ -660,7 +663,7 @@ function StaticWidget({ kind }: { kind: Panel["kind"] }) {
     case "pipeline_status":
       return (
         <Suspense fallback={<WidgetFallback label="loading stat" />}>
-          <StatNumber value={3} label="Running / Failed" unit="/0" />
+          <PipelineStatus running={3} failed={0} />
         </Suspense>
       );
     case "audit_feed":
