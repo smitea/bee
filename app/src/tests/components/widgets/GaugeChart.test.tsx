@@ -147,4 +147,19 @@ describe("<GaugeChart>", () => {
     expect(option.series?.[0]?.progress?.width).toBeGreaterThanOrEqual(18);
     expect(option.series?.[0]?.axisLine?.lineStyle?.width).toBeGreaterThanOrEqual(18);
   });
+
+  it("renders the empty-state placeholder when empty=true", () => {
+    const { container } = render(<GaugeChart value={50} empty />);
+    const empty = container.querySelector('[data-testid="gaugechart-empty"]');
+    expect(empty).not.toBeNull();
+    expect(empty).toHaveTextContent(/No data yet/);
+    expect(empty).toHaveTextContent(/waiting for pipeline rows/i);
+    expect(container.querySelector('[data-testid="echarts-mock"]')).toBeNull();
+  });
+
+  it("renders the gauge when empty is not set (default false)", () => {
+    const { container } = render(<GaugeChart value={50} />);
+    expect(container.querySelector('[data-testid="echarts-mock"]')).toBeInTheDocument();
+    expect(container.querySelector('[data-testid="gaugechart-empty"]')).toBeNull();
+  });
 });

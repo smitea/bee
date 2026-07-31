@@ -11,6 +11,7 @@ export interface GaugeChartProps {
   title?: string;
   height?: number;
   color?: string;
+  empty?: boolean;
 }
 
 export function GaugeChart({
@@ -21,6 +22,7 @@ export function GaugeChart({
   title,
   height = 180,
   color,
+  empty = false,
 }: GaugeChartProps) {
   const option = useMemo(() => {
     const effectiveColor = color ?? bandColorFor(value, min, max);
@@ -59,6 +61,21 @@ export function GaugeChart({
       ],
     };
   }, [value, min, max, unit, title, color]);
+
+  if (empty) {
+    return (
+      <div
+        className="flex flex-col items-center justify-center text-[10px] text-gray-400 gap-1"
+        style={{ height }}
+        data-testid="gaugechart-empty"
+      >
+        <span className="font-medium">No data yet</span>
+        <span className="text-[9px] text-gray-300 dark:text-neutral-500">
+          waiting for pipeline rows…
+        </span>
+      </div>
+    );
+  }
 
   return (
     <ReactECharts

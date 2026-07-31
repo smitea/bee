@@ -81,4 +81,18 @@ describe("<StatNumber>", () => {
     expect(screen.getByText("—")).toBeInTheDocument();
     expect(screen.getByText("Loading…")).toBeInTheDocument();
   });
+
+  it("renders the empty-state placeholder when empty=true", () => {
+    const { container } = render(<StatNumber value={0} label="Active Jobs" empty />);
+    const empty = container.querySelector('[data-testid="statnumber-empty"]');
+    expect(empty).not.toBeNull();
+    expect(empty).toHaveTextContent(/No data yet/);
+    expect(empty).toHaveTextContent(/Active Jobs/);
+  });
+
+  it("renders the value normally when empty is not set (default false)", () => {
+    render(<StatNumber value={42} label="Active Jobs" />);
+    expect(screen.getByText("42")).toBeInTheDocument();
+    expect(screen.queryByText(/No data yet/)).toBeNull();
+  });
 });

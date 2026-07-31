@@ -236,6 +236,89 @@ describe("<DashboardEditor>", () => {
     expect(screen.queryByTestId("panel-resize-kline")).toBeNull();
   });
 
+  it("hides the panel menu trigger by default in edit mode (group-hover only)", async () => {
+    withClient(<DashboardEditor applicationId={1} />);
+    const panel = await screen.findByTestId("panel-kline");
+    const menu = screen.getByTestId("panel-menu-kline");
+    expect(panel.className).toMatch(/group/);
+    expect(menu.className).toMatch(/opacity-0/);
+    expect(menu.className).toMatch(/group-hover:opacity-100/);
+  });
+
+  it("hides the panel resize handle by default in edit mode (group-hover only)", async () => {
+    withClient(<DashboardEditor applicationId={1} />);
+    await screen.findByTestId("panel-kline");
+    const resize = screen.getByTestId("panel-resize-kline");
+    expect(resize.className).toMatch(/opacity-0/);
+    expect(resize.className).toMatch(/group-hover:opacity-100/);
+  });
+
+  it("exposes Move left, Move right, Duplicate, Bind metric, and Remove in the panel menu", async () => {
+    withClient(<DashboardEditor applicationId={1} />);
+    await screen.findByTestId("panel-kline");
+    fireEvent.click(screen.getByTestId("panel-menu-kline"));
+    expect(screen.getByTestId("panel-move-left-kline")).toBeInTheDocument();
+    expect(screen.getByTestId("panel-move-right-kline")).toBeInTheDocument();
+    expect(screen.getByTestId("panel-duplicate-kline")).toBeInTheDocument();
+    expect(screen.getByTestId("panel-bind-kline")).toBeInTheDocument();
+    expect(screen.getByTestId("panel-remove-kline")).toBeInTheDocument();
+  });
+
+  it("swaps the panel order when Move left / Move right are picked from the menu", async () => {
+    withClient(<DashboardEditor applicationId={1} />);
+    await screen.findByTestId("panel-kline");
+    fireEvent.click(screen.getByTestId("panel-menu-active_jobs"));
+    fireEvent.click(screen.getByTestId("panel-move-left-active_jobs"));
+    await waitFor(() => {
+      const calls = mocks.dashboardSave.mock.calls;
+      const last = JSON.parse(calls[calls.length - 1][1]);
+      expect(last.panels.map((p: { id: string }) => p.id)).toEqual([
+        "active_jobs",
+        "kline",
+        "tasks_per_sec",
+      ]);
+    });
+
+    fireEvent.click(screen.getByTestId("panel-menu-active_jobs"));
+    fireEvent.click(screen.getByTestId("panel-move-right-active_jobs"));
+    await waitFor(() => {
+      const calls = mocks.dashboardSave.mock.calls;
+      const last = JSON.parse(calls[calls.length - 1][1]);
+      expect(last.panels.map((p: { id: string }) => p.id)).toEqual([
+        "kline",
+        "active_jobs",
+        "tasks_per_sec",
+      ]);
+    });
+  });
+
+  it("disables Move left on the first panel and Move right on the last panel", async () => {
+    withClient(<DashboardEditor applicationId={1} />);
+    await screen.findByTestId("panel-kline");
+    fireEvent.click(screen.getByTestId("panel-menu-kline"));
+    expect(screen.getByTestId("panel-move-left-kline")).toBeDisabled();
+    expect(screen.getByTestId("panel-move-right-kline")).not.toBeDisabled();
+
+    fireEvent.click(screen.getByTestId("panel-menu-tasks_per_sec"));
+    expect(screen.getByTestId("panel-move-right-tasks_per_sec")).toBeDisabled();
+    expect(screen.getByTestId("panel-move-left-tasks_per_sec")).not.toBeDisabled();
+  });
+
+  it("duplicates a panel via the menu and saves the new layout", async () => {
+    withClient(<DashboardEditor applicationId={1} />);
+    await screen.findByTestId("panel-kline");
+    const callsBefore = mocks.dashboardSave.mock.calls.length;
+    fireEvent.click(screen.getByTestId("panel-menu-kline"));
+    fireEvent.click(screen.getByTestId("panel-duplicate-kline"));
+    await waitFor(() =>
+      expect(mocks.dashboardSave.mock.calls.length).toBeGreaterThan(callsBefore),
+    );
+    const calls = mocks.dashboardSave.mock.calls;
+    const last = JSON.parse(calls[calls.length - 1][1]);
+    const kinds = last.panels.map((p: { kind: string }) => p.kind);
+    expect(kinds.filter((k: string) => k === "kline").length).toBe(2);
+  });
+
   it("opens the MetricConfigDialog when the user picks 'Bind metric' on a panel", async () => {
     withClient(<DashboardEditor applicationId={1} />);
     await screen.findByTestId("panel-kline");

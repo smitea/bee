@@ -7,11 +7,12 @@ export interface StatNumberProps {
   label: string;
   unit?: string;
   trend?: "up" | "down" | "flat";
+  empty?: boolean;
 }
 
 const NARROW_PX = 120;
 
-export function StatNumber({ value, label, unit, trend }: StatNumberProps) {
+export function StatNumber({ value, label, unit, trend, empty = false }: StatNumberProps) {
   const ref = useRef<HTMLDivElement | null>(null);
   const width = useElementWidth(ref);
   const narrow = width > 0 && width < NARROW_PX;
@@ -22,6 +23,21 @@ export function StatNumber({ value, label, unit, trend }: StatNumberProps) {
       : trend === "down"
         ? "text-accent-red"
         : "text-gray-400";
+
+  if (empty) {
+    return (
+      <div
+        ref={ref}
+        className="flex flex-col items-center justify-center h-full px-2 py-1 text-center gap-1"
+        data-narrow={narrow ? "true" : "false"}
+        data-testid="statnumber-empty"
+      >
+        <div className="text-[10px] font-medium text-gray-400">No data yet</div>
+        <div className="text-[9px] text-gray-300 dark:text-neutral-500">{label}</div>
+      </div>
+    );
+  }
+
   return (
     <div
       ref={ref}

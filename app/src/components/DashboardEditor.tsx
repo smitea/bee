@@ -162,6 +162,33 @@ export function DashboardEditor({ applicationId }: Props) {
     void dashboardMetricDelete(applicationId, id).catch(() => {});
   };
 
+  const movePanel = (id: string, dir: "left" | "right") => {
+    if (!layout) return;
+    const idx = layout.panels.findIndex((p) => p.id === id);
+    if (idx === -1) return;
+    const swapWith = dir === "left" ? idx - 1 : idx + 1;
+    if (swapWith < 0 || swapWith >= layout.panels.length) return;
+    const next = [...layout.panels];
+    const a = next[idx]!;
+    const b = next[swapWith]!;
+    next[idx] = b;
+    next[swapWith] = a;
+    void saveLayout({ panels: next });
+  };
+
+  const duplicatePanel = (id: string) => {
+    if (!layout) return;
+    const idx = layout.panels.findIndex((p) => p.id === id);
+    if (idx === -1) return;
+    const src = layout.panels[idx]!;
+    const copy: Panel = {
+      ...src,
+      id: newPanelId(),
+      title: `${src.title} (copy)`,
+    };
+    void saveLayout({ panels: [...layout.panels, copy] });
+  };
+
   const updatePanel = (id: string, patch: Partial<Panel>) => {
     const current = layoutRef.current;
     if (!current) return;
@@ -241,6 +268,10 @@ export function DashboardEditor({ applicationId }: Props) {
             panel={p}
             editing={editing}
             applicationId={applicationId}
+            canMoveLeft={layout.panels.findIndex((x) => x.id === p.id) > 0}
+            canMoveRight={
+              layout.panels.findIndex((x) => x.id === p.id) < layout.panels.length - 1
+            }
             onMove={(dx, dy) => {
               const nx = clamp(p.x + dx, 0, GRID_COLS - p.w);
               const ny = clamp(p.y + dy, 0, GRID_ROWS - p.h);
@@ -253,6 +284,9 @@ export function DashboardEditor({ applicationId }: Props) {
             }}
             onCommit={() => commitPanel(p.id)}
             onRemove={() => removePanel(p.id)}
+            onDuplicate={() => duplicatePanel(p.id)}
+            onMoveLeft={() => movePanel(p.id, "left")}
+            onMoveRight={() => movePanel(p.id, "right")}
             onBindMetric={() => setMetricFor(p.id)}
             menuOpen={menuFor === p.id}
             onMenuToggle={() => setMenuFor(menuFor === p.id ? null : p.id)}
@@ -305,10 +339,15 @@ interface FrameProps {
   panel: Panel;
   editing: boolean;
   applicationId: number;
+  canMoveLeft: boolean;
+  canMoveRight: boolean;
   onMove(dx: number, dy: number): void;
   onResize(dw: number, dh: number): void;
   onCommit(): void;
   onRemove(): void;
+  onDuplicate(): void;
+  onMoveLeft(): void;
+  onMoveRight(): void;
   onBindMetric(): void;
   menuOpen: boolean;
   onMenuToggle(): void;
@@ -318,10 +357,15 @@ function PanelFrame({
   panel,
   editing,
   applicationId,
+  canMoveLeft,
+  canMoveRight,
   onMove,
   onResize,
   onCommit,
   onRemove,
+  onDuplicate,
+  onMoveLeft,
+  onMoveRight,
   onBindMetric,
   menuOpen,
   onMenuToggle,
@@ -381,7 +425,7 @@ function PanelFrame({
       data-testid={`panel-${panel.id}`}
       data-kind={panel.kind}
       className={[
-        "absolute rounded-md border bg-white dark:bg-neutral-800",
+        "group absolute rounded-md border bg-white dark:bg-neutral-800",
         editing
           ? "border-dashed border-accent-blue/60"
           : "border-gray-200 dark:border-neutral-700",
@@ -408,7 +452,7 @@ function PanelFrame({
                 e.stopPropagation();
                 onMenuToggle();
               }}
-              className="p-0.5 rounded hover:bg-gray-100 dark:hover:bg-neutral-700"
+              className="p-0.5 rounded text-gray-400 hover:bg-gray-100 dark:hover:bg-neutral-700 opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity"
             >
               <MoreVertical size={10} />
             </button>
@@ -417,6 +461,44 @@ function PanelFrame({
                 className="absolute right-1 top-5 z-10 rounded-md border border-gray-200 dark:border-neutral-700 bg-white dark:bg-neutral-800 shadow-lg text-xs"
                 onMouseDown={(e) => e.stopPropagation()}
               >
+                <button
+                  type="button"
+                  data-testid={`panel-move-left-${panel.id}`}
+                  disabled={!canMoveLeft}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onMoveLeft();
+                    onMenuToggle();
+                  }}
+                  className="block w-full text-left px-3 py-1.5 hover:bg-gray-100 dark:hover:bg-neutral-700 disabled:opacity-40 disabled:hover:bg-transparent"
+                >
+                  Move left
+                </button>
+                <button
+                  type="button"
+                  data-testid={`panel-move-right-${panel.id}`}
+                  disabled={!canMoveRight}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onMoveRight();
+                    onMenuToggle();
+                  }}
+                  className="block w-full text-left px-3 py-1.5 hover:bg-gray-100 dark:hover:bg-neutral-700 disabled:opacity-40 disabled:hover:bg-transparent"
+                >
+                  Move right
+                </button>
+                <button
+                  type="button"
+                  data-testid={`panel-duplicate-${panel.id}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onDuplicate();
+                    onMenuToggle();
+                  }}
+                  className="block w-full text-left px-3 py-1.5 hover:bg-gray-100 dark:hover:bg-neutral-700"
+                >
+                  Duplicate
+                </button>
                 <button
                   type="button"
                   data-testid={`panel-bind-${panel.id}`}
@@ -454,7 +536,7 @@ function PanelFrame({
           aria-label="Resize"
           data-testid={`panel-resize-${panel.id}`}
           onMouseDown={(e) => onMouseDown(e, "resize")}
-          className="absolute right-0 bottom-0 p-1 text-gray-400 hover:text-accent-blue cursor-se-resize"
+          className="absolute right-0 bottom-0 p-1 text-gray-400 hover:text-accent-blue cursor-se-resize opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity"
         >
           <MoveRight size={10} />
         </button>

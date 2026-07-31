@@ -221,10 +221,14 @@ export function LineChart({
   if (points.length === 0) {
     return (
       <div
-        className="flex items-center justify-center text-[10px] text-gray-400"
+        className="flex flex-col items-center justify-center text-[10px] text-gray-400 gap-1"
         style={{ height }}
+        data-testid="linechart-empty"
       >
-        no data
+        <span className="font-medium">No data yet</span>
+        <span className="text-[9px] text-gray-300 dark:text-neutral-500">
+          waiting for pipeline rows…
+        </span>
       </div>
     );
   }

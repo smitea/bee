@@ -71,6 +71,15 @@ describe("<BarChart>", () => {
     expect(screen.queryByTestId("echarts-mock")).toBeNull();
   });
 
+  it("renders the empty-state placeholder with the documented copy when data is empty", () => {
+    const { container } = render(<BarChart data={[]} />);
+    const empty = container.querySelector('[data-testid="barchart-empty"]');
+    expect(empty).not.toBeNull();
+    expect(empty).toHaveTextContent(/No data yet/);
+    expect(empty).toHaveTextContent(/waiting for pipeline rows/i);
+    expect(container.querySelector('[data-testid="echarts-mock"]')).toBeNull();
+  });
+
   it("disposes cleanly on unmount when data is provided", () => {
     const { unmount } = render(<BarChart data={sampleData} />);
     expect(() => unmount()).not.toThrow();

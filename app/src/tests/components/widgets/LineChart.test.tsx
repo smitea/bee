@@ -56,6 +56,15 @@ describe("<LineChart>", () => {
     expect(mocks.init).not.toHaveBeenCalled();
   });
 
+  it("renders the empty-state placeholder with the documented copy when points is empty", () => {
+    const { container } = render(<LineChart points={[]} mode="candlestick" />);
+    const empty = container.querySelector('[data-testid="linechart-empty"]');
+    expect(empty).not.toBeNull();
+    expect(empty).toHaveTextContent(/No data yet/);
+    expect(empty).toHaveTextContent(/waiting for pipeline rows/i);
+    expect(mocks.init).not.toHaveBeenCalled();
+  });
+
   it("configures the candle chart type as candlestick when mode='candlestick'", () => {
     render(<LineChart points={sampleOhlc} mode="candlestick" />);
     const styles = chartMock.setStyles.mock.calls[0][0];
