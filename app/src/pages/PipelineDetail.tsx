@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { X, AlertTriangle, ChevronRight } from "lucide-react";
+import { X, AlertTriangle, ChevronRight, ArrowLeft, Plus } from "lucide-react";
 
 import { useConnection } from "../state/connectionStore";
 import { useTabs } from "../state/tabsStore";
@@ -34,6 +34,10 @@ export function PipelineDetail({ pipelineId }: { pipelineId: number }) {
 
   const addr = useConnection((s) => s.addr);
   const openTab = useTabs((s) => s.open);
+  const closeTab = useTabs((s) => s.close);
+  const currentTabId = useTabs((s) =>
+    s.tabs.find((t) => t.kind === "pipeline" && t.resource_id === String(pipelineId))?.id ?? null,
+  );
 
   const q = useQuery<PipelineDefinitionView | null>({
     queryKey: ["pipeline", pipelineId],
@@ -45,19 +49,91 @@ export function PipelineDetail({ pipelineId }: { pipelineId: number }) {
     return parsePipeline(q.data);
   }, [q.data]);
 
+  const hadDataRef = useRef(false);
+  useEffect(() => {
+    if (q.data) {
+      hadDataRef.current = true;
+      return;
+    }
+    if (hadDataRef.current && !q.isLoading && !q.error && currentTabId !== null) {
+      void closeTab(currentTabId);
+    }
+  }, [q.data, q.isLoading, q.error, currentTabId, closeTab]);
+
   if (q.isLoading) {
     return <p className="text-xs text-gray-500">loading…</p>;
   }
   if (q.error) {
     return (
-      <div className="flex items-center gap-2 text-sm rounded-md bg-red-50 dark:bg-red-900/20 text-accent-red border border-red-200 dark:border-red-800 p-3">
+      <div
+        role="alert"
+        className="flex items-center gap-2 text-sm rounded-md bg-red-50 dark:bg-red-900/20 text-accent-red border border-red-200 dark:border-red-800 p-3"
+      >
         <AlertTriangle size={14} />
-        Failed to load pipeline: {String(q.error)}
+        <span className="flex-1">Failed to load pipeline: {String(q.error)}</span>
+        <button
+          type="button"
+          onClick={() => {
+            void q.refetch();
+          }}
+          className="px-2 py-1 text-xs rounded border border-red-200 dark:border-red-800 hover:bg-red-100 dark:hover:bg-red-900/30"
+        >
+          Retry
+        </button>
       </div>
     );
   }
   if (!pipeline) {
-    return <p className="text-xs text-gray-500">pipeline not found</p>;
+    const onBackToList = async () => {
+      if (currentTabId !== null) {
+        await closeTab(currentTabId);
+      }
+      await openTab({
+        kind: "application_pipelines",
+        resourceId: null,
+        title: "Pipelines",
+      });
+    };
+    const onCreateNew = () =>
+      openTab({
+        kind: "pipeline_editor",
+        resourceId: null,
+        title: "New Pipeline",
+      });
+    return (
+      <div
+        role="alert"
+        className="max-w-md rounded-lg border border-gray-200 dark:border-neutral-700 bg-white dark:bg-neutral-800 p-5 space-y-3"
+        data-testid="pipeline-not-found"
+      >
+        <h2 className="text-sm font-semibold">Pipeline #{pipelineId} not found</h2>
+        <p className="text-xs text-gray-500 dark:text-neutral-400">
+          It may have been deleted, or the database was reset.
+        </p>
+        <div className="flex items-center gap-2 pt-1">
+          <button
+            type="button"
+            onClick={() => {
+              void onBackToList();
+            }}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md bg-accent-blue text-white hover:bg-accent-blue/90"
+          >
+            <ArrowLeft size={14} />
+            Back to Pipelines list
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              void onCreateNew();
+            }}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md border border-gray-200 dark:border-neutral-700 text-gray-700 dark:text-neutral-200 hover:bg-gray-100 dark:hover:bg-neutral-700"
+          >
+            <Plus size={14} />
+            Create new pipeline
+          </button>
+        </div>
+      </div>
+    );
   }
 
   const handleCrossPipelineRef = async (ref: CrossPipelineRef) => {

@@ -4,12 +4,14 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 
 const mocks = vi.hoisted(() => {
   const openFn = vi.fn();
+  const closeFn = vi.fn();
   return {
     pipelineGet: vi.fn(),
     pipelineList: vi.fn(),
     datasourceList: vi.fn(),
     jobInspect: vi.fn(),
     openFn,
+    closeFn,
     tabOpen: vi.fn(),
   };
 });
@@ -35,7 +37,22 @@ vi.mock("../../ipc/cluster", () => ({
 }));
 
 function makeTabsApi() {
-  return { open: mocks.openFn };
+  const tabs = [
+    {
+      id: 42,
+      kind: "pipeline" as const,
+      resource_id: "7",
+      title: "Pipeline 7",
+      pinned: false,
+      position: 0,
+    },
+  ];
+  return {
+    open: mocks.openFn,
+    close: mocks.closeFn,
+    tabs,
+    activeId: 42,
+  };
 }
 
 vi.mock("../../state/tabsStore", () => ({
@@ -52,12 +69,14 @@ beforeEach(() => {
   mocks.datasourceList.mockReset();
   mocks.jobInspect.mockReset();
   mocks.openFn.mockReset();
+  mocks.closeFn.mockReset();
   mocks.tabOpen.mockReset();
 
   mocks.pipelineList.mockResolvedValue([]);
   mocks.datasourceList.mockResolvedValue([]);
   mocks.jobInspect.mockResolvedValue(null);
   mocks.openFn.mockResolvedValue(undefined);
+  mocks.closeFn.mockResolvedValue(undefined);
   mocks.tabOpen.mockResolvedValue(undefined);
 });
 
@@ -192,5 +211,80 @@ describe("<PipelineDetail>", () => {
     expect(call.kind).toBe("pipeline");
     expect(call.resourceId).toBe("9");
     expect(call.title).toBe("other_pipeline");
+  });
+
+  it("shows a rich empty state when the pipeline is not found", async () => {
+    mocks.pipelineGet.mockResolvedValueOnce(null);
+    const { PipelineDetail } = await import("../../pages/PipelineDetail");
+    withClient(<PipelineDetail pipelineId={7} />);
+    const alert = await screen.findByTestId("pipeline-not-found");
+    expect(alert).toBeInTheDocument();
+    expect(alert).toHaveTextContent(/Pipeline #7 not found/);
+    expect(alert).toHaveTextContent(/deleted.*database was reset/i);
+    expect(
+      screen.getByRole("button", { name: /back to pipelines list/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /create new pipeline/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("'Back to Pipelines list' closes the current tab and opens the Pipelines page", async () => {
+    mocks.pipelineGet.mockResolvedValueOnce(null);
+    const { PipelineDetail } = await import("../../pages/PipelineDetail");
+    withClient(<PipelineDetail pipelineId={7} />);
+    fireEvent.click(await screen.findByRole("button", { name: /back to pipelines list/i }));
+    await waitFor(() => {
+      expect(mocks.closeFn).toHaveBeenCalledWith(42);
+      expect(mocks.openFn).toHaveBeenCalled();
+    });
+    const call = mocks.openFn.mock.calls[0][0];
+    expect(call.kind).toBe("application_pipelines");
+    expect(call.title).toBe("Pipelines");
+  });
+
+  it("'Create new pipeline' opens a pipeline_editor tab", async () => {
+    mocks.pipelineGet.mockResolvedValueOnce(null);
+    const { PipelineDetail } = await import("../../pages/PipelineDetail");
+    withClient(<PipelineDetail pipelineId={7} />);
+    fireEvent.click(await screen.findByRole("button", { name: /create new pipeline/i }));
+    await waitFor(() => expect(mocks.openFn).toHaveBeenCalled());
+    const call = mocks.openFn.mock.calls[0][0];
+    expect(call.kind).toBe("pipeline_editor");
+    expect(call.title).toBe("New Pipeline");
+  });
+
+  it("renders an error alert with a retry button when pipelineGet fails", async () => {
+    mocks.pipelineGet.mockRejectedValueOnce(new Error("boom"));
+    const { PipelineDetail } = await import("../../pages/PipelineDetail");
+    withClient(<PipelineDetail pipelineId={7} />);
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/Failed to load pipeline/);
+    expect(alert).toHaveTextContent(/boom/);
+    const retry = screen.getByRole("button", { name: /retry/i });
+    expect(retry).toBeInTheDocument();
+    mocks.pipelineGet.mockResolvedValueOnce(sample);
+    fireEvent.click(retry);
+    await waitFor(() => expect(mocks.pipelineGet).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText("btc_pipeline")).toBeInTheDocument();
+  });
+
+  it("auto-closes the tab when a previously seen pipeline disappears", async () => {
+    mocks.pipelineGet.mockResolvedValueOnce(sample);
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false, gcTime: 0 } },
+    });
+    const { PipelineDetail } = await import("../../pages/PipelineDetail");
+    render(
+      <QueryClientProvider client={client}>
+        <PipelineDetail pipelineId={7} />
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByText("btc_pipeline")).toBeInTheDocument();
+    mocks.pipelineGet.mockResolvedValueOnce(null);
+    await client.invalidateQueries({ queryKey: ["pipeline", 7] });
+    await waitFor(() => expect(mocks.pipelineGet.mock.calls.length).toBeGreaterThanOrEqual(2));
+    await screen.findByTestId("pipeline-not-found");
+    await waitFor(() => expect(mocks.closeFn).toHaveBeenCalledWith(42));
   });
 });
