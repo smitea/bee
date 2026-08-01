@@ -229,4 +229,59 @@ mod tests {
         assert!(res.is_ok());
         assert_eq!(res.unwrap(), None);
     }
+
+    #[test]
+    fn pipeline_get_returns_seeded_pipeline() {
+        use crate::seed;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("bee-client.sqlite");
+        let db = Database::open(&path).unwrap();
+        seed::seed_demo_db(&db).unwrap();
+
+        let conn = db.lock().unwrap();
+        let listed = db::pipelines::list(&conn).unwrap();
+        assert!(
+            !listed.is_empty(),
+            "first-run seed should create at least one pipeline"
+        );
+        let seeded = listed[0].clone();
+        drop(conn);
+
+        let conn = db.lock().unwrap();
+        let fetched = db::pipelines::get(&conn, seeded.id).unwrap();
+        assert_eq!(
+            fetched.as_ref().map(|p| (p.id, p.name.clone())),
+            Some((seeded.id, seeded.name.clone())),
+            "pipeline_get must return the seeded pipeline for its id"
+        );
+    }
+
+    #[test]
+    fn tab_open_ipc_key_is_camelcase_per_tauri_macro_default() {
+        let camel_lookup_key = "resourceId";
+        let snake_payload = serde_json::json!({
+            "kind": "pipeline",
+            "resource_id": "1",
+            "title": "Btc_line"
+        });
+        assert!(
+            snake_payload.get(camel_lookup_key).is_none(),
+            "Tauri 2 #[tauri::command] defaults to camelCase argument keys; \
+             sending the JS object with snake_case keys ({snake_payload:?}) \
+             means the Rust command receives None for that argument"
+        );
+
+        let camel_payload = serde_json::json!({
+            "kind": "pipeline",
+            "resourceId": "1",
+            "title": "Btc_line"
+        });
+        assert_eq!(
+            camel_payload.get(camel_lookup_key).and_then(|v| v.as_str()),
+            Some("1"),
+            "sending camelCase keys is what the Tauri 2 macro default expects"
+        );
+    }
 }

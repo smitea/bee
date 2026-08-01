@@ -107,13 +107,49 @@ const sample = {
 };
 
 describe("<PipelineDetail>", () => {
-  it("shows the pipeline name and id in the header", async () => {
-    mocks.pipelineGet.mockResolvedValueOnce(sample);
-    const { PipelineDetail } = await import("../../pages/PipelineDetail");
-    withClient(<PipelineDetail pipelineId={7} />);
-    expect(await screen.findByText("btc_pipeline")).toBeInTheDocument();
-    expect(screen.getByText(/#7/)).toBeInTheDocument();
-  });
+    it("shows the pipeline name and id in the header", async () => {
+        mocks.pipelineGet.mockResolvedValueOnce(sample);
+        const { PipelineDetail } = await import("../../pages/PipelineDetail");
+        withClient(<PipelineDetail pipelineId={7} />);
+        expect(await screen.findByText("btc_pipeline")).toBeInTheDocument();
+        expect(screen.getByText(/#7/)).toBeInTheDocument();
+    });
+
+    it("opening a pipeline from the list renders the header with its name", async () => {
+        const { cleanup } = await import("@testing-library/react");
+        const btcLine = { ...sample, name: "Btc_line" };
+        mocks.pipelineList.mockResolvedValueOnce([
+            { id: 7, name: "Btc_line", dag_json: btcLine.dag_json, updated_at: btcLine.updated_at },
+        ]);
+
+        const { PipelinesPage } = await import("../../pages/PipelinesPage");
+        withClient(<PipelinesPage />);
+        fireEvent.click(await screen.findByText("Btc_line"));
+        expect(mocks.openFn).toHaveBeenCalledWith(
+            expect.objectContaining({
+                kind: "pipeline",
+                resourceId: "7",
+                title: "Btc_line",
+            }),
+        );
+        cleanup();
+        mocks.pipelineGet.mockResolvedValue(btcLine);
+
+        const { PipelineDetail } = await import("../../pages/PipelineDetail");
+        const client = new QueryClient({
+            defaultOptions: { queries: { retry: false, gcTime: 0 } },
+        });
+        render(
+            <QueryClientProvider client={client}>
+                <PipelineDetail pipelineId={7} />
+            </QueryClientProvider>,
+        );
+        expect(
+            await screen.findByRole("heading", { name: "Btc_line" }),
+        ).toBeInTheDocument();
+        expect(mocks.pipelineGet).toHaveBeenCalledWith(7);
+    });
+
 
   it("renders the graph in default (Definition) mode", async () => {
     mocks.pipelineGet.mockResolvedValueOnce(sample);
