@@ -159,6 +159,20 @@ describe("<PipelineDetail>", () => {
     expect(screen.getByText(/binance/)).toBeInTheDocument();
   });
 
+  it("renders 未配置 placeholders (not (none)) for an empty pipeline", async () => {
+    mocks.pipelineGet.mockResolvedValueOnce({
+      id: 7,
+      name: "empty_pipeline",
+      dag_json: JSON.stringify({ handlers: [] }),
+      updated_at: 1700000000,
+    });
+    const { PipelineDetail } = await import("../../pages/PipelineDetail");
+    withClient(<PipelineDetail pipelineId={7} />);
+    await screen.findByText("empty_pipeline");
+    expect(screen.getAllByText(/未配置/).length).toBeGreaterThanOrEqual(2);
+    expect(screen.queryByText("(none)")).not.toBeInTheDocument();
+  });
+
   it("clicking a handler opens a side drawer with handler params", async () => {
     mocks.pipelineGet.mockResolvedValueOnce(sample);
     const { PipelineDetail } = await import("../../pages/PipelineDetail");

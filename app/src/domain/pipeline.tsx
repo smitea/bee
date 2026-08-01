@@ -63,11 +63,11 @@ export function parsePipeline(raw: {
 }
 
 function defaultInput(): InputRef {
-  return { datasource: "(none)", method: "subscribe", args: {}, output: "in" };
+  return { datasource: "未配置", method: "subscribe", args: {}, output: "in" };
 }
 
 function defaultOutput(): OutputRef {
-  return { adapter: "(none)", method: "emit", args: {}, upstream: "in" };
+  return { adapter: "未配置", method: "emit", args: {}, upstream: "in" };
 }
 
 interface PipelineGraphProps {
