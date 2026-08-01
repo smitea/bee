@@ -23,6 +23,8 @@ import {
 
 type Mode = "definition" | "runtime";
 
+const LOADING_TIMEOUT_MS = 5000;
+
 export function PipelineDetail({ pipelineId }: { pipelineId: number }) {
   const [mode, setMode] = useState<Mode>("definition");
   const [handlerDrawer, setHandlerDrawer] = useState<HandlerRef | null>(null);
@@ -39,9 +41,13 @@ export function PipelineDetail({ pipelineId }: { pipelineId: number }) {
     s.tabs.find((t) => t.kind === "pipeline" && t.resource_id === String(pipelineId))?.id ?? null,
   );
 
+  const isInvalidId = !Number.isFinite(pipelineId);
+
   const q = useQuery<PipelineDefinitionView | null>({
     queryKey: ["pipeline", pipelineId],
     queryFn: () => pipelineGet(pipelineId),
+    enabled: !isInvalidId,
+    retry: false,
   });
 
   const pipeline: PipelineDefinition | null = useMemo(() => {
@@ -60,17 +66,41 @@ export function PipelineDetail({ pipelineId }: { pipelineId: number }) {
     }
   }, [q.data, q.isLoading, q.error, currentTabId, closeTab]);
 
-  if (q.isLoading) {
+  const [timedOut, setTimedOut] = useState(false);
+  useEffect(() => {
+    if (!q.isLoading) {
+      setTimedOut(false);
+      return;
+    }
+    const t = window.setTimeout(() => setTimedOut(true), LOADING_TIMEOUT_MS);
+    return () => window.clearTimeout(t);
+  }, [q.isLoading]);
+
+  if (isInvalidId) {
+    return (
+      <p
+        className="text-xs text-gray-400"
+        data-testid="pipeline-invalid-id"
+      >
+        invalid pipeline id
+      </p>
+    );
+  }
+
+  if (q.isFetching && !q.data && !q.error && !timedOut) {
     return <p className="text-xs text-gray-500">loading…</p>;
   }
-  if (q.error) {
+  if (q.error || timedOut) {
+    const message = timedOut
+      ? `Pipeline load timed out after ${LOADING_TIMEOUT_MS / 1000}s`
+      : `Failed to load pipeline: ${String(q.error)}`;
     return (
       <div
         role="alert"
         className="flex items-center gap-2 text-sm rounded-md bg-red-50 dark:bg-red-900/20 text-accent-red border border-red-200 dark:border-red-800 p-3"
       >
         <AlertTriangle size={14} />
-        <span className="flex-1">Failed to load pipeline: {String(q.error)}</span>
+        <span className="flex-1">{message}</span>
         <button
           type="button"
           onClick={() => {

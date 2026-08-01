@@ -79,6 +79,7 @@ pub fn pipeline_create(app: AppHandle, name: String, dag_json: String) -> CmdRes
 
 #[tauri::command]
 pub fn pipeline_get(app: AppHandle, id: i64) -> CmdResult<Option<PipelineView>> {
+    eprintln!("pipeline_get: id={id}");
     let db = db_handle(&app)?;
     let conn = db.lock().map_err(CmdError::from)?;
     db::pipelines::get(&conn, id)

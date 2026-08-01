@@ -337,4 +337,58 @@ describe("<PipelineDetail>", () => {
     await screen.findByTestId("pipeline-not-found");
     await waitFor(() => expect(mocks.closeFn).toHaveBeenCalledWith(42));
   });
+
+  it("renders the invalid-id branch (not loading) when pipelineId is not finite", async () => {
+    const { PipelineDetail } = await import("../../pages/PipelineDetail");
+    withClient(<PipelineDetail pipelineId={Number.NaN} />);
+    const el = await screen.findByTestId("pipeline-invalid-id");
+    expect(el).toHaveTextContent(/invalid pipeline id/i);
+    expect(screen.queryByText(/loading/i)).not.toBeInTheDocument();
+    expect(mocks.pipelineGet).not.toHaveBeenCalled();
+  });
+
+  it("shows the loading state only while actively fetching without cached data", async () => {
+    let resolveFn: (v: typeof sample | null) => void = () => {};
+    mocks.pipelineGet.mockReturnValueOnce(
+      new Promise<typeof sample | null>((resolve) => {
+        resolveFn = resolve;
+      }),
+    );
+    const { PipelineDetail } = await import("../../pages/PipelineDetail");
+    withClient(<PipelineDetail pipelineId={7} />);
+    expect(screen.getByText(/loading/i)).toBeInTheDocument();
+    expect(mocks.pipelineGet).toHaveBeenCalledTimes(1);
+    resolveFn(sample);
+    expect(await screen.findByText("btc_pipeline")).toBeInTheDocument();
+    expect(screen.queryByText(/loading/i)).not.toBeInTheDocument();
+  });
+
+  it("does not flash the loading state when a refetch happens with cached data present", async () => {
+    mocks.pipelineGet.mockResolvedValueOnce(sample);
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false, gcTime: 0 } },
+    });
+    const { PipelineDetail } = await import("../../pages/PipelineDetail");
+    render(
+      <QueryClientProvider client={client}>
+        <PipelineDetail pipelineId={7} />
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByText("btc_pipeline")).toBeInTheDocument();
+
+    let resolveRefetch: (v: typeof sample | null) => void = () => {};
+    mocks.pipelineGet.mockReturnValueOnce(
+      new Promise<typeof sample | null>((resolve) => {
+        resolveRefetch = resolve;
+      }),
+    );
+    void client.invalidateQueries({ queryKey: ["pipeline", 7] });
+    await waitFor(() => expect(mocks.pipelineGet.mock.calls.length).toBeGreaterThanOrEqual(2));
+
+    expect(screen.getByText("btc_pipeline")).toBeInTheDocument();
+    expect(screen.queryByText(/loading/i)).not.toBeInTheDocument();
+
+    resolveRefetch(sample);
+    expect(await screen.findByText("btc_pipeline")).toBeInTheDocument();
+  });
 });
