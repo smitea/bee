@@ -132,6 +132,7 @@ pub fn run() {
             commands::pipelines::pipeline_create,
             commands::pipelines::pipeline_get,
             commands::pipelines::pipeline_delete,
+            commands::pipelines::pipeline_deploy,
             commands::pipelines::pipeline_latest_result,
             commands::pipeline_dumps::pipeline_dump_list,
             commands::pipeline_dumps::pipeline_dump_record,

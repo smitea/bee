@@ -37,6 +37,18 @@ export async function pipelineDelete(id: number): Promise<void> {
   await invoke("pipeline_delete", { id });
 }
 
+export async function pipelineDeploy(
+  addr: string,
+  pipelineId: number,
+  dagJson: string,
+): Promise<number> {
+  return invoke<number>("pipeline_deploy", {
+    addr,
+    pipelineId,
+    dagJson,
+  });
+}
+
 export interface PipelineLatestResultView {
   numeric: number;
   label: string;

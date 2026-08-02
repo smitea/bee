@@ -1,12 +1,21 @@
-import { useMemo } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { Plus, Workflow, AlertTriangle, Trash2 } from "lucide-react";
+import { useMemo, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  Plus,
+  Workflow,
+  AlertTriangle,
+  Trash2,
+  Play,
+  CheckCircle2,
+  XCircle,
+} from "lucide-react";
 
 import { useConnection } from "../state/connectionStore";
 import { useTabs } from "../state/tabsStore";
 import {
   pipelineList,
   pipelineDelete,
+  pipelineDeploy,
   listJobs,
   type PipelineDefinitionView,
   type JobSummary,
@@ -44,6 +53,10 @@ const SECTION_ORDER: SectionKey[] = ["queued", "running", "historical", "failed"
 export function PipelinesPage() {
   const openTab = useTabs((s) => s.open);
   const addr = useConnection((s) => s.addr);
+  const queryClient = useQueryClient();
+  const [deployResults, setDeployResults] = useState<
+    Record<number, { kind: "ok"; jobId: number } | { kind: "err"; message: string }>
+  >({});
 
   const jobsQ = useQuery<JobSummary[]>({
     queryKey: ["jobs", addr],
@@ -73,6 +86,31 @@ export function PipelinesPage() {
     if (!confirm(`Delete pipeline #${id}?`)) return;
     await pipelineDelete(id);
     await defsQ.refetch();
+  };
+
+  const deployM = useMutation({
+    mutationFn: async (def: PipelineDefinitionView) => {
+      const jobId = await pipelineDeploy(addr, def.id, def.dag_json);
+      return { def, jobId };
+    },
+    onSuccess: ({ def, jobId }) => {
+      setDeployResults((prev) => ({ ...prev, [def.id]: { kind: "ok", jobId } }));
+      void queryClient.invalidateQueries({ queryKey: ["jobs", addr] });
+    },
+    onError: (err: unknown, def) => {
+      setDeployResults((prev) => ({
+        ...prev,
+        [def.id]: { kind: "err", message: String(err) },
+      }));
+    },
+  });
+
+  const openRuntime = (jobId: number) => {
+    void openTab({
+      kind: "pipeline",
+      resourceId: String(jobId),
+      title: `Job #${jobId}`,
+    });
   };
 
   return (
@@ -113,34 +151,77 @@ export function PipelinesPage() {
             </p>
           ) : (
             <ul className="text-xs space-y-1">
-              {defsQ.data?.map((d) => (
-                <li
-                  key={d.id}
-                  className="flex items-center justify-between px-2 py-1 rounded hover:bg-gray-50 dark:hover:bg-neutral-700/50"
-                >
-                  <button
-                    type="button"
-                    onClick={() =>
-                      void openTab({
-                        kind: "pipeline",
-                        resourceId: String(d.id),
-                        title: d.name,
-                      })
-                    }
-                    className="flex-1 text-left font-mono"
-                  >
-                    {d.name}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void onDelete(d.id)}
-                    aria-label={`delete pipeline ${d.name}`}
-                    className="p-1 rounded text-gray-400 hover:text-accent-red"
-                  >
-                    <Trash2 size={12} />
-                  </button>
-                </li>
-              ))}
+              {defsQ.data?.map((d) => {
+                const isRunning =
+                  deployM.isPending && deployM.variables?.id === d.id;
+                const result = deployResults[d.id];
+                return (
+                  <li key={d.id} className="space-y-1">
+                    <div className="flex items-center justify-between px-2 py-1 rounded hover:bg-gray-50 dark:hover:bg-neutral-700/50">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          void openTab({
+                            kind: "pipeline",
+                            resourceId: String(d.id),
+                            title: d.name,
+                          })
+                        }
+                        className="flex-1 text-left font-mono"
+                      >
+                        {d.name}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => deployM.mutate(d)}
+                        disabled={isRunning}
+                        aria-label={`run pipeline ${d.name}`}
+                        data-testid={`run-${d.id}`}
+                        className="p-1 rounded text-gray-400 hover:text-accent-blue disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {isRunning ? (
+                          <span className="text-[10px]">running…</span>
+                        ) : (
+                          <Play size={12} />
+                        )}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void onDelete(d.id)}
+                        aria-label={`delete pipeline ${d.name}`}
+                        className="p-1 rounded text-gray-400 hover:text-accent-red"
+                      >
+                        <Trash2 size={12} />
+                      </button>
+                    </div>
+                    {result?.kind === "ok" && (
+                      <div
+                        data-testid={`deploy-result-${d.id}`}
+                        className="flex items-center gap-1 px-2 text-[10px] text-accent-green"
+                      >
+                        <CheckCircle2 size={10} />
+                        <span>Job #{result.jobId} deployed</span>
+                        <button
+                          type="button"
+                          onClick={() => openRuntime(result.jobId)}
+                          className="ml-1 underline hover:opacity-80"
+                        >
+                          view
+                        </button>
+                      </div>
+                    )}
+                    {result?.kind === "err" && (
+                      <div
+                        data-testid={`deploy-error-${d.id}`}
+                        className="flex items-center gap-1 px-2 text-[10px] text-accent-red"
+                      >
+                        <XCircle size={10} />
+                        <span className="truncate">{result.message}</span>
+                      </div>
+                    )}
+                  </li>
+                );
+              })}
             </ul>
           )}
         </div>

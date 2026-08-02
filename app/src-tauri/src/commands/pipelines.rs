@@ -101,6 +101,67 @@ pub(crate) async fn ensure_handle_for(addr: &str) -> Result<crate::connection::C
     Ok(connection::ensure_bundle(parsed))
 }
 
+pub(crate) async fn pipeline_deploy_inner(
+    addr: &str,
+    dag_json: &str,
+) -> Result<u32, String> {
+    let handle = ensure_handle_for(addr).await.map_err(|e| e.message)?;
+    let req = bee_control::raft::AdminRequest::Deploy {
+        sql_text: dag_json.to_string(),
+        owner_node: 0,
+    };
+    let rx = handle.call(req).await.map_err(|e| e)?;
+    let resp = rx
+        .await
+        .map_err(|e| format!("recv: {e:?}"))?
+        .map_err(|s| s)?;
+    match resp {
+        bee_control::raft::AdminResponse::DeployAck {
+            job_id,
+            task_ids,
+            error_msg,
+        } => {
+            if !error_msg.is_empty() {
+                return Err(error_msg);
+            }
+            if job_id == 0 {
+                return Err(format!(
+                    "deploy returned job_id=0 with {} tasks",
+                    task_ids.len()
+                ));
+            }
+            Ok(job_id)
+        }
+        other => Err(format!("unexpected: {other:?}")),
+    }
+}
+
+#[tauri::command]
+pub async fn pipeline_deploy(
+    app: AppHandle,
+    addr: String,
+    pipeline_id: i64,
+    dag_json: String,
+) -> CmdResult<u32> {
+    let job_id = pipeline_deploy_inner(&addr, &dag_json).await.map_err(CmdError::from)?;
+    let db = db_handle(&app)?;
+    let conn = db.lock().map_err(CmdError::from)?;
+    let _ = db::audit::record(&conn, db::audit::NewAuditEvent {
+        actor: "user",
+        action: "pipeline.deploy",
+        result: "Success",
+        summary: &format!("Pipeline #{pipeline_id} deployed as job #{job_id}"),
+        resource_kind: Some("pipeline"),
+        resource_id: Some(&pipeline_id.to_string()),
+        application_id: None,
+        correlation_id: None,
+        operation_id: None,
+        nav_kind: Some("pipeline"),
+        nav_resource_id: Some(&job_id.to_string()),
+    });
+    Ok(job_id)
+}
+
 #[tauri::command]
 pub async fn pipeline_latest_result(
     addr: String,
@@ -229,6 +290,64 @@ mod tests {
         ));
         assert!(res.is_ok());
         assert_eq!(res.unwrap(), None);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pipeline_deploy_submits_to_admin_and_returns_job_id() {
+        use std::time::Duration;
+        use bee_control::raft::admin_protocol::AdminRequest;
+        use bee_control::raft::admin_client::AdminClient;
+        use bee_control::test_utils::TestCluster;
+
+        let tc = TestCluster::boot_3_node_with_admin().await;
+        let leader = tc
+            .wait_for_leader(Duration::from_secs(5))
+            .await
+            .expect("cluster must elect a leader within 5s");
+        let leader_addr = tc.admin_addrs[&leader];
+
+        let handle = crate::connection::ensure_bundle(leader_addr);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if matches!(handle.state(), crate::connection::ConnectionState::Connected) {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!(
+                    "connection never reached Connected; last state = {:?}",
+                    handle.state()
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        let sql = "SELECT 1".to_string();
+        let job_id = pipeline_deploy_inner(&leader_addr.to_string(), &sql)
+            .await
+            .expect("pipeline_deploy_inner must succeed");
+
+        assert!(job_id > 0, "deploy must assign a job_id > 0, got {job_id}");
+
+        let mut verify = AdminClient::connect(leader_addr)
+            .await
+            .expect("AdminClient::connect for verify");
+        let resp = verify
+            .call(AdminRequest::JobInspect(job_id))
+            .await
+            .expect("JobInspect must succeed");
+        let detail = match resp {
+            bee_control::raft::AdminResponse::JobDetail(d) => d,
+            other => panic!("expected JobDetail, got {other:?}"),
+        };
+        let detail = detail.unwrap_or_else(|| panic!("JobInspect({job_id}) must return Some"));
+        assert_eq!(detail.job_id, job_id);
+        assert_eq!(detail.tasks.len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pipeline_deploy_inner_returns_error_when_addr_unparseable() {
+        let res = pipeline_deploy_inner("not-an-addr", "SELECT 1").await;
+        assert!(res.is_err(), "unparseable addr must surface an error");
     }
 
     #[test]
