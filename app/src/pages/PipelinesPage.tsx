@@ -20,6 +20,7 @@ import {
   type PipelineDefinitionView,
   type JobSummary,
 } from "../ipc";
+import { errorMessage } from "../lib/errorMessage";
 
 const REFRESH_MS = 5000;
 
@@ -100,7 +101,7 @@ export function PipelinesPage() {
     onError: (err: unknown, def) => {
       setDeployResults((prev) => ({
         ...prev,
-        [def.id]: { kind: "err", message: String(err) },
+        [def.id]: { kind: "err", message: errorMessage(err) },
       }));
     },
   });
@@ -136,7 +137,7 @@ export function PipelinesPage() {
       {(jobsQ.error || defsQ.error) && (
         <div className="flex items-center gap-2 px-3 py-2 text-sm rounded-md bg-red-50 dark:bg-red-900/20 text-accent-red border border-red-200 dark:border-red-800">
           <AlertTriangle size={14} />
-          RPC error: {String(jobsQ.error || defsQ.error)}
+          RPC error: {errorMessage(jobsQ.error || defsQ.error)}
         </div>
       )}
 

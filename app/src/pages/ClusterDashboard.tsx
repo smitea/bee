@@ -20,6 +20,7 @@ import {
   type RollingRestartPlan,
 } from "../ipc";
 import { ClusterTopology, type TopologyNode } from "../components/ClusterTopology";
+import { errorMessage } from "../lib/errorMessage";
 
 const REFRESH_MS = 5000;
 
@@ -117,7 +118,7 @@ export function ClusterDashboard() {
       {(clusterQ.error || jobsQ.error) && (
         <div className="flex items-center gap-2 px-3 py-2 text-sm rounded-md bg-red-50 dark:bg-red-900/20 text-accent-red border border-red-200 dark:border-red-800">
           <AlertTriangle size={14} />
-          RPC error: {String(clusterQ.error || jobsQ.error)}
+          RPC error: {errorMessage(clusterQ.error || jobsQ.error)}
         </div>
       )}
 

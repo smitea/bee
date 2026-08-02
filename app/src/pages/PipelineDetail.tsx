@@ -20,6 +20,7 @@ import {
   type CrossPipelineRef,
   type HandlerRef,
 } from "../domain/pipeline";
+import { errorMessage } from "../lib/errorMessage";
 
 type Mode = "definition" | "runtime";
 
@@ -93,7 +94,7 @@ export function PipelineDetail({ pipelineId }: { pipelineId: number }) {
   if (q.error || timedOut) {
     const message = timedOut
       ? `Pipeline load timed out after ${LOADING_TIMEOUT_MS / 1000}s`
-      : `Failed to load pipeline: ${String(q.error)}`;
+      : `Failed to load pipeline: ${errorMessage(q.error)}`;
     return (
       <div
         role="alert"
