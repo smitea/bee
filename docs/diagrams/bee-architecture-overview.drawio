@@ -64,6 +64,45 @@
         <mxCell id="datasources" value="Datasources&#10;(Providers + Adapters)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontStyle=1;" vertex="1" parent="1">
           <mxGeometry x="780" y="580" width="220" height="80" as="geometry" />
         </mxCell>
+        <mxCell id="edge-user-client" style="endArrow=classic;html=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;rounded=0;" edge="1" parent="1" source="user" target="bee-client">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-client-admin" style="endArrow=classic;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;rounded=0;" edge="1" parent="1" source="bee-client" target="admin-server">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-admin-raft" value="propose" style="endArrow=classic;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;rounded=0;" edge="1" parent="1" source="admin-server" target="raft-cluster">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-raft-control" value="apply" style="endArrow=classic;html=1;exitX=0;exitY=0.5;entryX=1;entryY=0.5;rounded=0;" edge="1" parent="1" source="raft-cluster" target="control-plane">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-raft-kv" value="apply" style="endArrow=classic;html=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;rounded=0;" edge="1" parent="1" source="raft-cluster" target="kv-cluster">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-control-dataplane" value="orphan detection · work-stealing" style="endArrow=classic;html=1;exitX=0.5;exitY=1;entryX=0.25;entryY=0;rounded=0;" edge="1" parent="1" source="control-plane" target="data-plane">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-control-job" value="assign Phase Assignment" style="endArrow=classic;html=1;exitX=0.5;exitY=1;entryX=0.25;entryY=0;rounded=0;" edge="1" parent="1" source="control-plane" target="pipeline-job">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-job-dataplane" value="Phase↔Phase data" style="endArrow=classic;html=1;exitX=1;exitY=0.25;entryX=0.5;entryY=1;rounded=0;" edge="1" parent="1" source="pipeline-job" target="data-plane">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-dataplane-datasources" style="endArrow=classic;html=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;rounded=0;" edge="1" parent="1" source="data-plane" target="datasources">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-datasources-external" style="endArrow=classic;html=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;rounded=0;" edge="1" parent="1" source="datasources" target="external-systems">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-datasources-kv" value="read checkpoints" style="endArrow=classic;html=1;exitX=0.5;exitY=0;entryX=0.5;entryY=1;rounded=0;" edge="1" parent="1" source="datasources" target="kv-cluster">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-kv-datasources" value="write offsets" style="endArrow=classic;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;rounded=0;" edge="1" parent="1" source="kv-cluster" target="datasources">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-plugins-cluster" value="load at startup" style="endArrow=classic;html=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;rounded=0;" edge="1" parent="1" source="plugins-dir" target="cluster-boundary">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
       </root>
     </mxGraphModel>
   </diagram>
