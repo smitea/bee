@@ -7,7 +7,7 @@ Hand-authored architecture and flow diagrams for Bee. This folder currently hold
 | File | Purpose |
 |---|---|
 | `bee-architecture-overview.drawio` | One-page overview of Bee's subsystems and their relationships. The source-of-truth diagram. |
-| `../CONTEXT.md` (in repo root) | The prose vocabulary this diagram is anchored to. |
+| `../../CONTEXT.md` (in repo root) | The prose vocabulary this diagram is anchored to. |
 | `../../scripts/validate-drawio.py` | Validates every `.drawio` file in this folder for structural correctness. |
 
 ## How to open the diagram
@@ -29,6 +29,8 @@ The Draw.io MCP server lets an AI assistant in opencode call tools that mutate t
 2. In Draw.io's menu, go to *Extras → Enable MCP Server*. This starts a local WebSocket server (default port `6006`).
 3. Confirm `~/.config/opencode/opencode.jsonc` has the `mcp.drawio` block that registers `@hediet/drawio-mcp` (see the spec at `../superpowers/specs/2026-08-12-bee-architecture-diagram-design.md`).
 4. Restart opencode so the MCP server is registered, then ask the AI to read or edit the diagram. The AI calls tools such as `add_shape`, `add_connection`, `read_diagram`, `search_diagram`, `apply_template`; Draw.io updates in real time.
+
+Before editing, confirm the package name resolves: run `npm view @hediet/drawio-mcp name version`. If that returns 404, try `npm view drawio-mcp name version` and `npm view @hediet/drawio-mcp-server name version` in that order; substitute the resolving name in the `args` list inside `opencode.jsonc`. The four steps above assume the resolved name is `npx -y @hediet/drawio-mcp`.
 
 If the AI's tool calls time out with `connection refused`, the Draw.io MCP server is not enabled — return to step 2.
 
