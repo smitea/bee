@@ -22,3 +22,9 @@
 /volumes/*/plugins/*.so
 /volumes/*/plugins/*.dylib
 /volumes/*/plugins/*.dll
+
+# Python bytecode cache — emitted by `python3 scripts/validate-drawio.py` and any
+# future Python tooling. Source files (.py) stay tracked.
+/__pycache__/
+*.pyc
+*.pyo
