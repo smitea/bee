@@ -50,16 +50,15 @@ Append to `~/.config/opencode/opencode.jsonc` without touching the existing `plu
   "plugin": ["superpowers@git+https://github.com/obra/superpowers.git"],
   "mcp": {
     "drawio": {
-      "type": "stdio",
-      "command": "npx",
-      "args": ["-y", "@hediet/drawio-mcp"],
+      "type": "local",
+      "command": ["npx", "-y", "drawio-mcp"],
       "enabled": true
     }
   }
 }
 ```
 
-The MCP server runs on demand via `npx`; it is only invoked when the AI calls a Draw.io tool. The official package name (`@hediet/drawio-mcp`) will be verified against the npm registry at implementation time; if that name is not available, the validated replacement (likely `drawio-mcp` or `@hediet/drawio-mcp-server`) will be substituted and the README updated accordingly.
+The MCP server runs on demand via `npx`; it is only invoked when the AI calls a Draw.io tool. The actual package name is `drawio-mcp` (verified against the npm registry; `@hediet/drawio-mcp` returns 404). opencode's MCP `type` is `"local"` (not `"stdio"`) and `command` is a single string array (no separate `args` field) — verified against the opencode schema at `https://opencode.ai/docs/mcp-servers`.
 
 ## Diagram contents
 
@@ -137,7 +136,7 @@ The first deliverable is the on-disk `.drawio` file. The MCP path is not invoked
 ```
 ┌─────────────────────────┐    WebSocket    ┌──────────────────────────┐
 │ OpenCode (AI)           │◄───────────────►│ Draw.io (browser/desktop)│
-│ + @hediet/drawio-mcp    │   MCP over stdio│ Extras → Enable MCP      │
+│ + drawio-mcp            │   MCP over stdio│ Extras → Enable MCP      │
 │ (stdio MCP server)      │                 │ (built-in WS server)     │
 └─────────────────────────┘                 └──────────────────────────┘
 ```
@@ -207,7 +206,7 @@ Optional (deferred): PNG export via the `drawio` CLI for README embedding. Not i
 - [ ] `python3 scripts/validate-drawio.py docs/diagrams/bee-architecture-overview.drawio` exits 0.
 - [ ] `docs/diagrams/README.md` exists and covers: the four-step MCP edit flow, three direct-open paths, the version conventions, and the package-name verification step.
 - [ ] `scripts/validate-drawio.py` exists and runs without external dependencies beyond the Python standard library.
-- [ ] `~/.config/opencode/opencode.jsonc` contains an `mcp.drawio` section with `command = "npx"` and `args = ["-y", "@hediet/drawio-mcp"]` (or the verified equivalent).
+- [ ] `~/.config/opencode/opencode.jsonc` contains an `mcp.drawio` section with `type = "local"` and `command = ["npx", "-y", "drawio-mcp"]` (the opencode MCP schema, verified against `https://opencode.ai/docs/mcp-servers`).
 - [ ] The diagram contains a cell whose label text matches each of the box names listed in §"Diagram contents" (validator-enforced by keyword check; keywords: `User`, `Plugins`, `Bee Client`, `AdminServer`, `Control Plane`, `Raft Cluster`, `KV Cluster`, `Data Plane`, `Pipeline Job`, `Phase`, `Handler`, `Datasources`, `External Systems`).
 - [ ] Every edge's `source` and `target` reference a valid existing cell (validator-enforced).
 - [ ] A comment cell at the top of the diagram records `Last synced with CONTEXT.md on 2026-08-12`.

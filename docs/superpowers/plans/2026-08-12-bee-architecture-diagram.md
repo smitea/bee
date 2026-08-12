@@ -4,9 +4,9 @@
 
 **Goal:** Produce a hand-authored Draw.io `.drawio` XML file at `docs/diagrams/bee-architecture-overview.drawio` containing Bee's high-level architecture overview, validated by a structural-checker script, with usage docs and an MCP server config wired into opencode for future AI-assisted edits.
 
-**Architecture:** Pure documentation deliverable. No Rust / TypeScript / CI changes. Three new artifacts: a `.drawio` XML file authored by hand against the §"Diagram contents" list in the spec, a stdlib-only Python validator (`scripts/validate-drawio.py`) that asserts XML well-formedness + Draw.io structure + required-keyword presence + edge integrity, and a README explaining three ways to open the file and four steps to enable MCP-based editing. A single edit to `~/.config/opencode/opencode.jsonc` (outside the repo) registers `@hediet/drawio-mcp`.
+**Architecture:** Pure documentation deliverable. No Rust / TypeScript / CI changes. Three new artifacts: a `.drawio` XML file authored by hand against the §"Diagram contents" list in the spec, a stdlib-only Python validator (`scripts/validate-drawio.py`) that asserts XML well-formedness + Draw.io structure + required-keyword presence + edge integrity, and a README explaining three ways to open the file and four steps to enable MCP-based editing. A single edit to `~/.config/opencode/opencode.jsonc` (outside the repo) registers `drawio-mcp`.
 
-**Tech Stack:** Draw.io XML (`.drawio`) — the native `mxfile` / `diagram` / `mxGraphModel` schema, which is plain UTF-8 XML. Python 3 standard library (`xml.etree.ElementTree`, `collections.Counter`, `pathlib`). `xmllint` (already at `/usr/bin/xmllint`) as an optional secondary well-formedness check. `@hediet/drawio-mcp` (npm) launched via `npx` from opencode's MCP registry.
+**Tech Stack:** Draw.io XML (`.drawio`) — the native `mxfile` / `diagram` / `mxGraphModel` schema, which is plain UTF-8 XML. Python 3 standard library (`xml.etree.ElementTree`, `collections.Counter`, `pathlib`). `xmllint` (already at `/usr/bin/xmllint`) as an optional secondary well-formedness check. `drawio-mcp` (npm) launched via `npx` from opencode's MCP registry.
 
 **Reference docs:**
 - Design: `docs/superpowers/specs/2026-08-12-bee-architecture-diagram-design.md`
@@ -26,7 +26,7 @@
 
 | Path | Responsibility |
 |---|---|
-| `docs/diagrams/bee-architecture-overview.drawio` | The hand-authored diagram. mxfile root, 1 diagram, 17 cells (4 external actors + cluster boundary + 5 internal regions + 1 representative Pipeline Job container + 3 Phases + 1 Handler + 1 comment cell), 13 edges. |
+| `docs/diagrams/bee-architecture-overview.drawio` | The hand-authored diagram. mxfile root, 1 diagram, 19 `<mxCell>` entries in the user's `<root>` (2 standard root cells `id="0"`/`id="1"` + 17 visible cells: 4 external actors + 1 cluster boundary + 6 internal regions [AdminServer, Control Plane, Raft Cluster, KV Cluster, Data Plane, Pipeline Job] + 3 Phases + 1 Handler + 1 comment cell), 13 edges. |
 | `docs/diagrams/README.md` | How to open the file (3 paths), how to enable MCP-based editing (4 steps), version conventions (commit prefix, sync rule, last-synced date). |
 | `scripts/validate-drawio.py` | Stdlib-only Python validator. Exits 0 on success, non-zero on failure with a clear stderr message. Catches: XML parse errors, wrong root element, missing `<diagram>`/`<mxGraphModel>`, duplicate cell IDs, edge source/target not in cell-id set, total cell count < 10, missing required keywords. |
 
@@ -34,7 +34,7 @@
 
 | Path | Change |
 |---|---|
-| `~/.config/opencode/opencode.jsonc` | Append an `mcp.drawio` section registering `@hediet/drawio-mcp` via `npx`. Existing `plugin` field untouched. |
+| `~/.config/opencode/opencode.jsonc` | Append an `mcp.drawio` section registering `drawio-mcp` via `npx` (opencode `type: "local"` + `command: ["npx", "-y", "drawio-mcp"]`). Existing `plugin` field untouched. |
 
 **Unchanged (deliberately):** `Cargo.toml`, `crates/*`, `app/*`, `tests/*`, `.github/*`, `docker/*`, `docker-compose.yml`, `Dockerfile*`, `.gitignore`, CI workflows, `CONTEXT.md`, `README.md`.
 
@@ -477,7 +477,7 @@ The Draw.io MCP server lets an AI assistant in opencode call tools that mutate t
 
 1. Open Draw.io (browser or desktop).
 2. In Draw.io's menu, go to *Extras → Enable MCP Server*. This starts a local WebSocket server (default port `6006`).
-3. Confirm `~/.config/opencode/opencode.jsonc` has the `mcp.drawio` block that registers `@hediet/drawio-mcp` (see the spec at `../superpowers/specs/2026-08-12-bee-architecture-diagram-design.md`).
+3. Confirm `~/.config/opencode/opencode.jsonc` has the `mcp.drawio` block that registers `drawio-mcp` (see the spec at `../superpowers/specs/2026-08-12-bee-architecture-diagram-design.md`).
 4. Restart opencode so the MCP server is registered, then ask the AI to read or edit the diagram. The AI calls tools such as `add_shape`, `add_connection`, `read_diagram`, `search_diagram`, `apply_template`; Draw.io updates in real time.
 
 If the AI's tool calls time out with `connection refused`, the Draw.io MCP server is not enabled — return to step 2.
@@ -512,7 +512,7 @@ git commit -m "docs(diagrams): README with open paths, MCP setup, verify steps"
 
 ---
 
-## Task 6: Register `@hediet/drawio-mcp` in opencode
+## Task 6: Register `drawio-mcp` in opencode
 
 **Files:**
 - Edit: `~/.config/opencode/opencode.jsonc` (outside this repo)
@@ -526,9 +526,11 @@ npm view @hediet/drawio-mcp name version
 
 Expected stdout (approximate; version will vary):
 ```
-@hediet/drawio-mcp
-0.5.x
+drawio-mcp
+1.6.x
 ```
+
+(As of 2026-08, `npm view @hediet/drawio-mcp` returns 404; `npm view drawio-mcp` resolves to v1.6.0. The plan initially assumed `@hediet/drawio-mcp`, but that name is not published. Use `drawio-mcp` from the start.)
 
 If the command fails with `npm ERR! 404 Not Found`, the package has been renamed. Try these fallbacks in order until one resolves:
 
@@ -557,16 +559,15 @@ Open the file in your editor and append an `mcp` sibling to the existing `plugin
   "plugin": ["superpowers@git+https://github.com/obra/superpowers.git"],
   "mcp": {
     "drawio": {
-      "type": "stdio",
-      "command": "npx",
-      "args": ["-y", "@hediet/drawio-mcp"],
+      "type": "local",
+      "command": ["npx", "-y", "drawio-mcp"],
       "enabled": true
     }
   }
 }
 ```
 
-If `<package-name>` from step 1 was not `@hediet/drawio-mcp`, substitute it inside `args`. Do not change the `plugin` field. Do not change any other field.
+(Per opencode's actual MCP schema: `type` is `"local"` not `"stdio"`, and `command` is a single string array with no separate `args` field. Verified at `https://opencode.ai/docs/mcp-servers`.) The actual npm package name is `drawio-mcp` (verified via `npm view drawio-mcp name version` → v1.6.0); the plan's preferred `@hediet/drawio-mcp` returns 404 on the npm registry. Do not change the `plugin` field. Do not change any other field.
 
 - [ ] **Step 4: Validate the JSONC is still well-formed JSON**
 
@@ -640,7 +641,7 @@ Task 7 produces no file changes. All deliverables were committed in Tasks 1–5.
 | Validator exits 0 | Tasks 3/4 (Steps) + Task 7 |
 | `README.md` exists with all four sections | Task 5 |
 | Validator is stdlib-only | Task 1 (full source visible; no third-party imports) |
-| `opencode.jsonc` has `mcp.drawio` with `npx -y @hediet/drawio-mcp` | Task 6 |
+| `opencode.jsonc` has `mcp.drawio` with `type: "local"` and `command: ["npx", "-y", "drawio-mcp"]` | Task 6 |
 | Diagram contains all 13 keywords | Task 3 (validator enforces) |
 | Every edge's source/target resolves | Task 4 (validator enforces) |
 | Comment cell records `Last synced ... 2026-08-12` | Task 3 (`comment-sync` cell) |

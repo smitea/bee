@@ -27,10 +27,10 @@ The Draw.io MCP server lets an AI assistant in opencode call tools that mutate t
 
 1. Open Draw.io (browser or desktop).
 2. In Draw.io's menu, go to *Extras → Enable MCP Server*. This starts a local WebSocket server (default port `6006`).
-3. Confirm `~/.config/opencode/opencode.jsonc` has the `mcp.drawio` block that registers `drawio-mcp` (see the spec at `../../superpowers/specs/2026-08-12-bee-architecture-diagram-design.md`).
+3. Confirm `~/.config/opencode/opencode.jsonc` has the `mcp.drawio` block that registers `drawio-mcp` (see the spec at `../superpowers/specs/2026-08-12-bee-architecture-diagram-design.md`).
 4. Restart opencode so the MCP server is registered, then ask the AI to read or edit the diagram. The AI calls tools such as `add_shape`, `add_connection`, `read_diagram`, `search_diagram`, `apply_template`; Draw.io updates in real time.
 
-Before editing, confirm the package name resolves: run `npm view drawio-mcp name version`. If that returns 404, try `npm view @hediet/drawio-mcp name version` and `npm view @hediet/drawio-mcp-server name version` in that order; substitute the resolving name in the `args` array inside `opencode.jsonc`. The four steps above assume the resolved name is `npx -y drawio-mcp`.
+Before editing, confirm the package name resolves: run `npm view drawio-mcp name version`. If that returns 404, try `npm view @hediet/drawio-mcp name version` and `npm view @hediet/drawio-mcp-server name version` in that order; substitute the resolving name in the `command` array inside `opencode.jsonc`. The four steps above assume the resolved name is `npx -y drawio-mcp`.
 
 If the AI's tool calls time out with `connection refused`, the Draw.io MCP server is not enabled — return to step 2.
 
